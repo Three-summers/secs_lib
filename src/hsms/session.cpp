@@ -16,7 +16,7 @@ namespace {
 constexpr std::uint16_t kRspOk = 0;
 constexpr std::uint16_t kRspReject = 1;
 
-}  // namespace
+}  // 匿名命名空间
 
 /*
  * HSMS::Session 的协程并发模型（便于理解“为什么要有 pending_/Event/reader_loop_”）：
@@ -522,4 +522,4 @@ asio::awaitable<std::error_code> Session::async_wait_selected(
   co_return core::make_error_code(core::errc::cancelled);
 }
 
-}  // namespace secs::hsms
+}  // 命名空间 secs::hsms

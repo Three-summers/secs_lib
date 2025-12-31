@@ -12,7 +12,7 @@ using bytes_view = secs::core::bytes_view;
 using mutable_bytes_view = secs::core::mutable_bytes_view;
 
 /**
- * @brief SECS-II 数据项的 6-bit 格式码（SEMI E5）。
+ * @brief SECS-II 数据项的 6 位格式码（SEMI E5）。
  *
  * 编码时会写入一个“格式字节”：
  * - 高 6 位：format_code
@@ -40,5 +40,4 @@ enum class format_code : std::uint8_t {
 
 inline constexpr std::size_t kMaxLength = 0x00FF'FFFFu;  // 3 字节长度字段最大值
 
-}  // namespace secs::ii
-
+}  // 命名空间 secs::ii

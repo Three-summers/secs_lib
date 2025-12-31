@@ -72,5 +72,4 @@ class MemoryLink final {
   static std::pair<Endpoint, Endpoint> create(asio::any_io_executor ex);
 };
 
-}  // namespace secs::secs1
-
+}  // 命名空间 secs::secs1

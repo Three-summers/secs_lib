@@ -1,9 +1,61 @@
 #include "secs/sml/runtime.hpp"
 
+#include <cmath>
 #include <charconv>
-#include <cstdlib>
+#include <limits>
 
 namespace secs::sml {
+
+namespace {
+
+[[nodiscard]] bool parse_sf(std::string_view name, std::uint8_t& stream, std::uint8_t& function) noexcept {
+  if (name.size() < 4) {
+    return false;
+  }
+  if (name[0] != 'S' && name[0] != 's') {
+    return false;
+  }
+
+  const auto f_pos = name.find_first_of("Ff");
+  if (f_pos == std::string_view::npos || f_pos < 2) {
+    return false;
+  }
+
+  int s = 0;
+  int f = 0;
+  const auto* s_begin = name.data() + 1;
+  const auto* s_end = name.data() + f_pos;
+  auto [s_ptr, s_ec] = std::from_chars(s_begin, s_end, s);
+  if (s_ec != std::errc{} || s_ptr != s_end) {
+    return false;
+  }
+
+  const auto* f_begin = name.data() + f_pos + 1;
+  const auto* f_end = name.data() + name.size();
+  auto [f_ptr, f_ec] = std::from_chars(f_begin, f_end, f);
+  if (f_ec != std::errc{} || f_ptr != f_end) {
+    return false;
+  }
+
+  if (s < 0 || s > 127 || f < 0 || f > 255) {
+    return false;
+  }
+  stream = static_cast<std::uint8_t>(s);
+  function = static_cast<std::uint8_t>(f);
+  return true;
+}
+
+[[nodiscard]] bool float_almost_equal(float a, float b) noexcept {
+  constexpr float kAbsTol = 0.0001f;
+  return std::fabs(a - b) <= kAbsTol;
+}
+
+[[nodiscard]] bool double_almost_equal(double a, double b) noexcept {
+  constexpr double kAbsTol = 0.0001;
+  return std::fabs(a - b) <= kAbsTol;
+}
+
+}  // 匿名命名空间
 
 std::error_code Runtime::load(std::string_view source) noexcept {
   auto result = parse_sml(source);
@@ -43,7 +95,7 @@ void Runtime::build_index() noexcept {
 }
 
 const MessageDef* Runtime::get_message(std::string_view name) const noexcept {
-  auto it = name_index_.find(std::string(name));
+  auto it = name_index_.find(name);
   if (it != name_index_.end()) {
     return &document_.messages[it->second];
   }
@@ -88,22 +140,7 @@ bool Runtime::match_condition(const Condition& cond, std::uint8_t stream,
 
   // 尝试解析为 SxFy
   std::uint8_t cond_stream = 0, cond_function = 0;
-  bool is_sf = false;
-
-  std::string_view name = cond.message_name;
-  if (name.size() >= 4 && (name[0] == 'S' || name[0] == 's')) {
-    std::size_t f_pos = name.find_first_of("Ff");
-    if (f_pos != std::string_view::npos && f_pos >= 2) {
-      int s = 0, f = 0;
-      auto [ptr1, ec1] = std::from_chars(name.data() + 1, name.data() + f_pos, s);
-      auto [ptr2, ec2] = std::from_chars(name.data() + f_pos + 1, name.data() + name.size(), f);
-      if (ec1 == std::errc{} && ec2 == std::errc{}) {
-        cond_stream = static_cast<std::uint8_t>(s);
-        cond_function = static_cast<std::uint8_t>(f);
-        is_sf = true;
-      }
-    }
-  }
+  const bool is_sf = parse_sf(cond.message_name, cond_stream, cond_function);
 
   // 如果是 SxFy 格式，直接比较
   if (is_sf) {
@@ -142,57 +179,41 @@ bool Runtime::match_condition(const Condition& cond, std::uint8_t stream,
 }
 
 bool Runtime::items_equal(const ii::Item& a, const ii::Item& b) const noexcept {
-  // 简单的类型和值比较
-  // 这里只实现基本类型的比较
-
-  // F4 比较
-  auto* af4 = a.get_if<ii::F4>();
-  auto* bf4 = b.get_if<ii::F4>();
-  if (af4 && bf4) {
-    if (af4->values.size() != bf4->values.size()) return false;
+  // 优先对浮点做容差比较（提升规则匹配的易用性，避免设备端小误差导致无法命中）。
+  if (const auto* af4 = a.get_if<ii::F4>()) {
+    const auto* bf4 = b.get_if<ii::F4>();
+    if (!bf4) {
+      return false;
+    }
+    if (af4->values.size() != bf4->values.size()) {
+      return false;
+    }
     for (std::size_t i = 0; i < af4->values.size(); ++i) {
-      // 浮点数近似比较
-      float diff = af4->values[i] - bf4->values[i];
-      if (diff < -0.0001f || diff > 0.0001f) return false;
+      if (!float_almost_equal(af4->values[i], bf4->values[i])) {
+        return false;
+      }
     }
     return true;
   }
 
-  // F8 比较
-  auto* af8 = a.get_if<ii::F8>();
-  auto* bf8 = b.get_if<ii::F8>();
-  if (af8 && bf8) {
-    if (af8->values.size() != bf8->values.size()) return false;
+  if (const auto* af8 = a.get_if<ii::F8>()) {
+    const auto* bf8 = b.get_if<ii::F8>();
+    if (!bf8) {
+      return false;
+    }
+    if (af8->values.size() != bf8->values.size()) {
+      return false;
+    }
     for (std::size_t i = 0; i < af8->values.size(); ++i) {
-      double diff = af8->values[i] - bf8->values[i];
-      if (diff < -0.0001 || diff > 0.0001) return false;
+      if (!double_almost_equal(af8->values[i], bf8->values[i])) {
+        return false;
+      }
     }
     return true;
   }
 
-  // U2 比较
-  auto* au2 = a.get_if<ii::U2>();
-  auto* bu2 = b.get_if<ii::U2>();
-  if (au2 && bu2) {
-    return au2->values == bu2->values;
-  }
-
-  // U4 比较
-  auto* au4 = a.get_if<ii::U4>();
-  auto* bu4 = b.get_if<ii::U4>();
-  if (au4 && bu4) {
-    return au4->values == bu4->values;
-  }
-
-  // ASCII 比较
-  auto* aa = a.get_if<ii::ASCII>();
-  auto* ba = b.get_if<ii::ASCII>();
-  if (aa && ba) {
-    return aa->value == ba->value;
-  }
-
-  // 其他类型暂不支持
-  return false;
+  // 其余类型直接复用 ii::Item 的严格比较（支持 List、Binary、Boolean、整数等）。
+  return a == b;
 }
 
-}  // namespace secs::sml
+}  // 命名空间 secs::sml

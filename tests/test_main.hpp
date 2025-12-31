@@ -64,7 +64,7 @@ inline int run_and_report() {
   return 1;
 }
 
-}  // namespace secs::tests
+}  // 命名空间 secs::tests
 
 #define TEST_EXPECT(expr) ::secs::tests::expect_true((expr), #expr, __FILE__, __LINE__)
 #define TEST_EXPECT_EQ(a, b) ::secs::tests::expect_eq((a), (b), #a, #b, __FILE__, __LINE__)

@@ -72,4 +72,4 @@ class StateMachine final {
   State state_{State::idle};
 };
 
-}  // namespace secs::secs1
+}  // 命名空间 secs::secs1

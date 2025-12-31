@@ -40,7 +40,7 @@ void test_unknown_error_code() {
   TEST_EXPECT_EQ(ec.message(), "unknown secs.core error");
 }
 
-}  // namespace
+}  // 匿名命名空间
 
 int main() {
   test_error_category_and_messages();

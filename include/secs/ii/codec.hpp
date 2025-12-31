@@ -51,10 +51,9 @@ std::error_code encode_to(mutable_bytes_view out, const Item& item, std::size_t&
  */
 std::error_code decode_one(bytes_view in, Item& out, std::size_t& consumed) noexcept;
 
-}  // namespace secs::ii
+}  // 命名空间 secs::ii
 
 namespace std {
 template <>
 struct is_error_code_enum<secs::ii::errc> : true_type {};
-}  // namespace std
-
+}  // 命名空间 std

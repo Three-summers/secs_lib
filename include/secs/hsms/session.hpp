@@ -144,4 +144,4 @@ class Session final {
   std::unordered_map<std::uint32_t, std::shared_ptr<Pending>> pending_{};
 };
 
-}  // namespace secs::hsms
+}  // 命名空间 secs::hsms

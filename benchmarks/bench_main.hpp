@@ -117,7 +117,7 @@ inline void print_results() {
   std::cout << std::string(100, '=') << "\n\n";
 }
 
-}  // namespace secs::benchmarks
+}  // 命名空间 secs::benchmarks
 
 #define BENCH_RUN(name, size, iterations, code) \
   ::secs::benchmarks::run_benchmark(name, size, iterations, [&]() { code; })

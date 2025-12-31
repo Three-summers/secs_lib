@@ -18,11 +18,11 @@
 
 namespace secs::hsms {
 class Session;
-}  // namespace secs::hsms
+}  // 命名空间 secs::hsms
 
 namespace secs::secs1 {
 class StateMachine;
-}  // namespace secs::secs1
+}  // 命名空间 secs::secs1
 
 namespace secs::protocol {
 
@@ -124,4 +124,4 @@ class Session final {
   std::uint16_t secs1_device_id_{0};
 };
 
-}  // namespace secs::protocol
+}  // 命名空间 secs::protocol

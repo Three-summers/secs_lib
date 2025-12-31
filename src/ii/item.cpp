@@ -41,7 +41,7 @@ bool f8_equal(const F8& lhs, const F8& rhs) noexcept {
   return true;
 }
 
-}  // namespace
+}  // 匿名命名空间
 
 Item::Item(List v) : storage_(std::move(v)) {}
 Item::Item(ASCII v) : storage_(std::move(v)) {}
@@ -129,4 +129,4 @@ bool operator==(const Item& lhs, const Item& rhs) noexcept {
     lhs.storage_);
 }
 
-}  // namespace secs::ii
+}  // 命名空间 secs::ii

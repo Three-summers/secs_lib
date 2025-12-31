@@ -58,7 +58,7 @@ Message make_control_base(SType stype, std::uint16_t session_id, std::uint32_t s
   return m;
 }
 
-}  // namespace
+}  // 匿名命名空间
 
 Message make_select_req(std::uint16_t session_id, std::uint32_t system_bytes) {
   return make_control_base(SType::select_req, session_id, system_bytes);
@@ -186,4 +186,4 @@ std::error_code decode_frame(core::bytes_view frame, Message& out, std::size_t& 
   return {};
 }
 
-}  // namespace secs::hsms
+}  // 命名空间 secs::hsms

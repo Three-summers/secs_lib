@@ -69,7 +69,7 @@ class TcpStream final : public Stream {
   asio::ip::tcp::socket socket_;
 };
 
-}  // namespace
+}  // 匿名命名空间
 
 Connection::Connection(asio::any_io_executor ex, ConnectionOptions options)
   : stream_(std::make_unique<TcpStream>(ex)), options_(options) {
@@ -251,4 +251,4 @@ asio::awaitable<std::pair<std::error_code, Message>> Connection::async_read_mess
   co_return std::pair{std::error_code{}, std::move(msg)};
 }
 
-}  // namespace secs::hsms
+}  // 命名空间 secs::hsms

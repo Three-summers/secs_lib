@@ -57,8 +57,8 @@ class FixedBuffer final {
   std::error_code ensure_writable(std::size_t n) noexcept;
   std::error_code grow(std::size_t min_capacity) noexcept;
 
- std::array<byte, kDefaultFixedBufferCapacity> inline_{};
- std::unique_ptr<byte[]> heap_;
+  std::array<byte, kDefaultFixedBufferCapacity> inline_{};
+  std::unique_ptr<byte[]> heap_;
 
   std::size_t max_capacity_{0};
   std::size_t capacity_{0};
@@ -66,4 +66,4 @@ class FixedBuffer final {
   std::size_t write_pos_{0};
 };
 
-}  // namespace secs::core
+}  // 命名空间 secs::core

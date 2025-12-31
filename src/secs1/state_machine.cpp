@@ -9,7 +9,7 @@ namespace {
   return ec == secs::core::make_error_code(secs::core::errc::timeout);
 }
 
-}  // namespace
+}  // 匿名命名空间
 
 /*
  * SECS-I 传输层状态机（SEMI E4）要点：
@@ -234,4 +234,4 @@ asio::awaitable<std::pair<std::error_code, ReceivedMessage>> StateMachine::async
   co_return co_await async_receive(timeouts_.t3_reply);
 }
 
-}  // namespace secs::secs1
+}  // 命名空间 secs::secs1

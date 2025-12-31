@@ -139,7 +139,7 @@ void test_reset() {
   TEST_EXPECT(timed_out.load());
 }
 
-}  // namespace
+}  // 匿名命名空间
 
 int main() {
   test_set_then_wait_immediate();

@@ -468,7 +468,7 @@ void test_length_overflow_limits() {
   }
 }
 
-}  // namespace
+}  // 匿名命名空间
 
 int main() {
   test_roundtrip_all_types();

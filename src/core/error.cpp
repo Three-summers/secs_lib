@@ -30,7 +30,7 @@ class secs_error_category final : public std::error_category {
   }
 };
 
-}  // namespace
+}  // 匿名命名空间
 
 const std::error_category& error_category() noexcept {
   static secs_error_category category;
@@ -41,4 +41,4 @@ std::error_code make_error_code(errc e) noexcept {
   return {static_cast<int>(e), error_category()};
 }
 
-}  // namespace secs::core
+}  // 命名空间 secs::core

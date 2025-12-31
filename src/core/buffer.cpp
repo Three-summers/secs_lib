@@ -14,7 +14,7 @@ std::size_t clamp_capacity(std::size_t requested, std::size_t max_capacity) noex
   return std::min(requested, max_capacity);
 }
 
-}  // namespace
+}  // 匿名命名空间
 
 /*
  * FixedBuffer 的实现模型：
@@ -238,4 +238,4 @@ std::error_code FixedBuffer::append(bytes_view data) noexcept {
   return {};
 }
 
-}  // namespace secs::core
+}  // 命名空间 secs::core

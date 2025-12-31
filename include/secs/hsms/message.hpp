@@ -77,4 +77,4 @@ std::error_code decode_frame(core::bytes_view frame, Message& out, std::size_t& 
 // 解码：仅解析负载（头部 10B + 消息体），用于连接层读到长度字段后的解析。
 std::error_code decode_payload(core::bytes_view payload, Message& out) noexcept;
 
-}  // namespace secs::hsms
+}  // 命名空间 secs::hsms

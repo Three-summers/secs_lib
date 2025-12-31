@@ -24,9 +24,9 @@ enum class errc : int {
 const std::error_category& error_category() noexcept;
 std::error_code make_error_code(errc e) noexcept;
 
-}  // namespace secs::core
+}  // 命名空间 secs::core
 
 namespace std {
 template <>
 struct is_error_code_enum<secs::core::errc> : true_type {};
-}  // namespace std
+}  // 命名空间 std

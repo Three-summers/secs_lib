@@ -82,19 +82,32 @@ class Runtime {
   [[nodiscard]] bool loaded() const noexcept { return loaded_; }
 
  private:
+  struct TransparentStringHash {
+    using is_transparent = void;
+
+    std::size_t operator()(std::string_view sv) const noexcept {
+      return std::hash<std::string_view>{}(sv);
+    }
+
+    std::size_t operator()(const std::string& s) const noexcept {
+      return std::hash<std::string_view>{}(s);
+    }
+  };
+
   void build_index() noexcept;
   [[nodiscard]] bool match_condition(const Condition& cond, std::uint8_t stream,
                                      std::uint8_t function, const ii::Item& item) const noexcept;
   [[nodiscard]] bool items_equal(const ii::Item& a, const ii::Item& b) const noexcept;
 
   Document document_;
-  std::unordered_map<std::string, std::size_t> name_index_;  // 消息名 -> messages 下标
+  std::unordered_map<std::string, std::size_t, TransparentStringHash, std::equal_to<>>
+      name_index_;  // 消息名 -> messages 下标（支持 std::string_view 透明查找，避免临时分配）
   std::unordered_map<std::uint16_t, std::size_t> sf_index_;  // (stream<<8|function) -> messages 下标
   bool loaded_{false};
 };
 
 /**
- * @brief 便捷函数：解析 SML 文件
+ * @brief 便捷函数：解析 SML 源文本
  */
 [[nodiscard]] inline ParseResult parse_sml(std::string_view source) noexcept {
   Lexer lexer(source);
@@ -112,4 +125,4 @@ class Runtime {
   return parser.parse();
 }
 
-}  // namespace secs::sml
+}  // 命名空间 secs::sml

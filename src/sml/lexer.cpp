@@ -48,7 +48,7 @@ const std::unordered_map<std::string_view, TokenType> kKeywords = {
     {"F8", TokenType::KwF8},
 };
 
-}  // namespace
+}  // 匿名命名空间
 
 const std::error_category& lexer_error_category() noexcept {
   return kLexerErrorCategory;
@@ -68,7 +68,10 @@ LexerResult Lexer::tokenize() noexcept {
     if (at_end()) break;
 
     // 跳过注释
-    if (skip_comment()) {
+    if (skip_comment(result)) {
+      if (result.ec) {
+        return result;
+      }
       continue;
     }
 
@@ -76,9 +79,10 @@ LexerResult Lexer::tokenize() noexcept {
     token_line_ = line_;
     token_column_ = column_;
 
+    last_error_kind_ = lexer_errc::invalid_character;
     Token token = scan_token();
     if (token.type == TokenType::Error) {
-      result.ec = make_error_code(lexer_errc::invalid_character);
+      result.ec = make_error_code(last_error_kind_);
       result.error_line = token.line;
       result.error_column = token.column;
       result.error_message = token.value;
@@ -128,9 +132,11 @@ void Lexer::skip_whitespace() noexcept {
   }
 }
 
-bool Lexer::skip_comment() noexcept {
+bool Lexer::skip_comment(LexerResult& result) noexcept {
   if (peek() == '/' && peek_next() == '*') {
     // 块注释：/* ... */
+    const auto start_line = line_;
+    const auto start_column = column_;
     advance();  // /
     advance();  // *
     while (!at_end()) {
@@ -141,7 +147,11 @@ bool Lexer::skip_comment() noexcept {
       }
       advance();
     }
-    // 未闭合的块注释：当前实现会直接读到 EOF 并结束（不额外生成错误记号）。
+    // 未闭合的块注释：视为词法错误，便于上层定位输入问题。
+    result.ec = make_error_code(lexer_errc::unterminated_comment);
+    result.error_line = start_line;
+    result.error_column = start_column;
+    result.error_message = "unterminated block comment";
     return true;
   }
 
@@ -174,7 +184,7 @@ Token Lexer::scan_token() noexcept {
         advance();
         return make_token(TokenType::Equals);
       }
-      return make_error("unexpected '=', expected '=='");
+      return make_error(lexer_errc::invalid_character, "unexpected '=', expected '=='");
     case '"':
     case '\'':
       return scan_string(c);
@@ -214,7 +224,7 @@ Token Lexer::scan_string(char quote) noexcept {
   std::string value;
   while (!at_end() && peek() != quote) {
     if (peek() == '\n') {
-      return make_error("unterminated string (newline in string)");
+      return make_error(lexer_errc::unterminated_string, "unterminated string (newline in string)");
     }
     if (peek() == '\\' && peek_next() != '\0') {
       advance();  // 反斜杠
@@ -234,7 +244,7 @@ Token Lexer::scan_string(char quote) noexcept {
   }
 
   if (at_end()) {
-    return make_error("unterminated string");
+    return make_error(lexer_errc::unterminated_string, "unterminated string");
   }
 
   advance();  // 结束引号
@@ -252,6 +262,9 @@ Token Lexer::scan_number() noexcept {
   if (peek() == '0' && (peek_next() == 'x' || peek_next() == 'X')) {
     advance();  // 0
     advance();  // x
+    if (at_end() || !std::isxdigit(static_cast<unsigned char>(peek()))) {
+      return make_error(lexer_errc::invalid_hex_literal, "invalid hexadecimal literal");
+    }
     while (!at_end() && std::isxdigit(static_cast<unsigned char>(peek()))) {
       advance();
     }
@@ -297,7 +310,8 @@ Token Lexer::make_token(TokenType type, std::string value) const noexcept {
   return Token{type, std::move(value), token_line_, token_column_};
 }
 
-Token Lexer::make_error(std::string_view message) const noexcept {
+Token Lexer::make_error(lexer_errc kind, std::string_view message) noexcept {
+  last_error_kind_ = kind;
   return Token{TokenType::Error, std::string(message), token_line_, token_column_};
 }
 
@@ -309,4 +323,4 @@ TokenType Lexer::identifier_type(std::string_view text) const noexcept {
   return TokenType::Identifier;
 }
 
-}  // namespace secs::sml
+}  // 命名空间 secs::sml

@@ -134,4 +134,4 @@ std::pair<MemoryLink::Endpoint, MemoryLink::Endpoint> MemoryLink::create(asio::a
   return {std::move(a), std::move(b)};
 }
 
-}  // namespace secs::secs1
+}  // 命名空间 secs::secs1

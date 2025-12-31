@@ -128,4 +128,4 @@ struct S2F14Response {
   }
 };
 
-}  // namespace secs::examples
+}  // 命名空间 secs::examples

@@ -13,7 +13,7 @@ constexpr std::uint32_t kMinSystemBytes = 1U;
   return sb != 0U;
 }
 
-}  // namespace
+}  // 匿名命名空间
 
 /*
  * SystemBytes 分配策略：
@@ -89,4 +89,4 @@ std::size_t SystemBytes::in_use_count() const noexcept {
   return in_use_.size();
 }
 
-}  // namespace secs::protocol
+}  // 命名空间 secs::protocol

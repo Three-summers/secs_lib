@@ -51,8 +51,6 @@ class Parser {
   bool check(TokenType type) const noexcept;
   bool match(TokenType type) noexcept;
 
-  void synchronize() noexcept;
-
   // 解析规则
   bool parse_statement() noexcept;
   bool parse_message_def() noexcept;
@@ -70,11 +68,12 @@ class Parser {
   std::optional<ii::Item> parse_float(TokenType type) noexcept;
 
   // 解析辅助
-  bool parse_stream_function(std::uint8_t& stream, std::uint8_t& function) noexcept;
   std::optional<Condition> parse_condition() noexcept;
 
   // 错误处理
+  void error(parser_errc code, std::string_view message) noexcept;
   void error(std::string_view message) noexcept;
+  void error_at(parser_errc code, const Token& token, std::string_view message) noexcept;
   void error_at(const Token& token, std::string_view message) noexcept;
 
   std::vector<Token> tokens_;
@@ -88,9 +87,9 @@ class Parser {
   bool had_error_{false};
 };
 
-}  // namespace secs::sml
+}  // 命名空间 secs::sml
 
 namespace std {
 template <>
 struct is_error_code_enum<secs::sml::parser_errc> : true_type {};
-}  // namespace std
+}  // 命名空间 std

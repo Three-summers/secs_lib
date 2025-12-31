@@ -22,8 +22,8 @@ namespace {
  *     - 对于非 List：表示 Payload 字节数
  *
  * - 整数/浮点的 Payload 均按“大端序”拼接：
- *   - 有符号整数：转为等宽无符号后写出（保留补码 bit 形态）
- *   - 浮点：std::bit_cast 得到 IEEE754 bit 形态后写出
+ *   - 有符号整数：转为等宽无符号后写出（保留补码位级形态）
+ *   - 浮点：std::bit_cast 得到 IEEE754 的位级形态后写出
  *
  * - 本实现提供两类 API：
  *   - encode()/encode_to()：编码
@@ -818,7 +818,7 @@ std::error_code decode_item(SpanReader& r, Item& out, std::size_t depth) noexcep
   }
 }
 
-}  // namespace
+}  // 匿名命名空间
 
 const std::error_category& error_category() noexcept {
   static secs_ii_error_category category;
@@ -883,4 +883,4 @@ std::error_code decode_one(bytes_view in, Item& out, std::size_t& consumed) noex
   return {};
 }
 
-}  // namespace secs::ii
+}  // 命名空间 secs::ii

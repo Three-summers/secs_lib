@@ -303,7 +303,7 @@ void test_secs_message_concept() {
   static_assert(secs::protocol::SecsMessage<TestResponse>);
 }
 
-}  // namespace
+}  // 匿名命名空间
 
 int main() {
   test_successful_handler();

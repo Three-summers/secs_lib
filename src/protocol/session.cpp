@@ -40,7 +40,7 @@ using secs::core::make_error_code;
   return d;
 }
 
-}  // namespace
+}  // 匿名命名空间
 
 /*
  * protocol::Session 统一 HSMS 与 SECS-I 的消息收发：
@@ -401,4 +401,4 @@ void Session::cancel_all_pending_(std::error_code reason) noexcept {
   }
 }
 
-}  // namespace secs::protocol
+}  // 命名空间 secs::protocol

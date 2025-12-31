@@ -501,7 +501,7 @@ void test_connection_async_read_message_invalid_frames() {
   asio::co_spawn(
     ioc,
     [&]() -> asio::awaitable<void> {
-      // 1) payload_len < header_len
+      // 1) 负载长度 payload_len < header_len
       std::array<byte, 4> len9 = {0x00, 0x00, 0x00, 0x09};
       auto ec = co_await server_stream_ptr->async_write_all(bytes_view{len9.data(), len9.size()});
       TEST_EXPECT_OK(ec);
@@ -1477,7 +1477,7 @@ void test_run_active_exits_when_auto_reconnect_disabled() {
   TEST_EXPECT(done.load());
 }
 
-}  // namespace
+}  // 匿名命名空间
 
 int main() {
   test_message_encode_decode_roundtrip();

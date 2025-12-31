@@ -2,7 +2,7 @@
 
 #include <charconv>
 #include <cstdlib>
-#include <regex>
+#include <limits>
 
 namespace secs::sml {
 
@@ -59,19 +59,71 @@ bool parse_sf_string(std::string_view text, std::uint8_t& stream, std::uint8_t& 
   return true;
 }
 
-std::int64_t parse_integer(std::string_view text) {
-  // 十六进制：0x...
-  if (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
-    return std::strtoll(text.data(), nullptr, 16);
+[[nodiscard]] std::optional<std::uint64_t> parse_uint64_literal(std::string_view text) noexcept {
+  if (text.empty()) {
+    return std::nullopt;
   }
-  return std::strtoll(text.data(), nullptr, 10);
+  if (text.front() == '-') {
+    return std::nullopt;
+  }
+
+  int base = 10;
+  if (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
+    base = 16;
+    text.remove_prefix(2);
+  }
+  if (text.empty()) {
+    return std::nullopt;
+  }
+
+  std::uint64_t value = 0;
+  auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), value, base);
+  if (ec != std::errc{} || ptr != text.data() + text.size()) {
+    return std::nullopt;
+  }
+  return value;
+}
+
+[[nodiscard]] std::optional<std::int64_t> parse_int64_literal(std::string_view text) noexcept {
+  if (text.empty()) {
+    return std::nullopt;
+  }
+
+  bool negative = false;
+  if (text.front() == '-') {
+    negative = true;
+    text.remove_prefix(1);
+  }
+
+  const auto mag = parse_uint64_literal(text);
+  if (!mag.has_value()) {
+    return std::nullopt;
+  }
+
+  const auto magnitude = *mag;
+  if (!negative) {
+    if (magnitude > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+      return std::nullopt;
+    }
+    return static_cast<std::int64_t>(magnitude);
+  }
+
+  const auto max_plus_one = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) + 1u;
+  if (magnitude > max_plus_one) {
+    return std::nullopt;
+  }
+  if (magnitude == max_plus_one) {
+    return std::numeric_limits<std::int64_t>::min();
+  }
+  return -static_cast<std::int64_t>(magnitude);
 }
 
 double parse_float_value(std::string_view text) {
-  return std::strtod(std::string(text).c_str(), nullptr);
+  // token.value 来自 std::string，按 C++20 约定以 '\0' 结尾，可直接交给 strtod。
+  return std::strtod(text.data(), nullptr);
 }
 
-}  // namespace
+}  // 匿名命名空间
 
 const std::error_category& parser_error_category() noexcept {
   return kParserErrorCategory;
@@ -124,15 +176,6 @@ bool Parser::match(TokenType type) noexcept {
     return true;
   }
   return false;
-}
-
-void Parser::synchronize() noexcept {
-  advance();
-  while (!at_end()) {
-    if (previous().type == TokenType::Dot) return;
-    if (peek().type == TokenType::KwIf || peek().type == TokenType::KwEvery) return;
-    advance();
-  }
 }
 
 bool Parser::parse_statement() noexcept {
@@ -190,7 +233,7 @@ bool Parser::parse_message_def() noexcept {
 
   // 解析 SxFy
   if (!parse_sf_string(first_token, msg.stream, msg.function)) {
-    error("invalid stream/function format: " + first_token);
+    error(parser_errc::invalid_stream_function, "invalid stream/function format: " + first_token);
     return false;
   }
 
@@ -257,12 +300,19 @@ bool Parser::parse_if_rule() noexcept {
 bool Parser::parse_every_rule() noexcept {
   // 语法：every N send 消息名.
   if (!check(TokenType::Integer)) {
-    error("expected interval after 'every'");
+    error(parser_errc::expected_number, "expected interval after 'every'");
     return false;
   }
 
   TimerRule rule;
-  rule.interval_seconds = static_cast<std::uint32_t>(parse_integer(advance().value));
+  {
+    const auto v = parse_int64_literal(advance().value);
+    if (!v.has_value() || *v < 0 || *v > static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max())) {
+      error(parser_errc::expected_number, "interval out of range");
+      return false;
+    }
+    rule.interval_seconds = static_cast<std::uint32_t>(*v);
+  }
 
   if (!match(TokenType::KwSend)) {
     error("expected 'send' after interval");
@@ -287,7 +337,7 @@ bool Parser::parse_every_rule() noexcept {
 
 std::optional<ii::Item> Parser::parse_item() noexcept {
   if (!match(TokenType::LAngle)) {
-    error("expected '<'");
+    error(parser_errc::expected_item, "expected '<'");
     return std::nullopt;
   }
 
@@ -324,7 +374,7 @@ std::optional<ii::Item> Parser::parse_item() noexcept {
       result = parse_float(type);
       break;
     default:
-      error("expected item type");
+      error(parser_errc::expected_item, "expected item type");
       return std::nullopt;
   }
 
@@ -333,7 +383,7 @@ std::optional<ii::Item> Parser::parse_item() noexcept {
   }
 
   if (!match(TokenType::RAngle)) {
-    error("expected '>'");
+    error(parser_errc::unclosed_item, "expected '>'");
     return std::nullopt;
   }
 
@@ -384,8 +434,12 @@ std::optional<ii::Item> Parser::parse_binary() noexcept {
 
   std::vector<secs::core::byte> bytes;
   while (check(TokenType::Integer)) {
-    std::int64_t val = parse_integer(advance().value);
-    bytes.push_back(static_cast<secs::core::byte>(val & 0xFF));
+    const auto val = parse_uint64_literal(advance().value);
+    if (!val.has_value() || *val > 0xFFu) {
+      error(parser_errc::expected_number, "binary byte out of range (expected 0..255)");
+      return std::nullopt;
+    }
+    bytes.push_back(static_cast<secs::core::byte>(*val));
   }
 
   return ii::Item::binary(std::move(bytes));
@@ -396,8 +450,12 @@ std::optional<ii::Item> Parser::parse_boolean() noexcept {
 
   std::vector<bool> values;
   while (check(TokenType::Integer)) {
-    std::int64_t val = parse_integer(advance().value);
-    values.push_back(val != 0);
+    const auto val = parse_int64_literal(advance().value);
+    if (!val.has_value()) {
+      error(parser_errc::expected_number, "invalid boolean literal");
+      return std::nullopt;
+    }
+    values.push_back(*val != 0);
   }
 
   return ii::Item::boolean(std::move(values));
@@ -410,28 +468,48 @@ std::optional<ii::Item> Parser::parse_unsigned(TokenType type) noexcept {
     case TokenType::KwU1: {
       std::vector<std::uint8_t> values;
       while (check(TokenType::Integer)) {
-        values.push_back(static_cast<std::uint8_t>(parse_integer(advance().value)));
+        const auto v = parse_uint64_literal(advance().value);
+        if (!v.has_value() || *v > std::numeric_limits<std::uint8_t>::max()) {
+          error(parser_errc::expected_number, "U1 value out of range");
+          return std::nullopt;
+        }
+        values.push_back(static_cast<std::uint8_t>(*v));
       }
       return ii::Item::u1(std::move(values));
     }
     case TokenType::KwU2: {
       std::vector<std::uint16_t> values;
       while (check(TokenType::Integer)) {
-        values.push_back(static_cast<std::uint16_t>(parse_integer(advance().value)));
+        const auto v = parse_uint64_literal(advance().value);
+        if (!v.has_value() || *v > std::numeric_limits<std::uint16_t>::max()) {
+          error(parser_errc::expected_number, "U2 value out of range");
+          return std::nullopt;
+        }
+        values.push_back(static_cast<std::uint16_t>(*v));
       }
       return ii::Item::u2(std::move(values));
     }
     case TokenType::KwU4: {
       std::vector<std::uint32_t> values;
       while (check(TokenType::Integer)) {
-        values.push_back(static_cast<std::uint32_t>(parse_integer(advance().value)));
+        const auto v = parse_uint64_literal(advance().value);
+        if (!v.has_value() || *v > std::numeric_limits<std::uint32_t>::max()) {
+          error(parser_errc::expected_number, "U4 value out of range");
+          return std::nullopt;
+        }
+        values.push_back(static_cast<std::uint32_t>(*v));
       }
       return ii::Item::u4(std::move(values));
     }
     case TokenType::KwU8: {
       std::vector<std::uint64_t> values;
       while (check(TokenType::Integer)) {
-        values.push_back(static_cast<std::uint64_t>(parse_integer(advance().value)));
+        const auto v = parse_uint64_literal(advance().value);
+        if (!v.has_value()) {
+          error(parser_errc::expected_number, "U8 value out of range");
+          return std::nullopt;
+        }
+        values.push_back(*v);
       }
       return ii::Item::u8(std::move(values));
     }
@@ -447,28 +525,54 @@ std::optional<ii::Item> Parser::parse_signed(TokenType type) noexcept {
     case TokenType::KwI1: {
       std::vector<std::int8_t> values;
       while (check(TokenType::Integer)) {
-        values.push_back(static_cast<std::int8_t>(parse_integer(advance().value)));
+        const auto v = parse_int64_literal(advance().value);
+        if (!v.has_value() ||
+            *v < std::numeric_limits<std::int8_t>::min() ||
+            *v > std::numeric_limits<std::int8_t>::max()) {
+          error(parser_errc::expected_number, "I1 value out of range");
+          return std::nullopt;
+        }
+        values.push_back(static_cast<std::int8_t>(*v));
       }
       return ii::Item::i1(std::move(values));
     }
     case TokenType::KwI2: {
       std::vector<std::int16_t> values;
       while (check(TokenType::Integer)) {
-        values.push_back(static_cast<std::int16_t>(parse_integer(advance().value)));
+        const auto v = parse_int64_literal(advance().value);
+        if (!v.has_value() ||
+            *v < std::numeric_limits<std::int16_t>::min() ||
+            *v > std::numeric_limits<std::int16_t>::max()) {
+          error(parser_errc::expected_number, "I2 value out of range");
+          return std::nullopt;
+        }
+        values.push_back(static_cast<std::int16_t>(*v));
       }
       return ii::Item::i2(std::move(values));
     }
     case TokenType::KwI4: {
       std::vector<std::int32_t> values;
       while (check(TokenType::Integer)) {
-        values.push_back(static_cast<std::int32_t>(parse_integer(advance().value)));
+        const auto v = parse_int64_literal(advance().value);
+        if (!v.has_value() ||
+            *v < std::numeric_limits<std::int32_t>::min() ||
+            *v > std::numeric_limits<std::int32_t>::max()) {
+          error(parser_errc::expected_number, "I4 value out of range");
+          return std::nullopt;
+        }
+        values.push_back(static_cast<std::int32_t>(*v));
       }
       return ii::Item::i4(std::move(values));
     }
     case TokenType::KwI8: {
       std::vector<std::int64_t> values;
       while (check(TokenType::Integer)) {
-        values.push_back(parse_integer(advance().value));
+        const auto v = parse_int64_literal(advance().value);
+        if (!v.has_value()) {
+          error(parser_errc::expected_number, "I8 value out of range");
+          return std::nullopt;
+        }
+        values.push_back(*v);
       }
       return ii::Item::i8(std::move(values));
     }
@@ -500,7 +604,7 @@ std::optional<Condition> Parser::parse_condition() noexcept {
   Condition cond;
 
   if (!check(TokenType::Identifier)) {
-    error("expected message name in condition");
+    error(parser_errc::invalid_condition, "expected message name in condition");
     return std::nullopt;
   }
 
@@ -509,12 +613,21 @@ std::optional<Condition> Parser::parse_condition() noexcept {
   // 可选的 (索引)
   if (match(TokenType::LParen)) {
     if (!check(TokenType::Integer)) {
-      error("expected index number");
+      error(parser_errc::expected_number, "expected index number");
       return std::nullopt;
     }
-    cond.index = static_cast<std::size_t>(parse_integer(advance().value));
+    const auto idx = parse_uint64_literal(advance().value);
+    if (!idx.has_value() || *idx > std::numeric_limits<std::size_t>::max()) {
+      error(parser_errc::expected_number, "index out of range");
+      return std::nullopt;
+    }
+    if (*idx < 1) {
+      error(parser_errc::invalid_condition, "index must be >= 1");
+      return std::nullopt;
+    }
+    cond.index = static_cast<std::size_t>(*idx);
     if (!match(TokenType::RParen)) {
-      error("expected ')' after index");
+      error(parser_errc::invalid_condition, "expected ')' after index");
       return std::nullopt;
     }
   }
@@ -532,17 +645,25 @@ std::optional<Condition> Parser::parse_condition() noexcept {
 }
 
 void Parser::error(std::string_view message) noexcept {
-  error_at(peek(), message);
+  error(parser_errc::unexpected_token, message);
 }
 
 void Parser::error_at(const Token& token, std::string_view message) noexcept {
+  error_at(parser_errc::unexpected_token, token, message);
+}
+
+void Parser::error(parser_errc code, std::string_view message) noexcept {
+  error_at(code, peek(), message);
+}
+
+void Parser::error_at(parser_errc code, const Token& token, std::string_view message) noexcept {
   if (had_error_) return;
 
   had_error_ = true;
-  ec_ = make_error_code(parser_errc::unexpected_token);
+  ec_ = make_error_code(code);
   error_line_ = token.line;
   error_column_ = token.column;
   error_message_ = std::string(message) + " at '" + token.value + "'";
 }
 
-}  // namespace secs::sml
+}  // 命名空间 secs::sml

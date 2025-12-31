@@ -48,14 +48,14 @@ std::error_code make_error_code(errc e) noexcept;
  */
 struct Header final {
   bool reverse_bit{false};
-  std::uint16_t device_id{0};  // 15-bit 有效（高位与 reverse_bit 分离）
+  std::uint16_t device_id{0};  // 15 位有效（高位与 reverse_bit 分离）
 
   bool wait_bit{false};
   std::uint8_t stream{0};
   std::uint8_t function{0};
 
   bool end_bit{false};
-  std::uint16_t block_number{1};  // 15-bit 有效（0x0000-0x7FFF）
+  std::uint16_t block_number{1};  // 15 位有效（0x0000-0x7FFF）
 
   std::uint32_t system_bytes{0};
 };
@@ -126,9 +126,9 @@ class Reassembler final {
   std::vector<secs::core::byte> body_{};
 };
 
-}  // namespace secs::secs1
+}  // 命名空间 secs::secs1
 
 namespace std {
 template <>
 struct is_error_code_enum<secs::secs1::errc> : true_type {};
-}  // namespace std
+}  // 命名空间 std

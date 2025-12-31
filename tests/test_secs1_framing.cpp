@@ -182,7 +182,7 @@ void test_encode_decode_roundtrip_single_block() {
 
 void test_encode_invalid_device_id() {
   auto h = sample_header();
-  h.device_id = 0xFFFF;  // 15-bit 之外
+  h.device_id = 0xFFFF;  // 超出 15 位有效范围
 
   std::vector<byte> frame;
   auto ec = secs::secs1::encode_block(h, as_bytes("x"), frame);
@@ -191,7 +191,7 @@ void test_encode_invalid_device_id() {
 
 void test_encode_invalid_block_number() {
   auto h = sample_header();
-  h.block_number = 0xFFFF;  // 15-bit 之外
+  h.block_number = 0xFFFF;  // 超出 15 位有效范围
 
   std::vector<byte> frame;
   auto ec = secs::secs1::encode_block(h, as_bytes("x"), frame);
@@ -1502,7 +1502,7 @@ void test_sender_retries_block_on_nak() {
   asio::co_spawn(
     ioc,
     [&]() -> asio::awaitable<void> {
-      // ENQ -> EOT
+      // 握手：ENQ -> EOT
       for (;;) {
         auto [ec, ch] = co_await b.async_read_byte(200ms);
         TEST_EXPECT_OK(ec);
@@ -1638,7 +1638,7 @@ void test_t1_intercharacter_timeout() {
   asio::co_spawn(
     ioc,
     [&]() -> asio::awaitable<void> {
-      // ENQ -> EOT
+      // 握手：ENQ -> EOT
       TEST_EXPECT_OK(co_await write_byte(a, secs::secs1::kEnq));
       auto [ec0, ch0] = co_await a.async_read_byte(200ms);
       TEST_EXPECT_OK(ec0);
@@ -1737,7 +1737,7 @@ void test_t4_interblock_timeout() {
   asio::co_spawn(
     ioc,
     [&]() -> asio::awaitable<void> {
-      // ENQ -> EOT
+      // 握手：ENQ -> EOT
       TEST_EXPECT_OK(co_await write_byte(a, secs::secs1::kEnq));
       auto [ec0, ch0] = co_await a.async_read_byte(200ms);
       TEST_EXPECT_OK(ec0);
@@ -1895,7 +1895,7 @@ void test_t3_reply_success() {
   TEST_EXPECT_EQ(done.load(), 2);
 }
 
-}  // namespace
+}  // 匿名命名空间
 
 int main() {
   test_checksum_known();

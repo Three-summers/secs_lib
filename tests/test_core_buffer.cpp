@@ -284,7 +284,7 @@ void test_grow_from_empty_heap() {
   TEST_EXPECT(buf.capacity() >= 32 * 1024u);
 }
 
-}  // namespace
+}  // 匿名命名空间
 
 int main() {
   test_append_consume_basic();

@@ -50,7 +50,7 @@ class Lexer {
   [[nodiscard]] char peek_next() const noexcept;
   char advance() noexcept;
   void skip_whitespace() noexcept;
-  bool skip_comment() noexcept;
+  bool skip_comment(LexerResult& result) noexcept;
 
   Token scan_token() noexcept;
   Token scan_identifier() noexcept;
@@ -59,7 +59,8 @@ class Lexer {
 
   Token make_token(TokenType type) const noexcept;
   Token make_token(TokenType type, std::string value) const noexcept;
-  Token make_error(std::string_view message) const noexcept;
+  Token make_error(lexer_errc kind, std::string_view message) noexcept;
+  Token make_error(std::string_view message) noexcept { return make_error(lexer_errc::invalid_character, message); }
 
   [[nodiscard]] TokenType identifier_type(std::string_view text) const noexcept;
 
@@ -70,11 +71,12 @@ class Lexer {
   std::uint32_t column_{1};
   std::uint32_t token_line_{1};
   std::uint32_t token_column_{1};
+  lexer_errc last_error_kind_{lexer_errc::invalid_character};
 };
 
-}  // namespace secs::sml
+}  // 命名空间 secs::sml
 
 namespace std {
 template <>
 struct is_error_code_enum<secs::sml::lexer_errc> : true_type {};
-}  // namespace std
+}  // 命名空间 std

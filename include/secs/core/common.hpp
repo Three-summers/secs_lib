@@ -20,4 +20,4 @@ inline constexpr std::size_t kDefaultFixedBufferMaxCapacity = 64 * 1024 * 1024; 
 using steady_clock = std::chrono::steady_clock;
 using duration = steady_clock::duration;
 
-}  // namespace secs::core
+}  // 命名空间 secs::core

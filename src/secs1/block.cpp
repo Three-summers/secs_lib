@@ -42,7 +42,7 @@ class secs1_error_category final : public std::error_category {
   }
 };
 
-}  // namespace
+}  // 匿名命名空间
 
 const std::error_category& error_category() noexcept {
   static secs1_error_category category;
@@ -267,4 +267,4 @@ std::error_code Reassembler::accept(const DecodedBlock& block) {
   return {};
 }
 
-}  // namespace secs::secs1
+}  // 命名空间 secs::secs1
