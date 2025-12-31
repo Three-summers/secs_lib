@@ -86,18 +86,34 @@ target_include_directories(secs_protocol
 
 target_link_libraries(secs_protocol PUBLIC secs_core secs_hsms secs_secs1)
 
+add_library(secs_sml
+  src/sml/lexer.cpp
+  src/sml/parser.cpp
+  src/sml/runtime.cpp
+)
+add_library(secs::sml ALIAS secs_sml)
+
+target_include_directories(secs_sml
+  PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+)
+
+target_link_libraries(secs_sml PUBLIC secs_ii secs_core)
+
 if(MSVC)
   target_compile_options(secs_core PRIVATE /W4 /WX)
   target_compile_options(secs_secs1 PRIVATE /W4 /WX)
   target_compile_options(secs_ii PRIVATE /W4 /WX)
   target_compile_options(secs_hsms PRIVATE /W4 /WX)
   target_compile_options(secs_protocol PRIVATE /W4 /WX)
+  target_compile_options(secs_sml PRIVATE /W4 /WX)
 else()
   target_compile_options(secs_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
   target_compile_options(secs_secs1 PRIVATE -Wall -Wextra -Wpedantic -Werror)
   target_compile_options(secs_ii PRIVATE -Wall -Wextra -Wpedantic -Werror)
   target_compile_options(secs_hsms PRIVATE -Wall -Wextra -Wpedantic -Werror)
   target_compile_options(secs_protocol PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  target_compile_options(secs_sml PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
 include("${PROJECT_SOURCE_DIR}/cmake/AsioStandalone.cmake")
@@ -112,6 +128,7 @@ if(SECS_ENABLE_COVERAGE)
   secs_enable_coverage_compile(secs_ii)
   secs_enable_coverage_compile(secs_hsms)
   secs_enable_coverage_compile(secs_protocol)
+  secs_enable_coverage_compile(secs_sml)
 endif()
 
 if(SECS_ENABLE_TESTS)
