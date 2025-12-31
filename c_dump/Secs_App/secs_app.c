@@ -8,20 +8,23 @@ secs 发送处理，
 int Secs_SendHandle(SecsInfo *Secs_Info) {
     /*
     当 Secs_Info->Secs_SendInfo.Send_DataInfo.SendData_Ctrl
-    为0时，表明报文未转化成串口可发送的形式，需进一步转化， 若为1，则表示已经转换
+    为0时，表明报文未转化成串口可发送的形式，需进一步转化，
+    若为1，则表示已经转换
     */
     if (Secs_Info->Secs_SendInfo.Send_DataInfo.SendData_Ctrl == 0) {
         if (Secs_Info->Secs_TransInfo->SecsSend_Message == NULL) {
             printf("1\r\n");
         }
-        if (Secs_MessageArrange((char *)Secs_Info->Secs_TransInfo->SecsSend_Message,
-                                &Secs_Info->Secs_SendInfo.Send_DataInfo) != 0) {
+        if (Secs_MessageArrange(
+                (char *)Secs_Info->Secs_TransInfo->SecsSend_Message,
+                &Secs_Info->Secs_SendInfo.Send_DataInfo) != 0) {
             Secs_Info->Secs_TransInfo->Secs_IsBusy = 0;
             printf("[error ] secs message arrange\r\n");
             return -1;
         } else {
 #if SECS_LOG
-            printf("secs message \r\n%s\r\n", Secs_Info->Secs_TransInfo->SecsSend_Message);
+            printf("secs message \r\n%s\r\n",
+                   Secs_Info->Secs_TransInfo->SecsSend_Message);
             printf("successed trans to\r\n");
             SecsII_PrintArray(&Secs_Info->Secs_SendInfo.Send_DataInfo);
 #endif
@@ -71,7 +74,8 @@ int Secs_RecvHandle(SecsInfo *Secs_Info) {
         */
         if (Secs_OldState == WAIT_BLOCK) {
             SecsHead Secs_RecvHead;
-            SecsI_ExtractHead(Secs_Info->Secs_RecvInfo->SecsRecv_Buf, &Secs_RecvHead);
+            SecsI_ExtractHead(Secs_Info->Secs_RecvInfo->SecsRecv_Buf,
+                              &Secs_RecvHead);
 
             if (Secs_RecvHead.Reply_Bit && Secs_RecvHead.End_Bit) {
                 Secs_Info->Secs_SendInfo.Systembyte_Info.SystemByte_Ctrl = 1;
@@ -81,7 +85,8 @@ int Secs_RecvHandle(SecsInfo *Secs_Info) {
 
             Secs_Info->Secs_TransInfo->Secs_IsBusy = 0;
 
-            Secs_Info->callback(&Secs_RecvHead, Secs_Info->Secs_RecvInfo->SecsRecv_Buf);
+            Secs_Info->callback(&Secs_RecvHead,
+                                Secs_Info->Secs_RecvInfo->SecsRecv_Buf);
         }
         /*
         判断是否需要多包发送，如需多包发送，需调用Secs_SendHandle函数
@@ -125,11 +130,13 @@ void *Secs_Ctrl_Thread1(void *arg) {
     SecsInfo *Secs_Info = (SecsInfo *)arg;
     // secs_status.
     while (1) {
-        if (Secs_Info->Secs_TransInfo->SecsSend_Flag && !Secs_Info->Secs_TransInfo->Secs_IsBusy) {
+        if (Secs_Info->Secs_TransInfo->SecsSend_Flag &&
+            !Secs_Info->Secs_TransInfo->Secs_IsBusy) {
             printf("secs send S%dF%d\r\n",
                    Secs_Info->Secs_TransInfo->SecsSend_Type.Stream_ID,
                    Secs_Info->Secs_TransInfo->SecsSend_Type.Function_ID);
-            Secs_Info->Secs_SendInfo.SecsSend_Type = Secs_Info->Secs_TransInfo->SecsSend_Type;
+            Secs_Info->Secs_SendInfo.SecsSend_Type =
+                Secs_Info->Secs_TransInfo->SecsSend_Type;
             Secs_Info->Secs_SendInfo.Send_DataInfo.SendData_Ctrl = 0;
             Secs_Info->Secs_TransInfo->Secs_IsBusy = 1;
             Secs_SendHandle(Secs_Info);
@@ -165,11 +172,13 @@ void *Secs_Ctrl_Thread2(void *arg) {
     SecsInfo *Secs_Info = (SecsInfo *)arg;
     // secs_status.
     while (1) {
-        if (Secs_Info->Secs_TransInfo->SecsSend_Flag && !Secs_Info->Secs_TransInfo->Secs_IsBusy) {
+        if (Secs_Info->Secs_TransInfo->SecsSend_Flag &&
+            !Secs_Info->Secs_TransInfo->Secs_IsBusy) {
             printf("secs send S%dF%d\r\n",
                    Secs_Info->Secs_TransInfo->SecsSend_Type.Stream_ID,
                    Secs_Info->Secs_TransInfo->SecsSend_Type.Function_ID);
-            Secs_Info->Secs_SendInfo.SecsSend_Type = Secs_Info->Secs_TransInfo->SecsSend_Type;
+            Secs_Info->Secs_SendInfo.SecsSend_Type =
+                Secs_Info->Secs_TransInfo->SecsSend_Type;
             Secs_Info->Secs_SendInfo.Send_DataInfo.SendData_Ctrl = 0;
             Secs_Info->Secs_TransInfo->Secs_IsBusy = 1;
             Secs_SendHandle(Secs_Info);
@@ -204,8 +213,10 @@ void *Secs_Ctrl_Thread2(void *arg) {
 int init_secs_app(SecsTransInfo *Secs_TransInfo1,
                   SecsTransInfo *Secs_TransInfo2,
                   uint16_t Secs_DeviceID,
-                  void (*SecsData_DealCallback1)(SecsHead *Secs_Head, uint8_t *data),
-                  void (*SecsData_DealCallback2)(SecsHead *Secs_Head, uint8_t *data)) {
+                  void (*SecsData_DealCallback1)(SecsHead *Secs_Head,
+                                                 uint8_t *data),
+                  void (*SecsData_DealCallback2)(SecsHead *Secs_Head,
+                                                 uint8_t *data)) {
 
     int secs_init_result = 0;
 
@@ -223,7 +234,8 @@ int init_secs_app(SecsTransInfo *Secs_TransInfo1,
     Secs_Info1->callback = SecsData_DealCallback1;
 
     pthread_t Secs_Ctrl_Handler;
-    secs_init_result = pthread_create(&Secs_Ctrl_Handler, NULL, Secs_Ctrl_Thread1, Secs_Info1);
+    secs_init_result =
+        pthread_create(&Secs_Ctrl_Handler, NULL, Secs_Ctrl_Thread1, Secs_Info1);
     if (secs_init_result != 0) {
         perror("[error ] 创建Secs1处理线程失败");
         return -1;
@@ -245,7 +257,8 @@ int init_secs_app(SecsTransInfo *Secs_TransInfo1,
     Secs_Info2->callback = SecsData_DealCallback2;
 
     pthread_t Secs_Ctrl_Handler2;
-    secs_init_result = pthread_create(&Secs_Ctrl_Handler2, NULL, Secs_Ctrl_Thread2, Secs_Info2);
+    secs_init_result = pthread_create(
+        &Secs_Ctrl_Handler2, NULL, Secs_Ctrl_Thread2, Secs_Info2);
     if (secs_init_result != 0) {
         perror("[error ] 创建Secs2处理线程失败");
         return -1;
@@ -262,11 +275,13 @@ SecsInfo Secs_Info;
 
 void Secs_Ctrl_Func(void) {
     // secs_status.
-    if (Secs_Info.Secs_TransInfo->SecsSend_Flag && !Secs_Info.Secs_TransInfo->Secs_IsBusy) {
+    if (Secs_Info.Secs_TransInfo->SecsSend_Flag &&
+        !Secs_Info.Secs_TransInfo->Secs_IsBusy) {
         printf("secs send S%dF%d\r\n",
                Secs_Info.Secs_TransInfo->SecsSend_Type.Stream_ID,
                Secs_Info.Secs_TransInfo->SecsSend_Type.Function_ID);
-        Secs_Info.Secs_SendInfo.SecsSend_Type = Secs_Info.Secs_TransInfo->SecsSend_Type;
+        Secs_Info.Secs_SendInfo.SecsSend_Type =
+            Secs_Info.Secs_TransInfo->SecsSend_Type;
         Secs_Info.Secs_SendInfo.Send_DataInfo.SendData_Ctrl = 0;
         Secs_Info.Secs_TransInfo->Secs_IsBusy = 1;
         Secs_SendHandle(&Secs_Info);
@@ -300,7 +315,8 @@ int init_secs_app(SecsTransInfo *Secs_TransInfo,
                   uint16_t Secs_DeviceID,
                   UART_HandleTypeDef *HalUart,
                   TIM_HandleTypeDef *HalTimer,
-                  void (*SecsData_DealCallback)(SecsHead *Secs_Head, uint8_t *data)) {
+                  void (*SecsData_DealCallback)(SecsHead *Secs_Head,
+                                                uint8_t *data)) {
     memset(&Secs_Info, 0, sizeof(SecsInfo));
     init_secs_bsp(HalUart, HalTimer);
 

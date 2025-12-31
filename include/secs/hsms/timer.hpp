@@ -20,15 +20,15 @@ namespace secs::hsms {
  * - cancel()：取消等待，等待者返回 cancelled
  */
 class Timer final {
- public:
-  explicit Timer(asio::any_io_executor ex);
+public:
+    explicit Timer(asio::any_io_executor ex);
 
-  void cancel() noexcept;
+    void cancel() noexcept;
 
-  asio::awaitable<std::error_code> async_wait_for(core::duration d);
+    asio::awaitable<std::error_code> async_wait_for(core::duration d);
 
- private:
-  asio::steady_timer timer_;
+private:
+    asio::steady_timer timer_;
 };
 
-}  // 命名空间 secs::hsms
+} // namespace secs::hsms

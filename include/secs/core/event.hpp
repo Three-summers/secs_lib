@@ -1,7 +1,7 @@
 #pragma once
 
-#include "secs/core/error.hpp"
 #include "secs/core/common.hpp"
+#include "secs/core/error.hpp"
 
 #include <asio/as_tuple.hpp>
 #include <asio/awaitable.hpp>
@@ -26,30 +26,31 @@ namespace secs::core {
  * - cancel(): 取消当前所有等待者（返回 cancelled），但不置位
  *
  * 注意：
- * - 本类默认假设在同一执行器/线程语境下使用；跨线程请自行用 strand/调度保证顺序。
+ * - 本类默认假设在同一执行器/线程语境下使用；跨线程请自行用
+ * strand/调度保证顺序。
  * - async_wait 使用 as_tuple(use_awaitable) 避免异常路径。
  */
 class Event final {
- public:
-  Event() = default;
+public:
+    Event() = default;
 
-  void set() noexcept;
-  void reset() noexcept;
-  void cancel() noexcept;
+    void set() noexcept;
+    void reset() noexcept;
+    void cancel() noexcept;
 
-  [[nodiscard]] bool is_set() const noexcept { return signaled_; }
+    [[nodiscard]] bool is_set() const noexcept { return signaled_; }
 
-  asio::awaitable<std::error_code> async_wait(
-    std::optional<steady_clock::duration> timeout = std::nullopt);
+    asio::awaitable<std::error_code>
+    async_wait(std::optional<steady_clock::duration> timeout = std::nullopt);
 
- private:
-  void cancel_waiters_() noexcept;
+private:
+    void cancel_waiters_() noexcept;
 
-  bool signaled_{false};
-  std::uint64_t set_generation_{0};
-  std::uint64_t cancel_generation_{0};
+    bool signaled_{false};
+    std::uint64_t set_generation_{0};
+    std::uint64_t cancel_generation_{0};
 
-  std::list<std::shared_ptr<asio::steady_timer>> waiters_{};
+    std::list<std::shared_ptr<asio::steady_timer>> waiters_{};
 };
 
-}  // 命名空间 secs::core
+} // namespace secs::core

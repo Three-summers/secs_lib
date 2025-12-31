@@ -1,7 +1,8 @@
 #include "tvoc_secs_app.h"
 #include "../TVOC_hmi_app/tvoc_hmi_handler.h"
 
-int Secs_MessageCtrl(SecsTransInfo *Secs_TransInfo) { // Validate input parameters
+int Secs_MessageCtrl(
+    SecsTransInfo *Secs_TransInfo) { // Validate input parameters
     if (Secs_TransInfo == NULL) {
         printf("[error ] Invalid input parameters\n");
         return -1;
@@ -23,14 +24,16 @@ int Secs_MessageCtrl(SecsTransInfo *Secs_TransInfo) { // Validate input paramete
                               "<A \"version: %s\">"
                               ">";
 
-            int needed_size = snprintf(NULL, 0, Secs_S1F2, SECSC_PROJECT_ID, VERSION_ID);
+            int needed_size =
+                snprintf(NULL, 0, Secs_S1F2, SECSC_PROJECT_ID, VERSION_ID);
 
             if (needed_size < 0) {
                 printf("[error] Formatting error for S1F2\n");
                 return -1;
             }
 
-            Secs_TransInfo->SecsSend_Message = (uint8_t *)malloc(needed_size + 1);
+            Secs_TransInfo->SecsSend_Message =
+                (uint8_t *)malloc(needed_size + 1);
 
             if (!Secs_TransInfo->SecsSend_Message) {
                 printf("[error] Memory allocation failed for S1F2\n");
@@ -73,7 +76,8 @@ int Secs_MessageCtrl(SecsTransInfo *Secs_TransInfo) { // Validate input paramete
                     return -1;
                 }
 
-                Secs_TransInfo->SecsSend_Message = (uint8_t *)malloc(needed_size + 1);
+                Secs_TransInfo->SecsSend_Message =
+                    (uint8_t *)malloc(needed_size + 1);
                 if (!Secs_TransInfo->SecsSend_Message) {
                     printf("[error] Memory allocation failed for S1F4\n");
                     return -1;
@@ -102,7 +106,8 @@ int Secs_MessageCtrl(SecsTransInfo *Secs_TransInfo) { // Validate input paramete
                     return -1;
                 }
 
-                Secs_TransInfo->SecsSend_Message = (uint8_t *)malloc(needed_size + 1);
+                Secs_TransInfo->SecsSend_Message =
+                    (uint8_t *)malloc(needed_size + 1);
                 if (!Secs_TransInfo->SecsSend_Message) {
                     printf("[error] Memory allocation failed for S1F4\n");
                     return -1;
@@ -278,8 +283,12 @@ int Secs_MessageCtrl(SecsTransInfo *Secs_TransInfo) { // Validate input paramete
                 break;
             }
 
-            int needed_size = snprintf(
-                NULL, 0, Secs_S5F1, Secs_TransInfo->Message_ID, (uint16_t)CEID, Secs_S5F1_Info);
+            int needed_size = snprintf(NULL,
+                                       0,
+                                       Secs_S5F1,
+                                       Secs_TransInfo->Message_ID,
+                                       (uint16_t)CEID,
+                                       Secs_S5F1_Info);
 
             if (needed_size < 0) {
                 printf("[error] Formatting error for S5F1\n");
@@ -287,7 +296,8 @@ int Secs_MessageCtrl(SecsTransInfo *Secs_TransInfo) { // Validate input paramete
                 return -1;
             }
 
-            Secs_TransInfo->SecsSend_Message = (uint8_t *)malloc(needed_size + 1);
+            Secs_TransInfo->SecsSend_Message =
+                (uint8_t *)malloc(needed_size + 1);
             if (!Secs_TransInfo->SecsSend_Message) {
                 printf("[error] Memory allocation failed for S5F1\n");
                 free(Secs_S5F1_Info);
@@ -353,7 +363,8 @@ int Secs_MessageCtrl(SecsTransInfo *Secs_TransInfo) { // Validate input paramete
                 return -1;
             }
 
-            Secs_TransInfo->SecsSend_Message = (uint8_t *)malloc(needed_size + 1);
+            Secs_TransInfo->SecsSend_Message =
+                (uint8_t *)malloc(needed_size + 1);
             if (!Secs_TransInfo->SecsSend_Message) {
                 printf("[error] Memory allocation failed for S6F11\n");
                 return -1;
@@ -393,7 +404,8 @@ int Secs_MessageCtrl(SecsTransInfo *Secs_TransInfo) { // Validate input paramete
 
 #if SECS_LOG
     if (Secs_TransInfo->SecsSend_Message) {
-        printf("Generated SECS message: %s\n", Secs_TransInfo->SecsSend_Message);
+        printf("Generated SECS message: %s\n",
+               Secs_TransInfo->SecsSend_Message);
     }
 #endif
     return 0;
@@ -408,9 +420,12 @@ void SecsData_DealCallback1(SecsHead *SecsRecv_Head, uint8_t *SecsRecv_Buf) {
                SecsRecv_Head->Secs_Type.Stream_ID,
                SecsRecv_Head->Secs_Type.Function_ID);
         if (SecsRecv_Head->Reply_Bit) {
-            tvoc_secs1.SecsSend_Type.Stream_ID = SecsRecv_Head->Secs_Type.Stream_ID;
-            tvoc_secs1.SecsSend_Type.Function_ID = SecsRecv_Head->Secs_Type.Function_ID + 1;
-            tvoc_secs1.SecsSend_Type.SFType_NO = 0x00; // Set a default SFType_NO
+            tvoc_secs1.SecsSend_Type.Stream_ID =
+                SecsRecv_Head->Secs_Type.Stream_ID;
+            tvoc_secs1.SecsSend_Type.Function_ID =
+                SecsRecv_Head->Secs_Type.Function_ID + 1;
+            tvoc_secs1.SecsSend_Type.SFType_NO =
+                0x00; // Set a default SFType_NO
             if (Secs_MessageCtrl(&tvoc_secs1) == 0) {
                 tvoc_secs1.SecsSend_Flag = 1;
             }
@@ -425,9 +440,12 @@ void SecsData_DealCallback2(SecsHead *SecsRecv_Head, uint8_t *SecsRecv_Buf) {
                SecsRecv_Head->Secs_Type.Stream_ID,
                SecsRecv_Head->Secs_Type.Function_ID);
         if (SecsRecv_Head->Reply_Bit) {
-            tvoc_secs2.SecsSend_Type.Stream_ID = SecsRecv_Head->Secs_Type.Stream_ID;
-            tvoc_secs2.SecsSend_Type.Function_ID = SecsRecv_Head->Secs_Type.Function_ID + 1;
-            tvoc_secs2.SecsSend_Type.SFType_NO = 0x01; // Set a default SFType_NO
+            tvoc_secs2.SecsSend_Type.Stream_ID =
+                SecsRecv_Head->Secs_Type.Stream_ID;
+            tvoc_secs2.SecsSend_Type.Function_ID =
+                SecsRecv_Head->Secs_Type.Function_ID + 1;
+            tvoc_secs2.SecsSend_Type.SFType_NO =
+                0x01; // Set a default SFType_NO
             if (Secs_MessageCtrl(&tvoc_secs2) == 0) {
                 tvoc_secs2.SecsSend_Flag = 1;
             }
@@ -495,8 +513,11 @@ int tvoc_secs_init(void) {
     memset(&tvoc_secs1, 0, sizeof(SecsTransInfo));
 
     // secs报文内容设定
-    secs_init_result = init_secs_app(
-        &tvoc_secs1, &tvoc_secs2, DEVICE_ID, SecsData_DealCallback1, SecsData_DealCallback2);
+    secs_init_result = init_secs_app(&tvoc_secs1,
+                                     &tvoc_secs2,
+                                     DEVICE_ID,
+                                     SecsData_DealCallback1,
+                                     SecsData_DealCallback2);
 
     // Check for initialization errors
     if (secs_init_result != 0) {
@@ -506,7 +527,8 @@ int tvoc_secs_init(void) {
 
     //创建secs处理线程
     pthread_t tvoc_Secs_Handler;
-    secs_init_result = pthread_create(&tvoc_Secs_Handler, NULL, tvoc_Secs_Thread1, NULL);
+    secs_init_result =
+        pthread_create(&tvoc_Secs_Handler, NULL, tvoc_Secs_Thread1, NULL);
     if (secs_init_result != 0) {
         perror("[error ] 创建 tvoc secs 1处理线程失败");
         return -1;
@@ -514,7 +536,8 @@ int tvoc_secs_init(void) {
     printf("[  OK  ] create tvoc secs 1 thread!\n");
     pthread_detach(tvoc_Secs_Handler);
 
-    secs_init_result = pthread_create(&tvoc_Secs_Handler, NULL, tvoc_Secs_Thread2, NULL);
+    secs_init_result =
+        pthread_create(&tvoc_Secs_Handler, NULL, tvoc_Secs_Thread2, NULL);
     if (secs_init_result != 0) {
         perror("[error ] 创建 tvoc secs 2处理线程失败");
         return -1;

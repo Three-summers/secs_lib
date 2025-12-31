@@ -19,25 +19,25 @@ using mutable_bytes_view = secs::core::mutable_bytes_view;
  * - 低 2 位：长度字段字节数 - 1（00->1B, 01->2B, 10->3B）
  */
 enum class format_code : std::uint8_t {
-  list = 0x00,
-  binary = 0x08,
-  boolean = 0x09,
-  ascii = 0x10,
+    list = 0x00,
+    binary = 0x08,
+    boolean = 0x09,
+    ascii = 0x10,
 
-  i8 = 0x18,
-  i1 = 0x19,
-  i2 = 0x1A,
-  i4 = 0x1B,
+    i8 = 0x18,
+    i1 = 0x19,
+    i2 = 0x1A,
+    i4 = 0x1B,
 
-  f8 = 0x20,
-  f4 = 0x21,
+    f8 = 0x20,
+    f4 = 0x21,
 
-  u8 = 0x28,
-  u1 = 0x29,
-  u2 = 0x2A,
-  u4 = 0x2B,
+    u8 = 0x28,
+    u1 = 0x29,
+    u2 = 0x2A,
+    u4 = 0x2B,
 };
 
-inline constexpr std::size_t kMaxLength = 0x00FF'FFFFu;  // 3 字节长度字段最大值
+inline constexpr std::size_t kMaxLength = 0x00FF'FFFFu; // 3 字节长度字段最大值
 
-}  // 命名空间 secs::ii
+} // namespace secs::ii

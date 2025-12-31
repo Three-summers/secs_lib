@@ -22,48 +22,48 @@ namespace secs::core {
  * - 本类不做线程安全保证。
  */
 class FixedBuffer final {
- public:
-  explicit FixedBuffer(
-    std::size_t initial_capacity = kDefaultFixedBufferCapacity,
-    std::size_t max_capacity = kDefaultFixedBufferMaxCapacity);
+public:
+    explicit FixedBuffer(
+        std::size_t initial_capacity = kDefaultFixedBufferCapacity,
+        std::size_t max_capacity = kDefaultFixedBufferMaxCapacity);
 
-  FixedBuffer(FixedBuffer&& other) noexcept;
-  FixedBuffer& operator=(FixedBuffer&& other) noexcept;
+    FixedBuffer(FixedBuffer &&other) noexcept;
+    FixedBuffer &operator=(FixedBuffer &&other) noexcept;
 
-  FixedBuffer(const FixedBuffer&) = delete;
-  FixedBuffer& operator=(const FixedBuffer&) = delete;
+    FixedBuffer(const FixedBuffer &) = delete;
+    FixedBuffer &operator=(const FixedBuffer &) = delete;
 
-  ~FixedBuffer() = default;
+    ~FixedBuffer() = default;
 
-  [[nodiscard]] std::size_t capacity() const noexcept;
-  [[nodiscard]] std::size_t size() const noexcept;
-  [[nodiscard]] bool empty() const noexcept;
+    [[nodiscard]] std::size_t capacity() const noexcept;
+    [[nodiscard]] std::size_t size() const noexcept;
+    [[nodiscard]] bool empty() const noexcept;
 
-  void clear() noexcept;
-  void compact() noexcept;
+    void clear() noexcept;
+    void compact() noexcept;
 
-  [[nodiscard]] bytes_view readable_bytes() const noexcept;
-  [[nodiscard]] mutable_bytes_view writable_bytes() noexcept;
+    [[nodiscard]] bytes_view readable_bytes() const noexcept;
+    [[nodiscard]] mutable_bytes_view writable_bytes() noexcept;
 
-  std::error_code commit(std::size_t n) noexcept;
-  std::error_code append(bytes_view data) noexcept;
-  std::error_code consume(std::size_t n) noexcept;
-  std::error_code reserve(std::size_t new_capacity) noexcept;
+    std::error_code commit(std::size_t n) noexcept;
+    std::error_code append(bytes_view data) noexcept;
+    std::error_code consume(std::size_t n) noexcept;
+    std::error_code reserve(std::size_t new_capacity) noexcept;
 
- private:
-  [[nodiscard]] byte* data_mutable() noexcept;
-  [[nodiscard]] const byte* data_const() const noexcept;
+private:
+    [[nodiscard]] byte *data_mutable() noexcept;
+    [[nodiscard]] const byte *data_const() const noexcept;
 
-  std::error_code ensure_writable(std::size_t n) noexcept;
-  std::error_code grow(std::size_t min_capacity) noexcept;
+    std::error_code ensure_writable(std::size_t n) noexcept;
+    std::error_code grow(std::size_t min_capacity) noexcept;
 
-  std::array<byte, kDefaultFixedBufferCapacity> inline_{};
-  std::unique_ptr<byte[]> heap_;
+    std::array<byte, kDefaultFixedBufferCapacity> inline_{};
+    std::unique_ptr<byte[]> heap_;
 
-  std::size_t max_capacity_{0};
-  std::size_t capacity_{0};
-  std::size_t read_pos_{0};
-  std::size_t write_pos_{0};
+    std::size_t max_capacity_{0};
+    std::size_t capacity_{0};
+    std::size_t read_pos_{0};
+    std::size_t write_pos_{0};
 };
 
-}  // 命名空间 secs::core
+} // namespace secs::core

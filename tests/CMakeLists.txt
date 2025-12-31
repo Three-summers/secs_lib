@@ -34,6 +34,12 @@ add_executable(test_sml_parser test_sml_parser.cpp)
 target_link_libraries(test_sml_parser PRIVATE secs_sml secs_ii secs_core)
 add_test(NAME sml_parser COMMAND test_sml_parser)
 
+add_executable(test_c_api_c test_c_api.c)
+target_link_libraries(test_c_api_c PRIVATE secs_c_api)
+# 该测试源码为 C，但链接必须走 C++ 链接器（底层实现为 C++20）。
+set_target_properties(test_c_api_c PROPERTIES LINKER_LANGUAGE CXX)
+add_test(NAME c_api_c COMMAND test_c_api_c)
+
 if(SECS_ENABLE_COVERAGE)
   secs_enable_coverage(test_core_buffer)
   secs_enable_coverage(test_core_event)
@@ -44,4 +50,5 @@ if(SECS_ENABLE_COVERAGE)
   secs_enable_coverage(test_protocol_session)
   secs_enable_coverage(test_typed_handler)
   secs_enable_coverage(test_sml_parser)
+  secs_enable_coverage(test_c_api_c)
 endif()

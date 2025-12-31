@@ -13,10 +13,10 @@
 namespace secs::secs1 {
 
 struct Timeouts final {
-  secs::core::duration t1_intercharacter{std::chrono::seconds(1)};
-  secs::core::duration t2_protocol{std::chrono::seconds(3)};
-  secs::core::duration t3_reply{std::chrono::seconds(45)};
-  secs::core::duration t4_interblock{std::chrono::seconds(45)};
+    secs::core::duration t1_intercharacter{std::chrono::seconds(1)};
+    secs::core::duration t2_protocol{std::chrono::seconds(3)};
+    secs::core::duration t3_reply{std::chrono::seconds(45)};
+    secs::core::duration t4_interblock{std::chrono::seconds(45)};
 };
 
 /**
@@ -27,15 +27,15 @@ struct Timeouts final {
  * - 可 cancel（用于测试/收尾）
  */
 class Timer final {
- public:
-  explicit Timer(asio::any_io_executor ex);
+public:
+    explicit Timer(asio::any_io_executor ex);
 
-  void cancel() noexcept;
+    void cancel() noexcept;
 
-  asio::awaitable<std::error_code> async_sleep(secs::core::duration d);
+    asio::awaitable<std::error_code> async_sleep(secs::core::duration d);
 
- private:
-  asio::steady_timer timer_;
+private:
+    asio::steady_timer timer_;
 };
 
-}  // 命名空间 secs::secs1
+} // namespace secs::secs1

@@ -29,6 +29,7 @@ function(secs_add_coverage_target target_name)
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
     COMMAND ${GCOVR_EXECUTABLE}
       -r ${PROJECT_SOURCE_DIR}
+      --merge-mode-functions=merge-use-line-min
       --html --html-details
       -o ${PROJECT_BINARY_DIR}/coverage.html
       --exclude '.*/tests/.*'

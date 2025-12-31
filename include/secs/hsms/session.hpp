@@ -21,127 +21,153 @@
 namespace secs::hsms {
 
 enum class SessionState : std::uint8_t {
-  disconnected = 0,
-  connected = 1,
-  selected = 2,
+    disconnected = 0,
+    connected = 1,
+    selected = 2,
 };
 
 struct SessionOptions final {
-  std::uint16_t session_id{0};
+    std::uint16_t session_id{0};
 
-  // HSMS 定时器（默认值偏向测试可控，生产使用建议由上层显式配置）。
-  core::duration t3{std::chrono::seconds{45}};  // T3：回复超时
-  core::duration t5{std::chrono::seconds{10}};  // T5：重连延迟 / SEPARATE 后退避延迟
-  core::duration t6{std::chrono::seconds{5}};   // T6：控制事务超时（SELECT/DESELECT/LINKTEST 等）
-  core::duration t7{std::chrono::seconds{10}};  // T7：未 selected 超时（被动端等待 SELECT）
-  core::duration t8{std::chrono::seconds{5}};   // T8：网络字符间隔超时
+    // HSMS 定时器（默认值偏向测试可控，生产使用建议由上层显式配置）。
+    core::duration t3{std::chrono::seconds{45}}; // T3：回复超时
+    core::duration t5{
+        std::chrono::seconds{10}}; // T5：重连延迟 / SEPARATE 后退避延迟
+    core::duration t6{std::chrono::seconds{
+        5}}; // T6：控制事务超时（SELECT/DESELECT/LINKTEST 等）
+    core::duration t7{
+        std::chrono::seconds{10}}; // T7：未 selected 超时（被动端等待 SELECT）
+    core::duration t8{std::chrono::seconds{5}}; // T8：网络字符间隔超时
 
-  // 链路测试（LINKTEST）周期（0 表示不自动发送）。
-  core::duration linktest_interval{};
+    // 链路测试（LINKTEST）周期（0 表示不自动发送）。
+    core::duration linktest_interval{};
 
-  bool auto_reconnect{true};
+    bool auto_reconnect{true};
 
-  // 被动端是否接受 SELECT（用于单测覆盖“拒绝”分支）。
-  bool passive_accept_select{true};
+    // 被动端是否接受 SELECT（用于单测覆盖“拒绝”分支）。
+    bool passive_accept_select{true};
 };
 
 /**
  * @brief HSMS-SS 会话：连接管理 + 选择状态机 + 控制消息 + 定时器。
  *
  * 设计目标：
- * - 连接层（Connection）只做分帧（framing）与读写；Session 做协议控制流与定时器策略。
+ * - 连接层（Connection）只做分帧（framing）与读写；Session
+ * 做协议控制流与定时器策略。
  * - 不引入额外依赖，错误通过 std::error_code 返回。
  */
 class Session final {
- public:
-  explicit Session(asio::any_io_executor ex, SessionOptions options);
+public:
+    explicit Session(asio::any_io_executor ex, SessionOptions options);
 
-  [[nodiscard]] asio::any_io_executor executor() const noexcept { return executor_; }
-  [[nodiscard]] SessionState state() const noexcept { return state_; }
-  [[nodiscard]] bool is_selected() const noexcept { return state_ == SessionState::selected; }
+    [[nodiscard]] asio::any_io_executor executor() const noexcept {
+        return executor_;
+    }
+    [[nodiscard]] SessionState state() const noexcept { return state_; }
+    [[nodiscard]] bool is_selected() const noexcept {
+        return state_ == SessionState::selected;
+    }
 
-  [[nodiscard]] std::uint64_t selected_generation() const noexcept { return selected_generation_.load(); }
-  [[nodiscard]] std::uint32_t allocate_system_bytes() noexcept { return system_bytes_.fetch_add(1U); }
+    [[nodiscard]] std::uint64_t selected_generation() const noexcept {
+        return selected_generation_.load();
+    }
+    [[nodiscard]] std::uint32_t allocate_system_bytes() noexcept {
+        return system_bytes_.fetch_add(1U);
+    }
 
-  void stop() noexcept;
+    void stop() noexcept;
 
-  asio::awaitable<std::error_code> async_open_active(const asio::ip::tcp::endpoint& endpoint);
-  asio::awaitable<std::error_code> async_open_active(Connection&& connection);
-  asio::awaitable<std::error_code> async_open_passive(asio::ip::tcp::socket socket);
-  asio::awaitable<std::error_code> async_open_passive(Connection&& connection);
+    asio::awaitable<std::error_code>
+    async_open_active(const asio::ip::tcp::endpoint &endpoint);
+    asio::awaitable<std::error_code> async_open_active(Connection &&connection);
+    asio::awaitable<std::error_code>
+    async_open_passive(asio::ip::tcp::socket socket);
+    asio::awaitable<std::error_code>
+    async_open_passive(Connection &&connection);
 
-  // 主动端自动重连主循环：直到 stop()，或 auto_reconnect==false 且发生断线。
-  asio::awaitable<std::error_code> async_run_active(const asio::ip::tcp::endpoint& endpoint);
+    // 主动端自动重连主循环：直到 stop()，或 auto_reconnect==false 且发生断线。
+    asio::awaitable<std::error_code>
+    async_run_active(const asio::ip::tcp::endpoint &endpoint);
 
-  asio::awaitable<std::error_code> async_send(const Message& msg);
+    asio::awaitable<std::error_code> async_send(const Message &msg);
 
-  // 等待下一条数据消息（控制消息会被内部消费/响应）。
-  asio::awaitable<std::pair<std::error_code, Message>> async_receive_data(
-    std::optional<core::duration> timeout = std::nullopt);
+    // 等待下一条数据消息（控制消息会被内部消费/响应）。
+    asio::awaitable<std::pair<std::error_code, Message>>
+    async_receive_data(std::optional<core::duration> timeout = std::nullopt);
 
-  // 发送数据主消息（W=1），并等待同 SystemBytes 的数据消息作为回应（T3）。
-  asio::awaitable<std::pair<std::error_code, Message>> async_request_data(
-    std::uint8_t stream,
-    std::uint8_t function,
-    core::bytes_view body);
+    // 发送数据主消息（W=1），并等待同 SystemBytes 的数据消息作为回应（T3）。
+    asio::awaitable<std::pair<std::error_code, Message>> async_request_data(
+        std::uint8_t stream, std::uint8_t function, core::bytes_view body);
 
-  // 显式发起 LINKTEST（T6）。
-  asio::awaitable<std::error_code> async_linktest();
+    // 发送数据主消息（W=1），并等待同 SystemBytes 的数据消息作为回应（timeout
+    // 优先，否则使用默认 T3）。
+    asio::awaitable<std::pair<std::error_code, Message>>
+    async_request_data(std::uint8_t stream,
+                       std::uint8_t function,
+                       core::bytes_view body,
+                       std::optional<core::duration> timeout);
 
-  // 等待会话进入已选择（selected）状态；min_generation 用于等待“下一次重连后”的 selected。
-  asio::awaitable<std::error_code> async_wait_selected(
-    std::uint64_t min_generation,
-    core::duration timeout);
+    // 显式发起 LINKTEST（T6）。
+    asio::awaitable<std::error_code> async_linktest();
 
- private:
-  struct Pending final {
-    explicit Pending(SType expected) : expected_stype(expected) {}
+    // 等待会话进入已选择（selected）状态；min_generation
+    // 用于等待“下一次重连后”的 selected。
+    asio::awaitable<std::error_code>
+    async_wait_selected(std::uint64_t min_generation, core::duration timeout);
 
-    SType expected_stype;
-    secs::core::Event ready{};
-    std::error_code ec{};
-    std::optional<Message> response{};
-  };
+    // 等待内部 reader_loop_ 退出（用于资源安全回收；timeout=空表示无限等待）。
+    asio::awaitable<std::error_code> async_wait_reader_stopped(
+        std::optional<core::duration> timeout = std::nullopt);
 
-  void reset_state_() noexcept;
-  void set_selected_() noexcept;
-  void on_disconnected_(std::error_code reason) noexcept;
+private:
+    struct Pending final {
+        explicit Pending(SType expected) : expected_stype(expected) {}
 
-  void start_reader_();
-  asio::awaitable<void> reader_loop_();
-  asio::awaitable<void> linktest_loop_(std::uint64_t generation);
+        SType expected_stype;
+        secs::core::Event ready{};
+        std::error_code ec{};
+        std::optional<Message> response{};
+    };
 
-  asio::awaitable<std::pair<std::error_code, Message>> async_control_transaction_(
-    const Message& req,
-    SType expected_rsp,
-    core::duration timeout);
+    void reset_state_() noexcept;
+    void set_selected_() noexcept;
+    void on_disconnected_(std::error_code reason) noexcept;
 
-  asio::awaitable<std::pair<std::error_code, Message>> async_data_transaction_(
-    const Message& req,
-    core::duration timeout);
+    void start_reader_();
+    asio::awaitable<void> reader_loop_();
+    asio::awaitable<void> linktest_loop_(std::uint64_t generation);
 
-  [[nodiscard]] bool fulfill_pending_(const Message& msg) noexcept;
+    asio::awaitable<std::pair<std::error_code, Message>>
+    async_control_transaction_(const Message &req,
+                               SType expected_rsp,
+                               core::duration timeout);
 
-  asio::any_io_executor executor_;
-  SessionOptions options_{};
+    asio::awaitable<std::pair<std::error_code, Message>>
+    async_data_transaction_(const Message &req, core::duration timeout);
 
-  Connection connection_;
+    [[nodiscard]] bool fulfill_pending_(const Message &msg) noexcept;
 
-  std::atomic<std::uint32_t> system_bytes_{1};
+    asio::any_io_executor executor_;
+    SessionOptions options_{};
 
-  SessionState state_{SessionState::disconnected};
-  std::atomic<std::uint64_t> selected_generation_{0};
+    Connection connection_;
 
-  bool stop_requested_{false};
-  bool reader_running_{false};
+    std::atomic<std::uint32_t> system_bytes_{1};
 
-  secs::core::Event selected_event_{};
-  secs::core::Event disconnected_event_{};
+    SessionState state_{SessionState::disconnected};
+    std::atomic<std::uint64_t> selected_generation_{0};
 
-  std::deque<Message> inbound_data_{};
-  secs::core::Event inbound_event_{};
+    bool stop_requested_{false};
+    bool reader_running_{false};
 
-  std::unordered_map<std::uint32_t, std::shared_ptr<Pending>> pending_{};
+    secs::core::Event selected_event_{};
+    secs::core::Event disconnected_event_{};
+    secs::core::Event reader_stopped_event_{};
+
+    std::deque<Message> inbound_data_{};
+    secs::core::Event inbound_event_{};
+
+    std::unordered_map<std::uint32_t, std::shared_ptr<Pending>> pending_{};
 };
 
-}  // 命名空间 secs::hsms
+} // namespace secs::hsms

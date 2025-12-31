@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 
 project(secs
   VERSION 0.1.0
-  LANGUAGES CXX
+  LANGUAGES C CXX
 )
 
 option(SECS_ENABLE_TESTS "Build unit tests" ON)
@@ -100,6 +100,22 @@ target_include_directories(secs_sml
 
 target_link_libraries(secs_sml PUBLIC secs_ii secs_core)
 
+add_library(secs_c_api
+  src/c_api.cpp
+)
+add_library(secs::c_api ALIAS secs_c_api)
+
+target_include_directories(secs_c_api
+  PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+)
+
+target_link_libraries(secs_c_api
+  PUBLIC
+    secs_protocol
+    secs_sml
+)
+
 if(MSVC)
   target_compile_options(secs_core PRIVATE /W4 /WX)
   target_compile_options(secs_secs1 PRIVATE /W4 /WX)
@@ -107,6 +123,7 @@ if(MSVC)
   target_compile_options(secs_hsms PRIVATE /W4 /WX)
   target_compile_options(secs_protocol PRIVATE /W4 /WX)
   target_compile_options(secs_sml PRIVATE /W4 /WX)
+  target_compile_options(secs_c_api PRIVATE /W4 /WX)
 else()
   target_compile_options(secs_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
   target_compile_options(secs_secs1 PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -114,6 +131,7 @@ else()
   target_compile_options(secs_hsms PRIVATE -Wall -Wextra -Wpedantic -Werror)
   target_compile_options(secs_protocol PRIVATE -Wall -Wextra -Wpedantic -Werror)
   target_compile_options(secs_sml PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  target_compile_options(secs_c_api PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
 include("${PROJECT_SOURCE_DIR}/cmake/AsioStandalone.cmake")
@@ -129,6 +147,7 @@ if(SECS_ENABLE_COVERAGE)
   secs_enable_coverage_compile(secs_hsms)
   secs_enable_coverage_compile(secs_protocol)
   secs_enable_coverage_compile(secs_sml)
+  secs_enable_coverage_compile(secs_c_api)
 endif()
 
 if(SECS_ENABLE_TESTS)

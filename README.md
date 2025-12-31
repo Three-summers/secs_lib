@@ -68,6 +68,7 @@
 | secs1 | `secs::secs1` | `secs::core` | SECS-I（SEMI E4）半双工传输状态机（分包/重组、握手、超时） |
 | protocol | `secs::protocol` | `secs::core` + `secs::hsms` + `secs::secs1` | 统一 HSMS/SECS-I 的 `send/request/run` + 路由/自动回复 |
 | sml | `secs::sml` | `secs::ii` + `secs::core` | SML 解析、条件响应匹配、定时规则访问（用于自动化脚本/仿真） |
+| c_api | `secs::c_api` | `secs::protocol` + `secs::sml` | C 语言对外接口（C ABI）：不透明句柄 + 统一错误码 + 内存释放契约 + 内置 io 线程上下文 |
 
 ### 目录结构
 
@@ -75,6 +76,7 @@
 secs_lib/
 ├── CMakeLists.txt
 ├── include/secs/               # 公共头文件
+│   ├── c_api.h                 # C 语言对外接口（C ABI）
 │   ├── core/                   # 基础设施（byte/span、FixedBuffer、Event、error_code）
 │   ├── ii/                     # SECS-II（Item + 编解码）
 │   ├── hsms/                   # HSMS（Message/Connection/Session）
@@ -151,6 +153,33 @@ cmake -S . -B build -DSECS_BUILD_BENCHMARKS=ON
 cmake -S . -B build -DSECS_ENABLE_COVERAGE=ON
 ```
 
+### C 语言集成（C ABI / 对外接口）
+
+本仓库提供一个“可被纯 C 工程调用”的对外接口层（C ABI），用于把内部 C++20 协程/类型系统封装成不透明句柄 + 阻塞式/可组合的 C 函数。
+
+你需要看的文件位置（按重要性）：
+
+- 头文件（接口契约）：`include/secs/c_api.h`
+- 实现（封装细节/线程模型/异常屏蔽）：`src/c_api.cpp`
+- C 侧用法与恶意用例（最推荐当文档读）：`tests/test_c_api.c`
+- CMake target 定义与依赖：`CMakeLists.txt`（搜索 `secs_c_api` / `secs::c_api`）
+
+关键设计约定（必须遵守）：
+
+- 句柄模型：所有对外对象都是不透明句柄（例如 `secs_context_t` / `secs_ii_item_t` / `secs_hsms_session_t` / `secs_protocol_session_t`），只能通过对应的 `*_destroy()` 释放。
+- 错误模型：统一用 `secs_error_t { value, category }` 表达；`value==0` 表示成功；`category` 用于区分错误域（见 `include/secs/c_api.h` 的注释）。
+- 内存模型：凡是“库分配并返回给调用方”的内存（字符串、编码输出、copy 输出等），必须使用 `secs_free()` 释放（不要用 `free()` / `delete`）。
+- 线程模型：必须先 `secs_context_create()` 创建上下文；内部会启动 1 个 io 线程运行 `asio::io_context`。
+  - 部分 API 为阻塞式：会把协程调度到 io 线程执行，并在调用线程等待结果。
+  - 防误用：如果在库内部回调线程（io 线程）调用这些阻塞式 API，会返回 `SECS_C_API_WRONG_THREAD`（避免死锁）。
+
+按功能分组的入口（对应文件都在 `include/secs/c_api.h`）：
+
+- SECS-II：`secs_ii_item_*` + `secs_ii_encode` / `secs_ii_decode_one`
+- SML：`secs_sml_runtime_*`
+- HSMS：`secs_hsms_connection_*` + `secs_hsms_session_*`
+- 协议层：`secs_protocol_session_*`（含 handler 注册、send/request）
+
 ---
 
 ## 使用说明（按模块）
@@ -177,45 +206,15 @@ cmake -S . -B build -DSECS_ENABLE_COVERAGE=ON
 - `encode_to(out_span, item, written)`：编码到固定缓冲区（用于零拷贝/流式写）
 - `decode_one(in_span, out_item, consumed)`：从输入中解析一个 Item（流式，返回消耗字节数）
 
-#### 最小可运行示例：构造 → 编码 → 解码
+#### 最小可运行示例（不贴源码，只给阅读入口）
 
-```cpp
-#include <secs/ii/codec.hpp>
-#include <secs/ii/item.hpp>
+建议按“示例 → 头文件 → 实现 → 单测”的顺序阅读：
 
-#include <iostream>
-#include <vector>
-
-int main() {
-  // <L <A "Hello"> <U2 12345>>
-  secs::ii::Item msg = secs::ii::Item::list({
-    secs::ii::Item::ascii("Hello"),
-    secs::ii::Item::u2({12345}),
-  });
-
-  std::vector<secs::core::byte> encoded;
-  if (auto ec = secs::ii::encode(msg, encoded)) {
-    std::cerr << "encode failed: " << ec.message() << "\n";
-    return 1;
-  }
-
-  secs::ii::Item decoded{secs::ii::List{}};
-  std::size_t consumed = 0;
-  if (auto ec = secs::ii::decode_one(
-        secs::core::bytes_view{encoded.data(), encoded.size()},
-        decoded,
-        consumed)) {
-    std::cerr << "decode failed: " << ec.message() << "\n";
-    return 1;
-  }
-
-  if (auto* list = decoded.get_if<secs::ii::List>()) {
-    std::cout << "decoded list size=" << list->size() << ", consumed=" << consumed << "\n";
-  }
-}
-```
-
-更多更完整示例见：`examples/secs2_simple.cpp`、`tests/test_secs2_codec.cpp`。
+- 示例程序：`examples/secs2_simple.cpp`
+- 类型定义：`include/secs/ii/item.hpp`（`secs::ii::Item` 与各类工厂函数）
+- 编解码接口：`include/secs/ii/codec.hpp`（`encode` / `decode_one` / `encode_to` / `encoded_size`）
+- 具体实现：`src/ii/item.cpp`、`src/ii/codec.cpp`
+- 单元测试：`tests/test_secs2_codec.cpp`（覆盖正常/异常/边界输入）
 
 ---
 
@@ -231,72 +230,22 @@ int main() {
   - `async_receive_data(timeout)`：只等待下一条 data message（控制消息内部处理/应答）
   - `async_request_data(stream, function, body)`：发送 data primary（W=1）并等待同 SystemBytes 的回应（T3）
 
-#### 最小代码片段：Active 侧发送一次请求
+#### 最小阅读路径：Active 侧发送一次 request（不贴源码）
 
-下面示例展示关键调用顺序：`async_open_active()` → `async_request_data()` → `decode_one()`。
+关键调用顺序（对照源码阅读）：
 
-```cpp
-#include <secs/hsms/session.hpp>
-#include <secs/ii/codec.hpp>
-#include <secs/ii/item.hpp>
+1. 构造 `hsms::SessionOptions`（至少设置 `session_id`；生产环境建议显式设置各定时器）
+2. 构造 `hsms::Session`（需要 `asio::any_io_executor`）
+3. `async_open_active(endpoint)`：TCP 建连 + `SELECT` 握手，成功后进入 selected
+4. `async_request_data(stream,function,body)`：发送 data primary（W=1），等待同 `system_bytes` 的 data secondary（受 T3/timeout 控制）
+5. 业务侧对 `reply.body` 调 `ii::decode_one()` 还原 `ii::Item`
 
-#include <asio/co_spawn.hpp>
-#include <asio/detached.hpp>
-#include <asio/io_context.hpp>
-#include <asio/ip/tcp.hpp>
-#include <asio/this_coro.hpp>
+建议直接从这些文件开始读：
 
-#include <chrono>
-#include <iostream>
-#include <vector>
-
-asio::awaitable<void> run_once() {
-  using namespace std::chrono_literals;
-
-  auto ex = co_await asio::this_coro::executor;
-
-  secs::hsms::SessionOptions opt;
-  opt.session_id = 0x0001;
-  opt.t3 = 45s;
-  opt.t6 = 5s;
-  opt.t7 = 10s;
-  opt.t8 = 5s;
-
-  secs::hsms::Session session{ex, opt};
-
-  asio::ip::tcp::endpoint ep{asio::ip::make_address("127.0.0.1"), 5000};
-  if (auto ec = co_await session.async_open_active(ep)) {
-    std::cerr << "open failed: " << ec.message() << "\n";
-    co_return;
-  }
-
-  std::vector<secs::core::byte> body;
-  secs::ii::encode(secs::ii::Item::list({}), body);  // <L>
-
-  auto [req_ec, reply] = co_await session.async_request_data(
-    1, 1, secs::core::bytes_view{body.data(), body.size()});
-  if (req_ec) {
-    std::cerr << "request failed: " << req_ec.message() << "\n";
-    co_return;
-  }
-
-  secs::ii::Item decoded{secs::ii::List{}};
-  std::size_t consumed = 0;
-  if (auto dec_ec = secs::ii::decode_one(
-        secs::core::bytes_view{reply.body.data(), reply.body.size()},
-        decoded,
-        consumed)) {
-    std::cerr << "decode failed: " << dec_ec.message() << "\n";
-    co_return;
-  }
-}
-
-int main() {
-  asio::io_context ioc;
-  asio::co_spawn(ioc, run_once(), asio::detached);
-  ioc.run();
-}
-```
+- API 与注释：`include/secs/hsms/session.hpp`、`include/secs/hsms/message.hpp`
+- 核心实现：`src/hsms/session.cpp`、`src/hsms/connection.cpp`
+- 可运行示例：`examples/hsms_client.cpp`
+- 单元测试：`tests/test_hsms_transport.cpp`（含超时/断连/控制事务覆盖）
 
 #### Active（客户端）典型流程
 
@@ -352,77 +301,26 @@ SECS-I 这一层以“字节流链路”抽象开始：
 
 #### 最小代码片段：注册一个 handler，并发起一次 `async_request`
 
-下面示例展示 `protocol::Session` 的核心用法：
+本节不在 README 里贴 C++ 源码（你已明确希望自行阅读），只给“最短阅读路径 + 读代码时的跟踪顺序”：
 
-```cpp
-#include <secs/hsms/session.hpp>
-#include <secs/ii/codec.hpp>
-#include <secs/ii/item.hpp>
-#include <secs/protocol/session.hpp>
+最短阅读路径（从易到难）：
 
-#include <asio/co_spawn.hpp>
-#include <asio/detached.hpp>
-#include <asio/io_context.hpp>
-#include <asio/ip/tcp.hpp>
-#include <asio/this_coro.hpp>
+- 可运行示例：`examples/typed_handler_example.cpp`
+- 单元测试：`tests/test_protocol_session.cpp`、`tests/test_typed_handler.cpp`
+- API 定义：`include/secs/protocol/session.hpp`、`include/secs/protocol/router.hpp`
+- 具体实现：`src/protocol/session.cpp`、`src/protocol/router.cpp`、`src/protocol/system_bytes.cpp`
 
-#include <iostream>
-#include <vector>
+读代码时建议按这个顺序跟流程：
 
-asio::awaitable<void> run_proto() {
-  auto ex = co_await asio::this_coro::executor;
-
-  secs::hsms::SessionOptions hsms_opt;
-  hsms_opt.session_id = 0x0001;
-
-  secs::hsms::Session hsms{ex, hsms_opt};
-  asio::ip::tcp::endpoint ep{asio::ip::make_address("127.0.0.1"), 5000};
-  if (auto ec = co_await hsms.async_open_active(ep)) {
-    std::cerr << "hsms open failed: " << ec.message() << "\n";
-    co_return;
-  }
-
-  secs::protocol::Session proto{hsms, hsms_opt.session_id};
-
-  // 收到 S1F1 且 W=1 时，框架会自动回 S1F2（function+1）。
-  proto.router().set(1, 1,
-    [](const secs::protocol::DataMessage& /*msg*/)
-      -> asio::awaitable<secs::protocol::HandlerResult> {
-        secs::ii::Item rsp = secs::ii::Item::ascii("OK");
-        std::vector<secs::core::byte> rsp_body;
-        secs::ii::encode(rsp, rsp_body);
-        co_return secs::protocol::HandlerResult{std::error_code{}, std::move(rsp_body)};
-      });
-
-  // HSMS 场景推荐：并行运行接收循环（处理入站消息、唤醒 pending 请求）。
-  asio::co_spawn(ex, proto.async_run(), asio::detached);
-
-  std::vector<secs::core::byte> req_body;
-  secs::ii::encode(secs::ii::Item::list({}), req_body);
-
-  auto [ec, reply] = co_await proto.async_request(
-    1, 1, secs::core::bytes_view{req_body.data(), req_body.size()});
-  if (ec) {
-    std::cerr << "request failed: " << ec.message() << "\n";
-    co_return;
-  }
-
-  (void)reply;  // reply.body 是对端的 SECS-II payload
-}
-
-int main() {
-  asio::io_context ioc;
-  asio::co_spawn(ioc, run_proto(), asio::detached);
-  ioc.run();
-}
-```
+1. 先确保后端会话可用（HSMS：selected；SECS-I：链路就绪）
+2. 构造 `protocol::Session` 绑定后端
+3. 通过 `router().set(stream,function, ...)` 注册 handler（只注册 primary：奇数 function）
+4. 并发运行 `async_run()`：持续接收入站消息、唤醒 pending 请求、调用 handler 并自动回包
+5. 业务侧用 `async_send()`（W=0）或 `async_request()`（W=1）收发数据消息
 
 #### Router handler 的签名
 
-```cpp
-using HandlerResult = std::pair<std::error_code, std::vector<secs::core::byte>>;
-using Handler = std::function<asio::awaitable<HandlerResult>(const DataMessage&)>;
-```
+类型定义见：`include/secs/protocol/router.hpp`（搜索 `HandlerResult` / `Handler`）。
 
 当收到 primary 且 `W-bit=1` 时：
 
@@ -458,20 +356,12 @@ using Handler = std::function<asio::awaitable<HandlerResult>(const DataMessage&)
 
 #### 运行时：加载与匹配
 
-```cpp
-#include <secs/sml/runtime.hpp>
+本节同样不贴源码，直接给阅读入口：
 
-secs::sml::Runtime rt;
-auto ec = rt.load(R"(
-  s1f1: S1F1 W <L>.
-  s1f2: S1F2 <L <A "OK">>.
-  if (s1f1) s1f2.
-  every 5 send s1f1.
-)");
-
-// 收到 S1F1 后，匹配到响应消息名 "s1f2"
-auto rsp = rt.match_response(1, 1, secs::ii::Item::list({}));
-```
+- API 与注释：`include/secs/sml/runtime.hpp`
+- 语法/AST：`include/secs/sml/parser.hpp`、`include/secs/sml/ast.hpp`
+- 具体实现：`src/sml/lexer.cpp`、`src/sml/parser.cpp`、`src/sml/runtime.cpp`
+- 单元测试：`tests/test_sml_parser.cpp`（语法覆盖 + 边界/恶意输入）
 
 更完整语法与边界行为以单测为准：`tests/test_sml_parser.cpp`。
 

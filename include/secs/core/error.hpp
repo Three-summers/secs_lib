@@ -14,19 +14,19 @@ namespace secs::core {
  *   - cancelled：被 stop()/cancel() 主动取消
  */
 enum class errc : int {
-  ok = 0,
-  timeout = 1,
-  cancelled = 2,
-  buffer_overflow = 3,
-  invalid_argument = 4,
+    ok = 0,
+    timeout = 1,
+    cancelled = 2,
+    buffer_overflow = 3,
+    invalid_argument = 4,
 };
 
-const std::error_category& error_category() noexcept;
+const std::error_category &error_category() noexcept;
 std::error_code make_error_code(errc e) noexcept;
 
-}  // 命名空间 secs::core
+} // namespace secs::core
 
 namespace std {
 template <>
 struct is_error_code_enum<secs::core::errc> : true_type {};
-}  // 命名空间 std
+} // namespace std

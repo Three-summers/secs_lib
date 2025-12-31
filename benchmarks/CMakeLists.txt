@@ -1,4 +1,4 @@
-# Benchmarks for SECS library
+# SECS 库性能基准
 
 add_executable(bench_core_buffer bench_core_buffer.cpp)
 target_link_libraries(bench_core_buffer PRIVATE secs::core)
@@ -12,7 +12,7 @@ add_executable(bench_hsms_message bench_hsms_message.cpp)
 target_link_libraries(bench_hsms_message PRIVATE secs::core secs::hsms)
 target_include_directories(bench_hsms_message PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-# Compiler warnings for benchmarks
+# 基准测试：编译警告等级
 if(MSVC)
   target_compile_options(bench_core_buffer PRIVATE /W4)
   target_compile_options(bench_secs2_codec PRIVATE /W4)
@@ -23,7 +23,7 @@ else()
   target_compile_options(bench_hsms_message PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-# Optional: Add optimization flags for Release builds
+# 可选：Release 构建追加优化编译选项
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
   if(MSVC)
     target_compile_options(bench_core_buffer PRIVATE /O2)
