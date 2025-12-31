@@ -4,6 +4,15 @@
 
 namespace secs::core {
 
+/**
+ * @brief 本库通用错误码（跨模块复用）。
+ *
+ * 约定：
+ * - 所有异步/协程接口优先返回 std::error_code，避免异常路径。
+ * - timeout/cancelled 用于描述“等待类 API”的典型结果：
+ *   - timeout：超过指定等待时间
+ *   - cancelled：被 stop()/cancel() 主动取消
+ */
 enum class errc : int {
   ok = 0,
   timeout = 1,

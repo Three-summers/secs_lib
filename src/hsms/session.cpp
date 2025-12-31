@@ -18,6 +18,26 @@ constexpr std::uint16_t kRspReject = 1;
 
 }  // namespace
 
+/*
+ * HSMS::Session 的协程并发模型（便于理解“为什么要有 pending_/Event/reader_loop_”）：
+ *
+ * 1) 读方向：start_reader_() 启动一个常驻 reader_loop_ 协程，串行读取 connection_ 的 HSMS 帧。
+ *
+ * 2) 控制事务/数据事务：
+ *    - async_control_transaction_ / async_data_transaction_ 在发送请求前，把 (system_bytes -> Pending) 登记到 pending_。
+ *    - reader_loop_ 收到响应后，通过 fulfill_pending_() 唤醒对应 Pending::ready。
+ *
+ * 3) 数据消息队列：
+ *    - 未被 pending_ 消费的 data message 会进入 inbound_data_；
+ *    - async_receive_data() 只负责从 inbound_data_ 取“下一条 data”交给上层。
+ *
+ * 4) 断线处理：
+ *    - on_disconnected_ 统一取消 selected_event_/inbound_event_ 以及所有 pending，
+ *      避免协程永久挂起。
+ *
+ * 5) selected_generation_：
+ *    - 每次进入 selected 都会递增 generation，用于让旧连接周期的 linktest_loop_ 在重连后自动退出。
+ */
 Session::Session(asio::any_io_executor ex, SessionOptions options)
   : executor_(ex),
     options_(options),
@@ -53,7 +73,7 @@ void Session::set_selected_() noexcept {
 void Session::on_disconnected_(std::error_code reason) noexcept {
   state_ = SessionState::disconnected;
 
-  // 唤醒所有等待者：selected/inbound/pending。
+  // 唤醒所有等待者：已选择（selected）状态等待、入站队列等待、挂起事务等待。
   selected_event_.cancel();
   selected_event_.reset();
   inbound_event_.cancel();
@@ -103,10 +123,14 @@ asio::awaitable<void> Session::reader_loop_() {
       continue;
     }
 
-    // control messages
+    // 控制消息：SELECT/DESELECT/LINKTEST/SEPARATE 等。
     bool should_exit = false;
     switch (msg.header.s_type) {
       case SType::select_req: {
+        // 被动端收到 SELECT.req：
+        // - 可按配置拒绝（用于单元测试覆盖）
+        // - 校验 SessionID（不匹配则拒绝并断线）
+        // - 已处于 selected 时重复收到 SELECT.req：回拒绝，但保持连接
         if (!options_.passive_accept_select) {
           (void)co_await connection_.async_write_message(
             make_select_rsp(kRspReject, msg.header.system_bytes));
@@ -137,6 +161,9 @@ asio::awaitable<void> Session::reader_loop_() {
         break;
       }
       case SType::select_rsp: {
+        // 主动端收到 SELECT.rsp：
+        // - 先尝试唤醒挂起的控制事务（对应 async_control_transaction_）
+        // - 若接受则进入 selected
         (void)fulfill_pending_(msg);
         if (msg.header.session_id == kRspOk) {
           set_selected_();
@@ -144,6 +171,7 @@ asio::awaitable<void> Session::reader_loop_() {
         break;
       }
       case SType::deselect_req: {
+        // 收到 DESELECT.req：按协议回复后断线（保持实现简单）
         (void)co_await connection_.async_write_message(
           make_deselect_rsp(kRspOk, msg.header.system_bytes));
         (void)co_await connection_.async_close();
@@ -153,13 +181,14 @@ asio::awaitable<void> Session::reader_loop_() {
       }
       case SType::deselect_rsp: {
         (void)fulfill_pending_(msg);
-        // deselect 完成后主动断开，保持实现简单。
+        // DESELECT 交互完成后主动断开，保持实现简单。
         (void)co_await connection_.async_close();
         on_disconnected_(core::make_error_code(core::errc::cancelled));
         should_exit = true;
         break;
       }
       case SType::linktest_req: {
+        // 收到 LINKTEST.req：立即回复 LINKTEST.rsp（不进入 inbound_data_）
         (void)co_await connection_.async_write_message(
           make_linktest_rsp(kRspOk, msg.header.system_bytes));
         break;
@@ -235,6 +264,7 @@ asio::awaitable<std::pair<std::error_code, Message>> Session::async_control_tran
   const Message& req,
   SType expected_rsp,
   core::duration timeout) {
+  // 控制事务：把请求登记到 pending_，由 reader_loop_ 收到响应后唤醒。
   const auto sb = req.header.system_bytes;
   auto pending = std::make_shared<Pending>(expected_rsp);
   pending_.insert_or_assign(sb, pending);
@@ -247,6 +277,7 @@ asio::awaitable<std::pair<std::error_code, Message>> Session::async_control_tran
 
   ec = co_await pending->ready.async_wait(timeout);
   if (ec == core::make_error_code(core::errc::timeout)) {
+    // 控制事务超时：按断线处理（关闭连接并取消所有等待者），避免会话进入“不一致的半状态”。
     pending_.erase(sb);
     (void)co_await connection_.async_close();
     on_disconnected_(ec);
@@ -270,6 +301,7 @@ asio::awaitable<std::pair<std::error_code, Message>> Session::async_control_tran
 asio::awaitable<std::pair<std::error_code, Message>> Session::async_data_transaction_(
   const Message& req,
   core::duration timeout) {
+  // 数据事务（W=1）：同样用 pending_ 做请求-响应匹配，超时视为连接异常。
   const auto sb = req.header.system_bytes;
   auto pending = std::make_shared<Pending>(SType::data);
   pending_.insert_or_assign(sb, pending);
@@ -323,6 +355,7 @@ asio::awaitable<std::error_code> Session::async_open_active(Connection&& connect
   }
 
   if (reader_running_) {
+    // 若旧连接的 reader_loop_ 仍在跑，先关闭旧连接并等待其退出，避免两个 reader 同时读不同连接造成状态混乱。
     (void)co_await connection_.async_close();
     (void)co_await disconnected_event_.async_wait(options_.t6);
   }
@@ -363,6 +396,7 @@ asio::awaitable<std::error_code> Session::async_open_passive(Connection&& connec
   }
 
   if (reader_running_) {
+    // 同主动端：确保不会有“两个 reader_loop_ 同时存在”。
     (void)co_await connection_.async_close();
     (void)co_await disconnected_event_.async_wait(options_.t6);
   }
@@ -388,6 +422,7 @@ asio::awaitable<std::error_code> Session::async_run_active(const asio::ip::tcp::
       if (!options_.auto_reconnect || stop_requested_) {
         co_return ec;
       }
+      // 连接失败：按 T5 退避后重试。
       Timer timer(executor_);
       (void)co_await timer.async_wait_for(options_.t5);
       continue;

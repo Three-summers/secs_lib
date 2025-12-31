@@ -7,28 +7,28 @@
 namespace secs::sml {
 
 enum class TokenType : std::uint8_t {
-  // Literals
-  Identifier,     // name, S1F1, etc.
-  String,         // "..." or '...'
-  Integer,        // 123, 0x1F
+  // 字面量
+  Identifier,     // 名称、S1F1 等
+  String,         // "..."/'...'
+  Integer,        // 123、0x1F
   Float,          // 0.5567
 
-  // Keywords
-  KwIf,           // if
-  KwEvery,        // every
-  KwSend,         // send
-  KwW,            // W (wait bit)
+  // 关键字
+  KwIf,           // 关键字 "if"
+  KwEvery,        // 关键字 "every"
+  KwSend,         // 关键字 "send"
+  KwW,            // W（等待位）
 
-  // Item types
-  KwL,            // L (List)
-  KwA,            // A (ASCII)
-  KwB,            // B (Binary)
-  KwBoolean,      // Boolean
-  KwU1, KwU2, KwU4, KwU8,  // Unsigned
-  KwI1, KwI2, KwI4, KwI8,  // Signed
-  KwF4, KwF8,     // Float
+  // 数据项类型（SECS-II 数据项）
+  KwL,            // L（列表）
+  KwA,            // A（ASCII 字符串）
+  KwB,            // B（二进制）
+  KwBoolean,      // Boolean（布尔）
+  KwU1, KwU2, KwU4, KwU8,  // 无符号整数
+  KwI1, KwI2, KwI4, KwI8,  // 有符号整数
+  KwF4, KwF8,     // 浮点数
 
-  // Punctuation
+  // 标点
   Colon,          // :
   Dot,            // .
   LAngle,         // <
@@ -39,7 +39,7 @@ enum class TokenType : std::uint8_t {
   RBracket,       // ]
   Equals,         // ==
 
-  // Special
+  // 特殊
   Eof,
   Error,
 };

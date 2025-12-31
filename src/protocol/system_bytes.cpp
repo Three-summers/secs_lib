@@ -15,6 +15,13 @@ constexpr std::uint32_t kMinSystemBytes = 1U;
 
 }  // namespace
 
+/*
+ * SystemBytes 分配策略：
+ * - 0 作为保留值永不分配（HSMS/SECS-I 的 SystemBytes 语义中通常不使用 0）
+ * - 优先复用已释放的值（free_ 队列）
+ * - 否则从 next_ 递增寻找未占用值，达到 UINT32_MAX 后回绕到 1
+ * - 用 in_use_ 集合防止“同一时刻重复分配”
+ */
 SystemBytes::SystemBytes(std::uint32_t initial) noexcept : next_(initial) {
   if (next_ == 0U) {
     next_ = kMinSystemBytes;

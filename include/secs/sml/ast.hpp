@@ -14,13 +14,13 @@ namespace secs::sml {
 /**
  * @brief 消息定义
  *
- * 格式: name: SxFy [W] <Item>.
+ * 格式：名称: SxFy [W] <Item>.
  */
 struct MessageDef {
-  std::string name;           // 消息名称 (可为空表示匿名)
+  std::string name;           // 消息名称（可为空，表示匿名）
   std::uint8_t stream{0};     // Stream 号
   std::uint8_t function{0};   // Function 号
-  bool w_bit{false};          // Wait bit
+  bool w_bit{false};          // W 位（等待位）
   ii::Item item;              // 消息体
 
   MessageDef() : item(ii::List{}) {}
@@ -29,18 +29,18 @@ struct MessageDef {
 /**
  * @brief 条件表达式
  *
- * 格式: msgname [(index)][==<Item>]
+ * 格式：消息名[(index)][==<Item>]
  */
 struct Condition {
   std::string message_name;           // 触发消息名或 SxFy
-  std::optional<std::size_t> index;   // 可选的索引 (1-based)
+  std::optional<std::size_t> index;   // 可选的索引（从 1 开始）
   std::optional<ii::Item> expected;   // 可选的期望值
 };
 
 /**
  * @brief 条件响应规则
  *
- * 格式: if (condition) response.
+ * 格式：if (条件) 响应消息名.
  */
 struct ConditionRule {
   Condition condition;
@@ -50,7 +50,7 @@ struct ConditionRule {
 /**
  * @brief 定时发送规则
  *
- * 格式: every N send msgname.
+ * 格式：every N send 消息名.
  */
 struct TimerRule {
   std::uint32_t interval_seconds{0};

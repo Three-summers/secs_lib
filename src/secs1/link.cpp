@@ -8,6 +8,18 @@
 
 namespace secs::secs1 {
 
+/*
+ * MemoryLink：用于单元测试的“内存串口”模拟。
+ *
+ * - create() 会生成一对 Endpoint（A/B），两端共享一份 SharedState：
+ *   - a_to_b / b_to_a：模拟两个方向的字节队列
+ *   - a_event / b_event：用于在队列由空变为非空时唤醒读协程
+ *
+ * - drop_next(n)：丢弃接下来写入的前 n 个字节（用于模拟丢包/噪声）
+ * - set_fixed_delay(d)：为写入引入固定延迟（用于模拟串口时延与超时分支）
+ *
+ * 说明：该实现只用于测试场景，不追求高性能与强并发语义。
+ */
 struct MemoryLink::Endpoint::SharedState final {
   secs::core::Event a_event{};
   secs::core::Event b_event{};
@@ -100,11 +112,13 @@ asio::awaitable<std::pair<std::error_code, secs::core::byte>> MemoryLink::Endpoi
       const auto b = in_queue.front();
       in_queue.pop_front();
       if (in_queue.empty()) {
+        // 队列被读空：复位事件，避免后续无意义的立即唤醒。
         in_event.reset();
       }
       co_return std::pair{std::error_code{}, b};
     }
 
+    // 队列为空：等待对端写入并 set() 事件，或等待超时/取消。
     in_event.reset();
     auto ec = co_await in_event.async_wait(timeout);
     if (ec) {

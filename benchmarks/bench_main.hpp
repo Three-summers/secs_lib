@@ -51,7 +51,7 @@ inline void run_benchmark(
   std::vector<double> timings;
   timings.reserve(iterations);
 
-  // Run the benchmark multiple times
+  // 重复执行多次，降低单次抖动影响（取平均值作为结果）
   for (int i = 0; i < iterations; ++i) {
     BenchmarkTimer timer;
     timer.start();
@@ -60,14 +60,14 @@ inline void run_benchmark(
     timings.push_back(timer.elapsed_ms());
   }
 
-  // Calculate average
+  // 计算平均耗时
   double total_ms = 0.0;
   for (double t : timings) {
     total_ms += t;
   }
   double avg_ms = total_ms / iterations;
 
-  // Calculate throughput (MB/s)
+  // 计算吞吐（MB/s）
   double throughput_mbps = 0.0;
   if (avg_ms > 0.0) {
     double seconds = avg_ms / 1000.0;
@@ -93,7 +93,7 @@ inline void print_results() {
   for (const auto& result : results()) {
     std::cout << std::left << std::setw(50) << result.name;
 
-    // Format size
+    // 格式化大小显示
     if (result.data_size >= 1024 * 1024) {
       std::cout << std::setw(15) << (std::to_string(result.data_size / (1024 * 1024)) + " MB");
     } else if (result.data_size >= 1024) {

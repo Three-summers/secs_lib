@@ -100,7 +100,7 @@ class TypedHandler {
    * @return HandlerResult (std::pair<std::error_code, std::vector<byte>>)
    */
   asio::awaitable<HandlerResult> invoke(const DataMessage& msg) {
-    // 步骤 1: 解码 body → Item
+    // 步骤 1：解码消息体 → Item
     if (msg.body.empty()) {
       co_return HandlerResult{core::make_error_code(core::errc::invalid_argument), {}};
     }
@@ -116,23 +116,23 @@ class TypedHandler {
       co_return HandlerResult{decode_ec, {}};
     }
 
-    // 步骤 2: Item → TRequest
+    // 步骤 2：Item → TRequest
     auto request_opt = TRequest::from_item(request_item);
     if (!request_opt.has_value()) {
       co_return HandlerResult{core::make_error_code(core::errc::invalid_argument), {}};
     }
 
-    // 步骤 3: 调用业务逻辑
+    // 步骤 3：调用业务逻辑
     auto [handler_ec, response] = co_await handle(request_opt.value(), msg);
     if (handler_ec) {
-      // 业务逻辑错误：返回错误码，空 body
+      // 业务逻辑错误：返回错误码，消息体置空
       co_return HandlerResult{handler_ec, {}};
     }
 
-    // 步骤 4: TResponse → Item
+    // 步骤 4：TResponse → Item
     ii::Item response_item = response.to_item();
 
-    // 步骤 5: Item → bytes
+    // 步骤 5：Item → 字节序列
     std::vector<secs::core::byte> response_body;
     const auto encode_ec = ii::encode(response_item, response_body);
     if (encode_ec) {

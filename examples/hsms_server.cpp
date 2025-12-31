@@ -61,9 +61,9 @@ asio::awaitable<void> handle_session(hsms::Session& session) {
       }
     }
 
-    // 如果需要回复 (W-bit = 1)，发送简单响应
+    // 如果需要回复（W 位=1），发送一个简单响应
     if (msg.w_bit()) {
-      // 构造响应: S{n}F{n+1}
+      // 构造响应：S{n}F{n+1}
       ii::Item reply_item = ii::Item::ascii("OK");
       std::vector<core::byte> reply_body;
       ii::encode(reply_item, reply_body);
@@ -136,15 +136,15 @@ int main(int argc, char* argv[]) {
   try {
     asio::io_context ioc;
 
-    // 配置 HSMS 会话参数
+    // 配置 HSMS 会话参数（示例值）
     hsms::SessionOptions opt;
     opt.session_id = 0x0001;
-    opt.t3 = 45s;   // Reply timeout
-    opt.t6 = 5s;    // Control timeout
-    opt.t7 = 10s;   // Not-selected timeout
-    opt.t8 = 5s;    // Network intercharacter timeout
+    opt.t3 = 45s;   // T3：回复超时
+    opt.t6 = 5s;    // T6：控制事务超时
+    opt.t7 = 10s;   // T7：未进入“已选择”状态的超时
+    opt.t8 = 5s;    // T8：字符间隔超时
 
-    // 创建 TCP acceptor
+    // 创建 TCP 监听器
     asio::ip::tcp::acceptor acceptor(
         ioc,
         asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port));

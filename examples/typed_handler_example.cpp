@@ -28,7 +28,7 @@ using namespace secs::ii;
 using namespace secs::core;
 
 // ============================================================================
-// S1F1 Handler 实现
+// S1F1 处理器实现
 // ============================================================================
 class S1F1Handler : public TypedHandler<S1F1Request, S1F2Response> {
  public:
@@ -36,7 +36,7 @@ class S1F1Handler : public TypedHandler<S1F1Request, S1F2Response> {
     : mdln_(std::move(mdln)), softrev_(std::move(softrev)) {}
 
   asio::awaitable<std::pair<std::error_code, S1F2Response>> handle(
-      const S1F1Request& /*request*/,
+      [[maybe_unused]] const S1F1Request& request,
       const DataMessage& raw) override {
     std::cout << "[S1F1Handler] Received S" << static_cast<int>(raw.stream)
               << "F" << static_cast<int>(raw.function)
@@ -55,7 +55,7 @@ class S1F1Handler : public TypedHandler<S1F1Request, S1F2Response> {
 };
 
 // ============================================================================
-// S2F13 Handler 实现
+// S2F13 处理器实现
 // ============================================================================
 class S2F13Handler : public TypedHandler<S2F13Request, S2F14Response> {
  public:
@@ -102,7 +102,7 @@ void simulate_message_handling(Router& router) {
     msg.system_bytes = 12345;
     msg.body = request_body;
 
-    // 查找并调用 handler
+    // 查找并调用处理器
     auto handler_opt = router.find(1, 1);
     if (handler_opt) {
       auto [ec, response_body] = co_await (*handler_opt)(msg);
@@ -145,7 +145,7 @@ void simulate_message_handling(Router& router) {
     msg.system_bytes = 67890;
     msg.body = request_body;
 
-    // 查找并调用 handler
+    // 查找并调用处理器
     auto handler_opt = router.find(2, 13);
     if (handler_opt) {
       auto [ec, response_body] = co_await (*handler_opt)(msg);
@@ -179,15 +179,15 @@ int main() {
   std::cout << "TypedHandler Example\n";
   std::cout << "====================\n";
 
-  // 创建 Router
+  // 创建 Router（路由器）
   Router router;
 
-  // 注册 S1F1 Handler
+  // 注册 S1F1 处理器
   auto s1f1_handler = std::make_shared<S1F1Handler>("ACME-3000", "v2.1.0");
   register_typed_handler(router, 1, 1, s1f1_handler);
   std::cout << "Registered S1F1 handler\n";
 
-  // 注册 S2F13 Handler
+  // 注册 S2F13 处理器
   auto s2f13_handler = std::make_shared<S2F13Handler>();
   register_typed_handler(router, 2, 13, s2f13_handler);
   std::cout << "Registered S2F13 handler\n";

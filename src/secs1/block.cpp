@@ -8,6 +8,14 @@
 namespace secs::secs1 {
 namespace {
 
+/*
+ * SECS-I Block 编解码说明（对应 include/secs/secs1/block.hpp 的协议描述）：
+ *
+ * - frame = Length(1B) + Header(10B) + Data(NB) + Checksum(2B)
+ * - Checksum 为对 (Header+Data) 的逐字节求和（mod 65536），以大端序写入 2 字节。
+ *
+ * 该文件实现只做“字节级编解码与校验”，不处理 ENQ/EOT/ACK/NAK 的链路控制。
+ */
 class secs1_error_category final : public std::error_category {
  public:
   const char* name() const noexcept override { return "secs.secs1"; }
@@ -46,6 +54,7 @@ std::error_code make_error_code(errc e) noexcept {
 }
 
 std::uint16_t checksum(secs::core::bytes_view bytes) noexcept {
+  // 校验和：逐字节求和后取低 16 位（mod 65536）。
   std::uint32_t sum = 0;
   for (const auto b : bytes) {
     sum += b;
@@ -76,6 +85,8 @@ std::error_code encode_block(
   out.reserve(1 + length + 2);
   out.push_back(static_cast<secs::core::byte>(length));
 
+  // 头部字段的位打包规则：
+  // - DeviceID / BlockNumber 的最高位与 reverse_bit/end_bit 共用一个字节（高位为标志，低 7 位为高位数据）
   const auto dev_hi = static_cast<secs::core::byte>((header.device_id >> 8) & 0x7F);
   const auto dev_lo = static_cast<secs::core::byte>(header.device_id & 0xFF);
 
@@ -97,6 +108,7 @@ std::error_code encode_block(
 
   out.insert(out.end(), data.begin(), data.end());
 
+  // 校验和计算范围：长度字段之后的负载（即头部 + 数据）。
   const auto cs = checksum(secs::core::bytes_view{out.data() + 1, length});
   out.push_back(static_cast<secs::core::byte>((cs >> 8) & 0xFF));
   out.push_back(static_cast<secs::core::byte>(cs & 0xFF));

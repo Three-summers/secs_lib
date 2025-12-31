@@ -141,6 +141,9 @@ asio::awaitable<std::pair<std::error_code, std::size_t>> Connection::async_read_
     co_return co_await stream_->async_read_some(core::mutable_bytes_view{dst, n});
   }
 
+  // T8（网络字符间隔超时）的实现思路：
+  // - 并行等待“读到任意字节”与“定时器到期”，谁先完成就采用谁的结果。
+  // - 若定时器先到：取消底层流，让读协程尽快返回，然后向上报告超时。
   auto ex = co_await asio::this_coro::executor;
   asio::steady_timer timer(ex);
   timer.expires_after(options_.t8);
@@ -171,7 +174,7 @@ asio::awaitable<std::pair<std::error_code, std::size_t>> Connection::async_read_
     co_return read_result;
   }
 
-  // timer 先完成，按 T8 超时处理。
+  // 定时器先完成：按 T8 超时处理。
   stream_->cancel();
   co_return std::pair{core::make_error_code(core::errc::timeout), std::size_t{0}};
 }
@@ -196,6 +199,11 @@ asio::awaitable<std::error_code> Connection::async_write_message(const Message& 
     co_return core::make_error_code(core::errc::invalid_argument);
   }
 
+  // 写入串行化：
+  // - HSMS 帧必须以“整帧”为单位写入，否则并发写会在 TCP 字节流中交错，破坏分帧边界。
+  // - 这里用 write_in_progress_ + write_gate_ 做一个简单的协程锁：
+  //   - write_in_progress_=true 表示有人持锁；其余协程等待 write_gate_ 被 set()
+  //   - 当前协程持锁后 reset() write_gate_；写完再 set() write_gate_ 唤醒等待者
   while (write_in_progress_) {
     auto ec = co_await write_gate_.async_wait();
     if (ec) {

@@ -168,7 +168,7 @@ bytes_view as_bytes(std::string_view s) {
 }
 
 // ---------------------------
-//  Unit tests: SystemBytes / Router
+//  单元测试：SystemBytes / Router
 // ---------------------------
 
 void test_system_bytes_unique_release_reuse_and_wrap() {
@@ -206,18 +206,18 @@ void test_system_bytes_unique_release_reuse_and_wrap() {
   sb.release(c);
   TEST_EXPECT_EQ(sb.in_use_count(), 0U);
 
-  // 非法 release（0）应被忽略；未在用的 release 应被忽略。
+  // 非法释放值（0）应被忽略；释放未在用的值也应被忽略。
   sb.release(0U);
   sb.release(0xA5A5A5A5U);
   TEST_EXPECT_EQ(sb.in_use_count(), 0U);
 
-  // initial=0 应被归一化到 1。
+  // 初始值为 0 时应归一化到 1。
   SystemBytes sb0(0U);
   std::uint32_t z = 0;
   TEST_EXPECT_OK(sb0.allocate(z));
   TEST_EXPECT_EQ(z, 1U);
 
-  // wrap-around：从 0xFFFFFFFE 开始分配应能回到 1（跳过 0）。
+  // 回绕：从 0xFFFFFFFE 开始分配应能回到 1（跳过 0）。
   SystemBytes sb2(0xFFFFFFFEU);
   std::uint32_t x1 = 0;
   std::uint32_t x2 = 0;
@@ -250,7 +250,7 @@ void test_router_set_find_erase_clear() {
 }
 
 // ---------------------------
-//  Integration tests
+//  集成测试
 // ---------------------------
 
 void test_hsms_protocol_pending_filters() {
@@ -289,9 +289,9 @@ void test_hsms_protocol_pending_filters() {
   Session proto_server(server, session_id, proto_opts);
   Session proto_client(client, session_id, proto_opts);
 
-  // server handler：在回复前插入两条“同 SystemBytes 但不应 fulfill pending”的消息：
-  // 1) secondary 但 function 不匹配
-  // 2) primary（function odd）且 w_bit=true
+  // 服务端处理器：在回复前插入两条“SystemBytes 相同但不应命中挂起请求”的消息：
+  // 1) 应答消息（secondary）但 Function 号不匹配
+  // 2) 请求消息（primary，Function 为奇数）且 W 位=true
   proto_server.router().set(1, 1, [&](const DataMessage& msg) -> asio::awaitable<secs::protocol::HandlerResult> {
     {
       const auto wrong_secondary = secs::hsms::make_data_message(
@@ -427,7 +427,7 @@ void test_hsms_protocol_stop_cancels_pending() {
       TEST_EXPECT_OK(co_await server_opened.async_wait(200ms));
       TEST_EXPECT_OK(co_await client_opened.async_wait(200ms));
 
-      // 发起一个会挂起的 request，然后由 stop() 取消（覆盖 cancel_all_pending_ 分支）。
+      // 发起一个会挂起的请求，然后由 stop() 取消（覆盖 cancel_all_pending_ 分支）。
       auto [ec, rsp] = co_await proto_client.async_request(1, 1, as_bytes("will-cancel"), 200ms);
       (void)rsp;
       TEST_EXPECT_EQ(ec, make_error_code(errc::cancelled));
@@ -486,7 +486,7 @@ void test_hsms_protocol_run_without_poll_interval() {
   Session proto_server(server, session_id, SessionOptions{.t3 = 200ms, .poll_interval = 0ms});
   Session proto_client(client, session_id, SessionOptions{.t3 = 200ms, .poll_interval = 1ms});
 
-  // handler：用于覆盖 normalize_timeout(d==0) 分支（poll_interval=0 -> receive(timeout=nullopt)）。
+  // 处理器：用于覆盖 normalize_timeout(d==0) 分支（poll_interval=0 会被归一化为 std::nullopt，即“无超时等待”）。
   proto_server.router().set(1, 1, [&](const DataMessage& msg) -> asio::awaitable<secs::protocol::HandlerResult> {
     co_return secs::protocol::HandlerResult{std::error_code{}, msg.body};
   });
@@ -608,10 +608,10 @@ void test_hsms_protocol_echo_1000() {
       TEST_EXPECT_OK(co_await server_opened.async_wait(200ms));
       TEST_EXPECT_OK(co_await client_opened.async_wait(200ms));
 
-      // server 侧 run loop 负责接收并回包
+      // 服务端接收循环负责接收并回包
       asio::co_spawn(ioc, proto_server.async_run(), asio::detached);
 
-      // client 侧 run loop 可由 async_request 自动拉起；这里显式启动一次以覆盖“重复 run”分支
+      // 客户端接收循环可由 async_request 自动拉起；这里显式启动一次以覆盖“重复 run”分支
       asio::co_spawn(ioc, proto_client.async_run(), asio::detached);
 
       for (std::size_t i = 0; i < 1000; ++i) {
@@ -704,7 +704,7 @@ void test_hsms_protocol_t3_timeout() {
       TEST_EXPECT_OK(co_await server_opened.async_wait(200ms));
       TEST_EXPECT_OK(co_await client_opened.async_wait(200ms));
 
-      // 不启动 protocol server，不注册 handler -> client 应触发 T3 timeout
+      // 不启动协议层服务端、不注册处理器 -> 客户端应触发 T3 超时
       auto [ec, rsp] = co_await proto_client.async_request(1, 1, as_bytes("ping"));
       (void)rsp;
       TEST_EXPECT_EQ(ec, make_error_code(errc::timeout));
@@ -745,7 +745,7 @@ void test_secs1_protocol_echo_100() {
   std::atomic<std::size_t> handled{0};
   proto_server.router().set(2, 3, [&](const DataMessage& msg) -> asio::awaitable<secs::protocol::HandlerResult> {
     ++handled;
-    // 这里做一个简单变换：回包在末尾追加 1B，覆盖非空 body 分支
+    // 这里做一个简单变换：回包在末尾追加 1B，覆盖非空消息体分支
     std::vector<byte> out = msg.body;
     out.push_back(static_cast<byte>(0xEE));
     co_return secs::protocol::HandlerResult{std::error_code{}, std::move(out)};

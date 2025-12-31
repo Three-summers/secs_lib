@@ -237,7 +237,7 @@ void test_decode_checksum_mismatch() {
   std::vector<byte> frame;
   TEST_EXPECT_OK(secs::secs1::encode_block(h, as_bytes("hello"), frame));
 
-  // 翻转 payload 的一个字节，制造校验失败
+  // 翻转负载的一个字节，制造校验失败
   TEST_EXPECT(frame.size() > 1 + secs::secs1::kHeaderSize);
   frame[1 + secs::secs1::kHeaderSize] ^= 0xFF;
 
@@ -270,7 +270,7 @@ void test_decode_invalid_size_mismatch() {
 }
 
 void test_decode_block_frame_too_large() {
-  // 恶意输入：超长 block frame（长度 > 协议允许的最大值）
+  // 恶意输入：超长块帧（长度 > 协议允许的最大值）
   std::vector<byte> frame(secs::secs1::kMaxBlockFrameSize * 2, 0);
   frame[0] = static_cast<byte>(secs::secs1::kHeaderSize);
 
@@ -926,7 +926,7 @@ void test_state_machine_send_accepts_ack_as_handshake_response_scripted() {
   ScriptedLink link(ioc.get_executor());
 
   link.push_read_ok(secs::secs1::kAck);  // ENQ 的响应：ACK
-  link.push_read_ok(secs::secs1::kAck);  // block 的响应：ACK
+  link.push_read_ok(secs::secs1::kAck);  // 块帧的响应：ACK
 
   StateMachine sm(link, std::nullopt, Timeouts{}, 1);
   auto h = sample_header();
@@ -942,7 +942,7 @@ void test_state_machine_send_accepts_ack_as_handshake_response_scripted() {
 
   ioc.run();
   TEST_EXPECT_OK(result);
-  TEST_EXPECT_EQ(link.writes().size(), 2u);  // ENQ + block
+  TEST_EXPECT_EQ(link.writes().size(), 2u);  // ENQ + 块帧
   TEST_EXPECT_EQ(link.writes()[0].size(), 1u);
   TEST_EXPECT_EQ(link.writes()[0][0], secs::secs1::kEnq);
 }
@@ -951,7 +951,7 @@ void test_state_machine_send_unexpected_ack_response_protocol_error_scripted() {
   asio::io_context ioc;
   ScriptedLink link(ioc.get_executor());
 
-  link.push_read_ok(secs::secs1::kEot);  // handshake OK
+  link.push_read_ok(secs::secs1::kEot);  // 握手完成
   link.push_read_ok(secs::secs1::kEot);  // 非 ACK/NAK
 
   StateMachine sm(link, std::nullopt, Timeouts{}, 1);
@@ -974,7 +974,7 @@ void test_state_machine_send_propagates_ack_read_error_scripted() {
   asio::io_context ioc;
   ScriptedLink link(ioc.get_executor());
 
-  link.push_read_ok(secs::secs1::kEot);  // handshake OK
+  link.push_read_ok(secs::secs1::kEot);  // 握手完成
   link.push_read_error(make_error_code(errc::cancelled));
 
   StateMachine sm(link, std::nullopt, Timeouts{}, 1);
@@ -997,8 +997,8 @@ void test_state_machine_send_block_timeout_retries_to_too_many_retries_scripted(
   asio::io_context ioc;
   ScriptedLink link(ioc.get_executor());
 
-  link.push_read_ok(secs::secs1::kEot);  // handshake OK
-  // 后续 ACK 读不到 -> ScriptedLink 默认返回 timeout，触发重试
+  link.push_read_ok(secs::secs1::kEot);  // 握手完成
+  // 后续 ACK 读不到 -> ScriptedLink 默认返回 errc::timeout，触发重试
 
   StateMachine sm(link, std::nullopt, Timeouts{}, 2);
   auto h = sample_header();
@@ -1108,7 +1108,7 @@ void test_state_machine_receive_when_not_idle_returns_invalid_argument() {
     ioc.stop();
   });
 
-  // 触发第 1 个 receive 进入 wait_block
+  // 触发第 1 次接收进入 wait_block 状态
   asio::co_spawn(
     ioc,
     [&]() -> asio::awaitable<void> {
@@ -1124,7 +1124,7 @@ void test_state_machine_receive_when_not_idle_returns_invalid_argument() {
     ioc,
     [&]() -> asio::awaitable<void> {
       auto [ec, _] = co_await receiver.async_receive(500ms);
-      TEST_EXPECT_EQ(ec, make_error_code(errc::timeout));  // 等不到 length
+      TEST_EXPECT_EQ(ec, make_error_code(errc::timeout));  // 等不到长度字段
       if (++done == 2) {
         watchdog.cancel();
         ioc.stop();
@@ -1180,7 +1180,7 @@ void test_state_machine_receive_invalid_length_returns_invalid_block() {
       TEST_EXPECT_OK(ec0);
       TEST_EXPECT_EQ(ch0, secs::secs1::kEot);
 
-      // 非法 length（<10）
+      // 非法长度（<10）
       TEST_EXPECT_OK(co_await write_byte(a, 0x09));
       auto [ec1, resp] = co_await a.async_read_byte(200ms);
       TEST_EXPECT_OK(ec1);
@@ -1244,7 +1244,7 @@ void test_state_machine_receive_too_many_bad_blocks() {
       TEST_EXPECT_OK(ec0);
       TEST_EXPECT_EQ(ch0, secs::secs1::kEot);
 
-      // 两次都发送错误 block，触发 nack_count >= retry_limit
+      // 连续两次发送错误块帧，触发 nack_count >= retry_limit
       for (int i = 0; i < 2; ++i) {
         TEST_EXPECT_OK(co_await a.async_write(bytes_view{bad.data(), bad.size()}));
         auto [ec1, resp] = co_await a.async_read_byte(200ms);
@@ -1428,7 +1428,7 @@ void test_sender_retries_handshake_on_nak_then_ok() {
   asio::co_spawn(
     ioc,
     [&]() -> asio::awaitable<void> {
-      // 手工接收端：第一次 ENQ 回复 NAK，第二次回复 EOT，然后读 block 并 ACK
+      // 手工接收端：第一次 ENQ 回复 NAK，第二次回复 EOT，然后读块帧并 ACK
       for (;;) {
         auto [ec, ch] = co_await b.async_read_byte(200ms);
         TEST_EXPECT_OK(ec);
@@ -1512,13 +1512,13 @@ void test_sender_retries_block_on_nak() {
       }
       TEST_EXPECT_OK(co_await write_byte(b, secs::secs1::kEot));
 
-      // 第一次 block：回复 NAK
+      // 第一次块帧：回复 NAK
       auto [ec1, frame1] = co_await read_frame(b, 200ms, 200ms);
       TEST_EXPECT_OK(ec1);
       first = frame1;
       TEST_EXPECT_OK(co_await write_byte(b, secs::secs1::kNak));
 
-      // 第二次 block：回复 ACK
+      // 第二次块帧：回复 ACK
       auto [ec2, frame2] = co_await read_frame(b, 200ms, 200ms);
       TEST_EXPECT_OK(ec2);
       second = frame2;
@@ -1574,7 +1574,7 @@ void test_receiver_nak_then_accept_on_checksum_error() {
   asio::co_spawn(
     ioc,
     [&]() -> asio::awaitable<void> {
-      // 手工发送端：ENQ -> 等待 EOT -> 发坏 block -> 等待 NAK -> 发好 block -> 等待 ACK
+      // 手工发送端：ENQ -> 等待 EOT -> 发坏块帧 -> 等待 NAK -> 发好块帧 -> 等待 ACK
       TEST_EXPECT_OK(co_await write_byte(a, secs::secs1::kEnq));
       auto [ec0, ch0] = co_await a.async_read_byte(200ms);
       TEST_EXPECT_OK(ec0);
@@ -1644,7 +1644,7 @@ void test_t1_intercharacter_timeout() {
       TEST_EXPECT_OK(ec0);
       TEST_EXPECT_EQ(ch0, secs::secs1::kEot);
 
-      // 只发 Length + 1 字节，然后等待超过 T1
+      // 只发长度字段 + 1 字节，然后等待超过 T1
       TEST_EXPECT_OK(co_await a.async_write(bytes_view{frame.data(), 2}));
 
       asio::steady_timer t(ioc);
@@ -1743,7 +1743,7 @@ void test_t4_interblock_timeout() {
       TEST_EXPECT_OK(ec0);
       TEST_EXPECT_EQ(ch0, secs::secs1::kEot);
 
-      // 只发送第一个 block（end_bit=false）
+      // 只发送第一个块帧（end_bit=false，表示后面还有块）
       TEST_EXPECT_OK(co_await a.async_write(bytes_view{frames[0].data(), frames[0].size()}));
       (void)co_await a.async_read_byte(200ms);  // ACK
       co_return;

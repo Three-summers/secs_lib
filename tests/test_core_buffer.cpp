@@ -55,7 +55,7 @@ void test_compact() {
 void test_grow_preserve_data() {
   FixedBuffer buf(8);
   TEST_EXPECT_OK(buf.append(as_bytes("12345678")));
-  TEST_EXPECT_OK(buf.append(as_bytes("9")));  // 触发 grow
+  TEST_EXPECT_OK(buf.append(as_bytes("9")));  // 触发扩容（grow）
 
   auto out = buf.readable_bytes();
   TEST_EXPECT_EQ(out.size(), 9u);
@@ -221,7 +221,7 @@ void test_compact_then_grow() {
   TEST_EXPECT_OK(buf.append(as_bytes("12345678")));
   TEST_EXPECT_OK(buf.consume(4));  // 剩下 "5678"
 
-  TEST_EXPECT_OK(buf.append(as_bytes("abcde")));  // compact 后仍不足，触发 grow
+  TEST_EXPECT_OK(buf.append(as_bytes("abcde")));  // compact（整理）后仍不足，触发扩容
   auto out = buf.readable_bytes();
   TEST_EXPECT_EQ(out.size(), 9u);
   TEST_EXPECT_EQ(std::string_view(reinterpret_cast<const char*>(out.data()), out.size()), "5678abcde");
@@ -246,7 +246,7 @@ void test_heap_grow_preserves_data() {
   TEST_EXPECT_OK(buf.append(as_bytes(payload)));
   TEST_EXPECT_EQ(buf.size(), secs::core::kDefaultFixedBufferCapacity);
 
-  TEST_EXPECT_OK(buf.append(as_bytes("b")));  // 触发从 inline 到 heap 的扩容
+  TEST_EXPECT_OK(buf.append(as_bytes("b")));  // 触发从内联缓冲区到堆缓冲区的扩容
   TEST_EXPECT_EQ(buf.size(), secs::core::kDefaultFixedBufferCapacity + 1);
 
   auto out = buf.readable_bytes();

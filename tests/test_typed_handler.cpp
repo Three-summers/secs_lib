@@ -88,7 +88,7 @@ class SuccessHandler : public TypedHandler<TestRequest, TestResponse> {
  public:
   asio::awaitable<std::pair<std::error_code, TestResponse>> handle(
       const TestRequest& request,
-      const DataMessage& /*raw*/) override {
+      const DataMessage& /*原始消息*/) override {
     TestResponse response{"ECHO:" + request.value};
     co_return std::pair{std::error_code{}, response};
   }
@@ -97,8 +97,8 @@ class SuccessHandler : public TypedHandler<TestRequest, TestResponse> {
 class ErrorHandler : public TypedHandler<TestRequest, TestResponse> {
  public:
   asio::awaitable<std::pair<std::error_code, TestResponse>> handle(
-      const TestRequest& /*request*/,
-      const DataMessage& /*raw*/) override {
+      const TestRequest& /*请求*/,
+      const DataMessage& /*原始消息*/) override {
     co_return std::pair{make_error_code(errc::timeout), TestResponse{}};
   }
 };
@@ -168,7 +168,7 @@ void test_decode_error_empty_body() {
     DataMessage msg;
     msg.stream = 1;
     msg.function = 1;
-    msg.body = {};  // 空 body
+    msg.body = {};  // 空消息体
 
     auto [ec, response_body] = co_await handler->invoke(msg);
 
@@ -194,7 +194,7 @@ void test_decode_error_invalid_item() {
     auto msg = make_data_message(body);
     auto [ec, response_body] = co_await handler->invoke(msg);
 
-    // from_item 返回 nullopt -> invalid_argument
+    // from_item 返回 std::nullopt -> invalid_argument
     TEST_EXPECT(ec == make_error_code(errc::invalid_argument));
     TEST_EXPECT(response_body.empty());
 
@@ -209,7 +209,7 @@ void test_decode_error_truncated_body() {
   auto handler = std::make_shared<SuccessHandler>();
 
   asio::co_spawn(ioc, [&]() -> asio::awaitable<void> {
-    // 截断的 body (只有部分头部)
+    // 截断的消息体（只有部分头部）
     std::vector<byte> body = {0x01, 0x02};  // 无效的 SECS-II 数据
 
     auto msg = make_data_message(body);
@@ -252,7 +252,7 @@ void test_register_typed_handler() {
   auto handler = std::make_shared<SuccessHandler>();
   register_typed_handler(router, 1, 1, handler);
 
-  // 验证 handler 已注册
+  // 验证处理器已注册
   auto found = router.find(1, 1);
   TEST_EXPECT(found.has_value());
 
@@ -298,7 +298,7 @@ void test_multiple_handlers() {
 }
 
 void test_secs_message_concept() {
-  // 编译期验证 concept
+  // 编译期验证概念约束（concept）
   static_assert(secs::protocol::SecsMessage<TestRequest>);
   static_assert(secs::protocol::SecsMessage<TestResponse>);
 }

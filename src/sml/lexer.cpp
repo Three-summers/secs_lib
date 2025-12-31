@@ -130,7 +130,7 @@ void Lexer::skip_whitespace() noexcept {
 
 bool Lexer::skip_comment() noexcept {
   if (peek() == '/' && peek_next() == '*') {
-    // Block comment
+    // 块注释：/* ... */
     advance();  // /
     advance();  // *
     while (!at_end()) {
@@ -141,12 +141,12 @@ bool Lexer::skip_comment() noexcept {
       }
       advance();
     }
-    // Unterminated - will be caught later
+    // 未闭合的块注释：当前实现会直接读到 EOF 并结束（不额外生成错误记号）。
     return true;
   }
 
   if (peek() == '/' && peek_next() == '/') {
-    // Line comment
+    // 行注释：// ...
     while (!at_end() && peek() != '\n') {
       advance();
     }
@@ -159,7 +159,7 @@ bool Lexer::skip_comment() noexcept {
 Token Lexer::scan_token() noexcept {
   char c = advance();
 
-  // Single character tokens
+  // 单字符记号（标点等）
   switch (c) {
     case ':': return make_token(TokenType::Colon);
     case '.': return make_token(TokenType::Dot);
@@ -182,14 +182,14 @@ Token Lexer::scan_token() noexcept {
       break;
   }
 
-  // Identifier or keyword
+  // 标识符或关键字
   if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') {
     --current_;
     --column_;
     return scan_identifier();
   }
 
-  // Number
+  // 数字：支持十进制整数、十六进制整数（0x..）与浮点数（含科学计数法）
   if (std::isdigit(static_cast<unsigned char>(c)) || (c == '-' && std::isdigit(static_cast<unsigned char>(peek())))) {
     --current_;
     --column_;
@@ -217,7 +217,7 @@ Token Lexer::scan_string(char quote) noexcept {
       return make_error("unterminated string (newline in string)");
     }
     if (peek() == '\\' && peek_next() != '\0') {
-      advance();  // backslash
+      advance();  // 反斜杠
       char escaped = advance();
       switch (escaped) {
         case 'n': value += '\n'; break;
@@ -237,7 +237,7 @@ Token Lexer::scan_string(char quote) noexcept {
     return make_error("unterminated string");
   }
 
-  advance();  // closing quote
+  advance();  // 结束引号
   return make_token(TokenType::String, std::move(value));
 }
 
@@ -248,7 +248,7 @@ Token Lexer::scan_number() noexcept {
     advance();
   }
 
-  // Check for hex
+  // 判断十六进制：0x1F / 0X1F
   if (peek() == '0' && (peek_next() == 'x' || peek_next() == 'X')) {
     advance();  // 0
     advance();  // x
@@ -259,18 +259,18 @@ Token Lexer::scan_number() noexcept {
     return make_token(TokenType::Integer, std::string(text));
   }
 
-  // Integer part
+  // 整数部分
   while (!at_end() && std::isdigit(static_cast<unsigned char>(peek()))) {
     advance();
   }
 
-  // Check for float
+  // 判断是否为浮点数：要求 '.' 后至少有一位数字，避免把 "S1F1." 的 '.' 误吞成小数点
   if (peek() == '.' && std::isdigit(static_cast<unsigned char>(peek_next()))) {
     advance();  // .
     while (!at_end() && std::isdigit(static_cast<unsigned char>(peek()))) {
       advance();
     }
-    // Exponent
+    // 指数部分：e/E[+/-]后跟数字
     if (peek() == 'e' || peek() == 'E') {
       advance();
       if (peek() == '+' || peek() == '-') {

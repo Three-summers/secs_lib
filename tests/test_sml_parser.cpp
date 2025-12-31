@@ -59,7 +59,7 @@ void test_lexer_numbers() {
 
   TEST_EXPECT(!result.ec);
 
-  // 找到数字 tokens
+  // 找到数字类 token（词法单元）
   bool found_123 = false;
   bool found_hex = false;
   bool found_float = false;
@@ -289,12 +289,12 @@ void test_runtime_timers() {
 }
 
 // ============================================================================
-// 集成测试 - 解析 sample.sml 片段
+// 集成测试 - 解析示例 SML 片段
 // ============================================================================
 
 void test_parse_sample_sml_fragment() {
   const char* sml = R"(
-    /* Sample SML fragment */
+    /* 示例 SML 片段 */
     S1F0.
 
     s1f1_1: S1F1 W

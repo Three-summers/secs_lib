@@ -88,8 +88,8 @@ class Runtime {
   [[nodiscard]] bool items_equal(const ii::Item& a, const ii::Item& b) const noexcept;
 
   Document document_;
-  std::unordered_map<std::string, std::size_t> name_index_;  // name -> messages index
-  std::unordered_map<std::uint16_t, std::size_t> sf_index_;  // (stream<<8|function) -> messages index
+  std::unordered_map<std::string, std::size_t> name_index_;  // 消息名 -> messages 下标
+  std::unordered_map<std::uint16_t, std::size_t> sf_index_;  // (stream<<8|function) -> messages 下标
   bool loaded_{false};
 };
 

@@ -39,15 +39,15 @@ asio::awaitable<void> client_session(
 
   std::cout << "[客户端] 已连接，会话已建立\n";
 
-  // 发送 Linktest 验证连接
+  // 发送 LINKTEST 验证连接
   ec = co_await session.async_linktest();
   if (ec) {
-    std::cout << "[客户端] Linktest 失败: " << ec.message() << "\n";
+    std::cout << "[客户端] LINKTEST 失败: " << ec.message() << "\n";
   } else {
-    std::cout << "[客户端] Linktest 成功\n";
+    std::cout << "[客户端] LINKTEST 成功\n";
   }
 
-  // 示例 1: 发送 S1F1 (Are You There) 并等待响应
+  // 示例 1：发送 S1F1（Are You There / 你在吗）并等待响应
   {
     std::cout << "\n[客户端] 发送 S1F1 (Are You There)...\n";
 
@@ -82,14 +82,14 @@ asio::awaitable<void> client_session(
     }
   }
 
-  // 示例 2: 发送 S2F41 (Host Command Send) 带 ASCII 数据
+  // 示例 2：发送 S2F41（Host Command Send / 主机命令）并等待响应
   {
     std::cout << "\n[客户端] 发送 S2F41 (Host Command)...\n";
 
-    // 构造 SECS-II 消息: L[RCMD, L[{params}]]
+    // 构造 SECS-II 消息：<L <A RCMD> <L PARAMS>>
     ii::Item command = ii::Item::list({
         ii::Item::ascii("START"),  // RCMD
-        ii::Item::list({           // PARAMS (空)
+        ii::Item::list({           // PARAMS（空）
         })
     });
 
@@ -108,14 +108,14 @@ asio::awaitable<void> client_session(
     }
   }
 
-  // 示例 3: 单向消息 (W=0，不等待响应)
+  // 示例 3：单向消息（W=0，不等待响应）
   {
     std::cout << "\n[客户端] 发送 S6F11 (Event Report, 单向)...\n";
 
     ii::Item event = ii::Item::list({
         ii::Item::u4({1}),         // DATAID
-        ii::Item::u4({100}),       // CEID (Collection Event ID)
-        ii::Item::list({           // RPT (空报告)
+        ii::Item::u4({100}),       // CEID（采集事件 ID）
+        ii::Item::list({           // RPT（空报告）
         })
     });
 
@@ -123,10 +123,10 @@ asio::awaitable<void> client_session(
     ii::encode(event, body);
 
     auto msg = hsms::make_data_message(
-        0x0001,  // Session ID
+        0x0001,  // Session ID（会话 ID）
         6,       // Stream
         11,      // Function
-        false,   // W=0 (单向)
+        false,   // W=0（单向）
         session.allocate_system_bytes(),
         core::bytes_view{body.data(), body.size()});
 
@@ -165,14 +165,14 @@ int main(int argc, char* argv[]) {
   try {
     asio::io_context ioc;
 
-    // 配置 HSMS 会话参数
+    // 配置 HSMS 会话参数（示例值）
     hsms::SessionOptions opt;
     opt.session_id = 0x0001;
-    opt.t3 = 45s;   // Reply timeout
-    opt.t6 = 5s;    // Control timeout
-    opt.t7 = 10s;   // Not-selected timeout
-    opt.t8 = 5s;    // Network intercharacter timeout
-    opt.linktest_interval = 30s;  // 定期 Linktest
+    opt.t3 = 45s;   // T3：回复超时
+    opt.t6 = 5s;    // T6：控制事务超时
+    opt.t7 = 10s;   // T7：未进入“已选择”状态的超时
+    opt.t8 = 5s;    // T8：字符间隔超时
+    opt.linktest_interval = 30s;  // 定期发送 LINKTEST
 
     auto session = std::make_shared<hsms::Session>(ioc.get_executor(), opt);
 

@@ -12,6 +12,26 @@
 namespace secs::ii {
 namespace {
 
+/*
+ * SECS-II（SEMI E5）编码规则（与实现中关键函数的对应关系）：
+ *
+ * - 每个 Item 的编码形态为：FormatByte(1B) + Length(1~3B) + Payload(NB)
+ *   - FormatByte：高 6 位为 format_code；低 2 位表示 Length 字段字节数 - 1（00->1B, 01->2B, 10->3B）
+ *   - Length：
+ *     - 对于 List：表示子元素数量（不是字节数）
+ *     - 对于非 List：表示 Payload 字节数
+ *
+ * - 整数/浮点的 Payload 均按“大端序”拼接：
+ *   - 有符号整数：转为等宽无符号后写出（保留补码 bit 形态）
+ *   - 浮点：std::bit_cast 得到 IEEE754 bit 形态后写出
+ *
+ * - 本实现提供两类 API：
+ *   - encode()/encode_to()：编码
+ *   - decode_one()：从输入缓冲区解析一个 Item（流式），并返回 consumed 字节数
+ *
+ * 备注：
+ * - 由于 List 支持递归嵌套，decode 侧设置了深度上限（kMaxDecodeDepth），避免恶意输入导致栈溢出。
+ */
 class secs_ii_error_category final : public std::error_category {
  public:
   const char* name() const noexcept override { return "secs.ii"; }
@@ -69,6 +89,7 @@ constexpr std::uint8_t length_bytes_for(std::uint32_t length) noexcept {
 }
 
 constexpr std::uint8_t make_format_byte(format_code code, std::uint8_t length_bytes) noexcept {
+  // FormatByte：高 6 位为 code，低 2 位为 (length_bytes - 1)。
   return static_cast<std::uint8_t>((static_cast<std::uint8_t>(code) << 2) | (length_bytes - 1));
 }
 
@@ -365,6 +386,7 @@ std::error_code encode_payload(const Item& item, SpanWriter& w) noexcept {
     [&](const auto& v) -> std::error_code {
       using T = std::decay_t<decltype(v)>;
       if constexpr (std::is_same_v<T, List>) {
+        // List 的 Length 表示“子元素个数”，因此这里直接递归编码每个子元素。
         for (const auto& child : v) {
           auto ec = encode_item(child, w);
           if (ec) {
@@ -385,6 +407,7 @@ std::error_code encode_payload(const Item& item, SpanWriter& w) noexcept {
         }
         return {};
       } else if constexpr (std::is_same_v<T, I1>) {
+        // 整数/浮点：统一按大端序写入；有符号整数通过“等宽无符号转换”保留补码位模式。
         for (auto x : v.values) {
           auto ec = w.write_u8(static_cast<byte>(static_cast<std::uint8_t>(x)));
           if (ec) {
@@ -652,10 +675,12 @@ std::error_code decode_item(SpanReader& r, Item& out, std::size_t depth) noexcep
   }
 
   if (*fmt == format_code::list) {
+    // List 的 Length 表示“子元素个数”，因此按 count 递归解析每个子项。
     List items;
     items.reserve(length);
     for (std::uint32_t i = 0; i < length; ++i) {
-      Item child = Item::binary({});  // 占位，后续会被覆盖
+      // Item 禁止默认构造：这里用一个占位值承接递归输出，随后会被 decode_item 覆盖。
+      Item child = Item::binary({});
       ec = decode_item(r, child, depth + 1);
       if (ec) {
         return ec;
@@ -820,6 +845,9 @@ std::error_code encode(const Item& item, std::vector<byte>& out) noexcept {
     return make_error_code(errc::length_overflow);
   }
 
+  // 先一次性扩容到目标大小：
+  // - encode_to 会写入固定 span，避免反复 push_back 带来的 realloc/拷贝
+  // - 失败时回滚 out 的 size，保证调用方看到的 out 仍是“原子追加”的结果
   out.reserve(offset + size);
   out.resize(offset + size);
   mutable_bytes_view dest{out.data() + offset, size};

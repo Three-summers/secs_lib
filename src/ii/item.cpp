@@ -6,6 +6,9 @@
 namespace secs::ii {
 namespace {
 
+// 浮点比较采用“按位相等”而不是“容差比较”：
+// - SECS-II 编解码以字节为单位，关注的是位模式是否一致
+// - 这样可以正确处理 NaN、-0/+0 等边界情况（按值比较可能产生歧义）
 bool float_bits_equal(float a, float b) noexcept {
   return std::bit_cast<std::uint32_t>(a) == std::bit_cast<std::uint32_t>(b);
 }

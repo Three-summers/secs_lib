@@ -10,7 +10,7 @@ using namespace secs::core;
 static void bench_buffer_large_capacity() {
   // 验证 64MB 大容量扩展性能（测试 kDefaultFixedBufferMaxCapacity）
   constexpr std::size_t target_size = 64 * 1024 * 1024;  // 64MB
-  constexpr std::size_t chunk_size = 1024 * 1024;        // 1MB chunks
+  constexpr std::size_t chunk_size = 1024 * 1024;        // 1MB 块
 
   FixedBuffer buf;
   std::vector<byte> chunk(chunk_size, 0xAB);

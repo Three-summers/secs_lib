@@ -42,6 +42,16 @@ using secs::core::make_error_code;
 
 }  // namespace
 
+/*
+ * protocol::Session 统一 HSMS 与 SECS-I 的消息收发：
+ *
+ * - HSMS（全双工）：
+ *   - 为避免“多个请求协程并发读取同一连接”造成竞争，async_request 会确保 async_run 只启动一次；
+ *   - 入站消息由 async_run 统一接收并分发：先尝试匹配 pending（请求-响应），否则按 Router 路由给业务处理器。
+ *
+ * - SECS-I（半双工）：
+ *   - async_request 自己驱动接收循环，在等待 secondary 的同时，也会处理可能插入的 primary（按 Router 路由）。
+ */
 Session::Session(secs::hsms::Session& hsms, std::uint16_t session_id, SessionOptions options)
   : backend_(Backend::hsms),
     executor_(hsms.executor()),
@@ -156,7 +166,7 @@ asio::awaitable<std::pair<std::error_code, DataMessage>> Session::async_request(
   req.system_bytes = sb;
   req.body.assign(body.begin(), body.end());
 
-  // HSMS：用 run loop 统一接收并分发，避免多个 request 并发读造成竞争。
+  // HSMS：用接收循环统一接收并分发，避免多个请求并发读造成竞争。
   if (backend_ == Backend::hsms) {
     ensure_hsms_run_loop_started_();
 
@@ -198,7 +208,7 @@ asio::awaitable<std::pair<std::error_code, DataMessage>> Session::async_request(
     co_return std::pair{std::error_code{}, *pending->response};
   }
 
-  // SECS-I：半双工，request 自己驱动接收循环并在期间处理可能的入站 primary。
+  // SECS-I：半双工，请求侧自己驱动接收循环，并在期间处理可能的入站主消息。
   auto send_ec = co_await async_send_message_(req);
   if (send_ec) {
     system_bytes_.release(sb);
@@ -320,7 +330,7 @@ asio::awaitable<void> Session::handle_inbound_(DataMessage msg) {
     co_return;
   }
 
-  // 未匹配的 secondary：忽略（可能是迟到回应/对端异常发送）。
+  // 未匹配的从消息：忽略（可能是迟到回应/对端异常发送）。
   if (msg.is_secondary()) {
     co_return;
   }

@@ -29,19 +29,19 @@ enum class SessionState : std::uint8_t {
 struct SessionOptions final {
   std::uint16_t session_id{0};
 
-  // HSMS timers（默认值偏向测试可控，生产使用建议由上层显式配置）。
-  core::duration t3{std::chrono::seconds{45}};  // Reply timeout
-  core::duration t5{std::chrono::seconds{10}};  // Reconnect delay / separation delay
-  core::duration t6{std::chrono::seconds{5}};   // Control transaction timeout
-  core::duration t7{std::chrono::seconds{10}};  // Not-selected timeout（passive 侧等待 SELECT）
-  core::duration t8{std::chrono::seconds{5}};   // Network intercharacter timeout
+  // HSMS 定时器（默认值偏向测试可控，生产使用建议由上层显式配置）。
+  core::duration t3{std::chrono::seconds{45}};  // T3：回复超时
+  core::duration t5{std::chrono::seconds{10}};  // T5：重连延迟 / SEPARATE 后退避延迟
+  core::duration t6{std::chrono::seconds{5}};   // T6：控制事务超时（SELECT/DESELECT/LINKTEST 等）
+  core::duration t7{std::chrono::seconds{10}};  // T7：未 selected 超时（被动端等待 SELECT）
+  core::duration t8{std::chrono::seconds{5}};   // T8：网络字符间隔超时
 
-  // Linktest 周期（0 表示不自动发送）。
+  // 链路测试（LINKTEST）周期（0 表示不自动发送）。
   core::duration linktest_interval{};
 
   bool auto_reconnect{true};
 
-  // passive 侧是否接受 SELECT（用于单测覆盖“拒绝”分支）。
+  // 被动端是否接受 SELECT（用于单测覆盖“拒绝”分支）。
   bool passive_accept_select{true};
 };
 
@@ -49,7 +49,7 @@ struct SessionOptions final {
  * @brief HSMS-SS 会话：连接管理 + 选择状态机 + 控制消息 + 定时器。
  *
  * 设计目标：
- * - 连接层（Connection）只做 framing 与读写；Session 做协议控制流与定时器策略。
+ * - 连接层（Connection）只做分帧（framing）与读写；Session 做协议控制流与定时器策略。
  * - 不引入额外依赖，错误通过 std::error_code 返回。
  */
 class Session final {
@@ -70,7 +70,7 @@ class Session final {
   asio::awaitable<std::error_code> async_open_passive(asio::ip::tcp::socket socket);
   asio::awaitable<std::error_code> async_open_passive(Connection&& connection);
 
-  // active 端自动重连主循环：直到 stop() 或 auto_reconnect=false 且发生断线。
+  // 主动端自动重连主循环：直到 stop()，或 auto_reconnect==false 且发生断线。
   asio::awaitable<std::error_code> async_run_active(const asio::ip::tcp::endpoint& endpoint);
 
   asio::awaitable<std::error_code> async_send(const Message& msg);
@@ -79,16 +79,16 @@ class Session final {
   asio::awaitable<std::pair<std::error_code, Message>> async_receive_data(
     std::optional<core::duration> timeout = std::nullopt);
 
-  // 发送 data primary（W=1）并等待同 SystemBytes 的 data 消息作为回应（T3）。
+  // 发送数据主消息（W=1），并等待同 SystemBytes 的数据消息作为回应（T3）。
   asio::awaitable<std::pair<std::error_code, Message>> async_request_data(
     std::uint8_t stream,
     std::uint8_t function,
     core::bytes_view body);
 
-  // 显式发起 linktest（T6）。
+  // 显式发起 LINKTEST（T6）。
   asio::awaitable<std::error_code> async_linktest();
 
-  // 等待会话进入 selected，min_generation 用于等待“下一次重连后的 selected”。
+  // 等待会话进入已选择（selected）状态；min_generation 用于等待“下一次重连后”的 selected。
   asio::awaitable<std::error_code> async_wait_selected(
     std::uint64_t min_generation,
     core::duration timeout);

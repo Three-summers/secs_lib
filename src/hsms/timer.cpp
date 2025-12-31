@@ -11,6 +11,10 @@ void Timer::cancel() noexcept {
 }
 
 asio::awaitable<std::error_code> Timer::async_wait_for(core::duration d) {
+  // 统一把 asio::steady_timer 的结果映射到 std::error_code：
+  // - 正常到期：成功（返回空 error_code）
+  // - operation_aborted：映射为 errc::cancelled
+  // - 其他：透传底层错误
   timer_.expires_after(d);
   auto [ec] = co_await timer_.async_wait(asio::as_tuple(asio::use_awaitable));
   if (!ec) {

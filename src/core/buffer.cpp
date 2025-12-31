@@ -16,6 +16,15 @@ std::size_t clamp_capacity(std::size_t requested, std::size_t max_capacity) noex
 
 }  // namespace
 
+/*
+ * FixedBuffer 的实现模型：
+ * - 读写指针：read_pos_ / write_pos_ 表示“可读区间”。
+ * - 小包优先走 inline_（固定数组）；必要时切换到 heap_ 并按需扩容。
+ * - ensure_writable(n) 会按顺序尝试：
+ *   1) 当前尾部空间是否足够
+ *   2) compact() 把可读数据搬到头部，回收前缀空洞
+ *   3) grow() 扩容（按 2 倍增长，且受 max_capacity_ 上限约束）
+ */
 FixedBuffer::FixedBuffer(std::size_t initial_capacity, std::size_t max_capacity)
   : max_capacity_(max_capacity),
     capacity_(clamp_capacity(initial_capacity, max_capacity_)) {
@@ -95,6 +104,7 @@ void FixedBuffer::compact() noexcept {
   if (read_pos_ == 0) {
     return;
   }
+  // 将可读区整体搬到头部，保持数据连续，减少后续扩容次数。
   std::memmove(data_mutable(), data_const() + read_pos_, readable);
   read_pos_ = 0;
   write_pos_ = readable;
@@ -158,6 +168,7 @@ std::error_code FixedBuffer::ensure_writable(std::size_t n) noexcept {
   }
 
   if (read_pos_ != 0) {
+    // 尾部空间不够时，先尝试 compact 回收前缀空洞。
     compact();
     if (write_pos_ > capacity_) {
       return make_error_code(errc::invalid_argument);
@@ -187,10 +198,12 @@ std::error_code FixedBuffer::grow(std::size_t min_capacity) noexcept {
   }
 
   if (!heap_ && min_capacity <= inline_.size()) {
+    // 仍可容纳在 inline_ 中：只更新可用容量，不做堆分配。
     capacity_ = min_capacity;
     return {};
   }
 
+  // 扩容策略：按 2 倍增长，直到 >= min_capacity，且不超过 max_capacity_。
   std::size_t new_capacity = std::max<std::size_t>(capacity_ == 0 ? 1 : capacity_, 1);
   while (new_capacity < min_capacity) {
     if (new_capacity > (std::numeric_limits<std::size_t>::max() / 2)) {

@@ -20,7 +20,7 @@ static Item create_deep_nested_list(int depth) {
 }
 
 static void bench_codec_deep_nested() {
-  // 深度嵌套 List (64层)
+  // 深度嵌套 List（64 层）
   constexpr int depth = 64;
 
   Item item = create_deep_nested_list(depth);
@@ -36,7 +36,7 @@ static void bench_codec_deep_nested() {
     encoded_bytes = encoded.size();
   });
 
-  // Decode benchmark
+  // 解码性能
   BENCH_RUN("SECS-II: Decode deep nested list (64 levels)", encoded_bytes, 3, {
     Item decoded{Item::u1({})};
     std::size_t consumed = 0;
@@ -48,7 +48,7 @@ static void bench_codec_deep_nested() {
 }
 
 static void bench_codec_large_list() {
-  // 大型 List (1000 items)
+  // 大型 List（1000 个元素）
   constexpr std::size_t item_count = 1000;
 
   std::vector<Item> items;
@@ -70,7 +70,7 @@ static void bench_codec_large_list() {
     encoded_bytes = encoded.size();
   });
 
-  // Decode benchmark
+  // 解码性能
   BENCH_RUN("SECS-II: Large list decode (1000 items)", encoded_bytes, 3, {
     Item decoded{Item::u1({})};
     std::size_t consumed = 0;
@@ -82,7 +82,7 @@ static void bench_codec_large_list() {
 }
 
 static void bench_codec_large_ascii() {
-  // 大 ASCII (1MB)
+  // 大 ASCII（1MB）
   constexpr std::size_t ascii_size = 1024 * 1024;
 
   std::string large_string(ascii_size, 'A');
@@ -100,7 +100,7 @@ static void bench_codec_large_ascii() {
     encoded_bytes = encoded.size();
   });
 
-  // Decode benchmark
+  // 解码性能
   BENCH_RUN("SECS-II: Large ASCII decode (1MB)", encoded_bytes, 3, {
     Item decoded{Item::u1({})};
     std::size_t consumed = 0;
@@ -112,7 +112,7 @@ static void bench_codec_large_ascii() {
 }
 
 static void bench_codec_large_binary() {
-  // 大 Binary (1MB)
+  // 大 Binary（1MB）
   constexpr std::size_t binary_size = 1024 * 1024;
 
   std::vector<byte> large_binary(binary_size, 0xFF);
@@ -130,7 +130,7 @@ static void bench_codec_large_binary() {
     encoded_bytes = encoded.size();
   });
 
-  // Decode benchmark
+  // 解码性能
   BENCH_RUN("SECS-II: Large Binary decode (1MB)", encoded_bytes, 3, {
     Item decoded{Item::u1({})};
     std::size_t consumed = 0;
@@ -145,7 +145,7 @@ static void bench_codec_numeric_arrays() {
   // 各种数值类型数组性能
   constexpr std::size_t array_size = 10000;
 
-  // U4 array
+  // U4 数组
   {
     std::vector<std::uint32_t> values(array_size);
     for (std::size_t i = 0; i < array_size; ++i) {
@@ -163,7 +163,7 @@ static void bench_codec_numeric_arrays() {
     });
   }
 
-  // F8 array
+  // F8 数组
   {
     std::vector<double> values(array_size);
     for (std::size_t i = 0; i < array_size; ++i) {
@@ -181,7 +181,7 @@ static void bench_codec_numeric_arrays() {
     });
   }
 
-  // I8 array
+  // I8 数组
   {
     std::vector<std::int64_t> values(array_size);
     for (std::size_t i = 0; i < array_size; ++i) {

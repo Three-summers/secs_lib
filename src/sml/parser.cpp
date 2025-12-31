@@ -29,7 +29,7 @@ class ParserErrorCategory : public std::error_category {
 
 const ParserErrorCategory kParserErrorCategory{};
 
-// 解析 SxFy 格式 (如 S1F1, S15F32)
+// 解析 SxFy 格式（例如 S1F1、S15F32）
 bool parse_sf_string(std::string_view text, std::uint8_t& stream, std::uint8_t& function) {
   if (text.size() < 4) return false;
 
@@ -60,7 +60,7 @@ bool parse_sf_string(std::string_view text, std::uint8_t& stream, std::uint8_t& 
 }
 
 std::int64_t parse_integer(std::string_view text) {
-  // Handle hex
+  // 十六进制：0x...
   if (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
     return std::strtoll(text.data(), nullptr, 16);
   }
@@ -136,17 +136,17 @@ void Parser::synchronize() noexcept {
 }
 
 bool Parser::parse_statement() noexcept {
-  // if (...) ...
+  // 条件规则：以关键字 "if" 开始
   if (match(TokenType::KwIf)) {
     return parse_if_rule();
   }
 
-  // every N send ...
+  // 定时发送规则：以关键字 "every" 开始
   if (match(TokenType::KwEvery)) {
     return parse_every_rule();
   }
 
-  // Message definition
+  // 消息定义
   return parse_message_def();
 }
 
@@ -154,10 +154,10 @@ bool Parser::parse_message_def() noexcept {
   MessageDef msg;
 
   // 可能的格式:
-  // 1. name: SxFy [W] <Item>.
-  // 2. name: 'SxFy' [W] <Item>.
-  // 3. SxFy [W] <Item>.
-  // 4. SxFy.  (无 body)
+  // 1. 命名消息：name: SxFy [W] <Item>.
+  // 2. 命名消息：name: 'SxFy' [W] <Item>.
+  // 3. 匿名消息：SxFy [W] <Item>.
+  // 4. 匿名消息：SxFy.（无消息体）
 
   std::string first_token;
 
@@ -219,7 +219,7 @@ bool Parser::parse_message_def() noexcept {
 }
 
 bool Parser::parse_if_rule() noexcept {
-  // if (condition) response.
+  // 语法：if (条件) 响应消息名.
   if (!match(TokenType::LParen)) {
     error("expected '(' after 'if'");
     return false;
@@ -235,7 +235,7 @@ bool Parser::parse_if_rule() noexcept {
     return false;
   }
 
-  // Response message name
+  // 响应消息名
   if (!check(TokenType::Identifier)) {
     error("expected response message name");
     return false;
@@ -255,7 +255,7 @@ bool Parser::parse_if_rule() noexcept {
 }
 
 bool Parser::parse_every_rule() noexcept {
-  // every N send msgname.
+  // 语法：every N send 消息名.
   if (!check(TokenType::Integer)) {
     error("expected interval after 'every'");
     return false;
@@ -496,7 +496,7 @@ std::optional<ii::Item> Parser::parse_float(TokenType type) noexcept {
 }
 
 std::optional<Condition> Parser::parse_condition() noexcept {
-  // condition: msgname [(index)][==<Item>]
+  // 语法：消息名 [(索引)][==<Item>]
   Condition cond;
 
   if (!check(TokenType::Identifier)) {
@@ -506,7 +506,7 @@ std::optional<Condition> Parser::parse_condition() noexcept {
 
   cond.message_name = advance().value;
 
-  // 可选的 (index)
+  // 可选的 (索引)
   if (match(TokenType::LParen)) {
     if (!check(TokenType::Integer)) {
       error("expected index number");
@@ -519,7 +519,7 @@ std::optional<Condition> Parser::parse_condition() noexcept {
     }
   }
 
-  // 可选的 ==<Item>
+  // 可选的 ==<Item>（期望值匹配）
   if (match(TokenType::Equals)) {
     auto item = parse_item();
     if (!item) {

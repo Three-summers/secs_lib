@@ -183,7 +183,7 @@ void test_message_encode_decode_roundtrip() {
   TEST_EXPECT_EQ(out.body.size(), msg.body.size());
   TEST_EXPECT(std::equal(out.body.begin(), out.body.end(), msg.body.begin()));
 
-  // 非法：payload 长度 < header(10B)
+  // 非法：负载长度 < 头部(10B)
   std::vector<byte> bad(4 + 9, 0);
   bad[3] = 9;
   consumed = 0;
@@ -198,13 +198,13 @@ void test_message_encode_decode_roundtrip() {
   ec = secs::hsms::decode_frame(bytes_view{unknown.data(), unknown.size()}, out, consumed);
   TEST_EXPECT_EQ(ec, make_error_code(errc::invalid_argument));
 
-  // decode_frame：frame 长度 < 4B
+  // decode_frame：帧长度 < 4B
   std::vector<byte> too_short = {0x00, 0x01, 0x02};
   consumed = 0;
   ec = secs::hsms::decode_frame(bytes_view{too_short.data(), too_short.size()}, out, consumed);
   TEST_EXPECT_EQ(ec, make_error_code(errc::invalid_argument));
 
-  // decode_frame：length 指向的 frame 不完整
+  // decode_frame：length 指向的帧不完整
   std::vector<byte> incomplete(4 + 10, 0);
   incomplete[0] = 0;
   incomplete[1] = 0;
@@ -214,7 +214,7 @@ void test_message_encode_decode_roundtrip() {
   ec = secs::hsms::decode_frame(bytes_view{incomplete.data(), incomplete.size()}, out, consumed);
   TEST_EXPECT_EQ(ec, make_error_code(errc::invalid_argument));
 
-  // decode_payload：payload 长度 < header
+  // decode_payload：负载长度 < 头部
   std::vector<byte> payload_short(9, 0);
   ec = secs::hsms::decode_payload(bytes_view{payload_short.data(), payload_short.size()}, out);
   TEST_EXPECT_EQ(ec, make_error_code(errc::invalid_argument));
@@ -241,7 +241,7 @@ void test_message_encode_decode_roundtrip() {
     TEST_EXPECT_EQ(consumed, 0u);
   }
 
-  // decode_payload：payload.size() > 16MB 上限（应一致返回 buffer_overflow）
+  // decode_payload：负载长度 > 16MB 上限（应一致返回 buffer_overflow）
   {
     std::vector<byte> big(static_cast<std::size_t>(secs::hsms::kMaxPayloadSize) + 1u, 0);
     ec = secs::hsms::decode_payload(bytes_view{big.data(), big.size()}, out);
@@ -461,7 +461,7 @@ void test_connection_null_stream_and_tcpstream_error_paths() {
   asio::co_spawn(
     ioc,
     [&]() -> asio::awaitable<void> {
-      // null stream：所有异步操作应返回 invalid_argument
+      // 空 Stream：所有异步操作应返回 invalid_argument
       const asio::ip::tcp::endpoint ep{asio::ip::make_address("127.0.0.1"), 1};
       auto ec = co_await null_conn.async_connect(ep);
       TEST_EXPECT_EQ(ec, make_error_code(errc::invalid_argument));
@@ -472,7 +472,7 @@ void test_connection_null_stream_and_tcpstream_error_paths() {
       auto [rec, _] = co_await null_conn.async_read_message();
       TEST_EXPECT_EQ(rec, make_error_code(errc::invalid_argument));
 
-      // tcp stream：未 connect 时读写应返回系统错误（不抛异常）
+      // TCP Stream：未连接时读写应返回系统错误（不抛异常）
       ec = co_await tcp_conn.async_write_message(secs::hsms::make_select_req(0x0001, 0x2));
       TEST_EXPECT(ec.value() != 0);
 
@@ -673,7 +673,7 @@ void test_session_select_req_when_already_selected() {
       auto ec = co_await client.async_open_active(std::move(client_conn));
       TEST_EXPECT_OK(ec);
 
-      // 已经 selected 后再次发送 SELECT.req，触发 server 侧“already selected”分支。
+      // 已经进入“已选择”状态后再次发送 SELECT.req，触发服务端“already selected”分支。
       ec = co_await client.async_send(secs::hsms::make_select_req(opt.session_id, client.allocate_system_bytes()));
       TEST_EXPECT_OK(ec);
 
@@ -722,7 +722,7 @@ void test_session_select_req_session_id_mismatch_disconnects() {
   asio::co_spawn(
     ioc,
     [&]() -> asio::awaitable<void> {
-      // 首次 SELECT.req 的 SessionID 即不匹配，server 将回拒绝并断开。
+      // 首次 SELECT.req 的 SessionID 即不匹配，服务端将回拒绝并断开。
       auto ec = co_await client.async_open_active(std::move(client_conn));
       TEST_EXPECT_EQ(ec, make_error_code(errc::invalid_argument));
 
@@ -886,7 +886,7 @@ void test_session_precondition_and_stop_branches() {
   asio::co_spawn(
     ioc,
     [&]() -> asio::awaitable<void> {
-      // 未连接：send/linktest/request 应返回 invalid_argument
+      // 未连接：async_send/async_linktest/async_request_data 应返回 invalid_argument
       const std::vector<byte> body = {0x01};
       auto ec = co_await client.async_send(secs::hsms::make_data_message(
         opt.session_id,
@@ -906,7 +906,7 @@ void test_session_precondition_and_stop_branches() {
       std::tie(rec, std::ignore) = co_await client.async_receive_data(5ms);
       TEST_EXPECT_EQ(rec, make_error_code(errc::timeout));
 
-      // stop 后 open_* 应返回 cancelled
+      // stop 后 open_* 应返回 errc::cancelled
       client.stop();
       ec = co_await client.async_open_active(std::move(conn));
       TEST_EXPECT_EQ(ec, make_error_code(errc::cancelled));
@@ -944,7 +944,7 @@ void test_session_unknown_control_type_is_ignored() {
       auto ec = co_await client.async_open_active(std::move(client_conn));
       TEST_EXPECT_OK(ec);
 
-      // 发送 Reject.req（当前实现走 default 分支，忽略）。
+      // 发送 Reject.req（当前实现走“默认分支”，忽略）。
       Message m;
       m.header.session_id = opt.session_id;
       m.header.p_type = secs::hsms::kPTypeSecs2;
@@ -988,7 +988,7 @@ void test_session_control_response_type_mismatch_times_out() {
 
   std::atomic<bool> done{false};
 
-  // server：只实现 select 握手；对 linktest.req 返回一个“错误类型”的 select.rsp，导致客户端 pending 无法 fulfill，最终超时。
+  // 服务端：只实现 select 握手；对 linktest.req 返回一个“错误类型”的 select.rsp，导致客户端挂起请求无法完成，最终超时。
   asio::co_spawn(
     ioc,
     [&]() -> asio::awaitable<void> {
@@ -1076,7 +1076,7 @@ void test_session_pending_cancelled_on_disconnect() {
 
   std::atomic<bool> done{false};
 
-  // server：select 成功后，收到 data 后立即发送 separate.req 断线，触发 client pending 被 on_disconnected_ 取消。
+  // 服务端：select 成功后，收到 data 后立即发送 separate.req 断线，触发客户端挂起请求被 on_disconnected_ 取消。
   asio::co_spawn(
     ioc,
     [&]() -> asio::awaitable<void> {
@@ -1143,7 +1143,7 @@ void test_session_t3_reply_timeout() {
       auto ec = co_await server.async_open_passive(std::move(server_conn));
       TEST_EXPECT_OK(ec);
 
-      // 读取一条 data 但不回复，触发客户端 T3。
+      // 读取一条数据消息但不回复，触发客户端 T3。
       auto [rec, _] = co_await server.async_receive_data(200ms);
       TEST_EXPECT_OK(rec);
       co_return;
@@ -1192,7 +1192,7 @@ void test_session_linktest_interval_disconnect_on_failure() {
 
   std::atomic<bool> done{false};
 
-  // server：select 成功后不回应任何 linktest.req，促使 client 的 linktest_loop_ 触发超时并断开。
+  // 服务端：select 成功后不回应任何 linktest.req，促使客户端 linktest_loop_ 触发超时并断开。
   asio::co_spawn(
     ioc,
     [&]() -> asio::awaitable<void> {
@@ -1463,7 +1463,7 @@ void test_run_active_exits_when_auto_reconnect_disabled() {
   asio::co_spawn(
     ioc,
     [&]() -> asio::awaitable<void> {
-      // 在受限环境下，TCP connect 预计会失败（返回 error_code 而非抛异常）。
+      // 在受限环境下，TCP 连接预计会失败（返回 error_code 而非抛异常）。
       const asio::ip::tcp::endpoint ep{asio::ip::make_address("127.0.0.1"), 12345};
       auto ec = co_await client.async_run_active(ep);
       TEST_EXPECT(ec.value() != 0);

@@ -15,6 +15,7 @@ void Timer::cancel() noexcept {
 }
 
 asio::awaitable<std::error_code> Timer::async_sleep(secs::core::duration d) {
+  // 与 hsms::Timer 一致：把 asio::steady_timer 的结果映射到 std::error_code。
   timer_.expires_after(d);
   auto [ec] = co_await timer_.async_wait(asio::as_tuple(asio::use_awaitable));
   if (!ec) {

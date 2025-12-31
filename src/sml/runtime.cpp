@@ -33,7 +33,7 @@ void Runtime::build_index() noexcept {
       name_index_[msg.name] = i;
     }
 
-    // 按 Stream/Function 索引 (仅匿名消息)
+    // 按 Stream/Function 索引（仅匿名消息）
     if (msg.name.empty()) {
       std::uint16_t key = (static_cast<std::uint16_t>(msg.stream) << 8) |
                           static_cast<std::uint16_t>(msg.function);
@@ -84,7 +84,7 @@ std::optional<std::string> Runtime::match_response(
 bool Runtime::match_condition(const Condition& cond, std::uint8_t stream,
                               std::uint8_t function, const ii::Item& item) const noexcept {
   // 检查消息名是否匹配
-  // 条件可以是消息名 (如 s1f1) 或 SxFy 格式
+  // 条件可以是消息名（如 s1f1），也可以直接写成 SxFy 格式（如 S1F1）
 
   // 尝试解析为 SxFy
   std::uint8_t cond_stream = 0, cond_function = 0;
@@ -132,7 +132,7 @@ bool Runtime::match_condition(const Condition& cond, std::uint8_t stream,
     }
 
     // 比较元素
-    const ii::Item& elem = (*list)[idx - 1];  // 1-based index
+    const ii::Item& elem = (*list)[idx - 1];  // 约定：SML 中索引从 1 开始
     if (!items_equal(elem, *cond.expected)) {
       return false;
     }

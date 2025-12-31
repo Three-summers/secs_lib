@@ -4,6 +4,16 @@
 
 namespace secs::core {
 
+/*
+ * Event 的实现要点（理解 set/reset/cancel/timeout 的交互）：
+ *
+ * - 等待者通过 asio::steady_timer 挂起；set()/cancel() 会对所有 waiter 执行 timer->cancel() 来“唤醒”。
+ *
+ * - 由于 timer->cancel() 与 timer 到期都会让 async_wait 返回，因此需要用两个 generation 计数区分来源：
+ *   - set_generation_ 变化：说明被 set() 唤醒 -> 返回成功
+ *   - cancel_generation_ 变化：说明被 cancel() 唤醒 -> 返回 cancelled
+ *   - 两者都没变化：说明是“超时到期”或“底层错误”
+ */
 void Event::cancel_waiters_() noexcept {
   for (const auto& timer : waiters_) {
     timer->cancel();
@@ -31,6 +41,7 @@ asio::awaitable<std::error_code> Event::async_wait(
     co_return std::error_code{};
   }
 
+  // 记录当前 generation，用于在等待结束后判断“是 set/cancel 导致的唤醒”还是“超时/错误”。
   const auto local_set_gen = set_generation_;
   const auto local_cancel_gen = cancel_generation_;
 
@@ -40,6 +51,7 @@ asio::awaitable<std::error_code> Event::async_wait(
   if (timeout.has_value()) {
     timer->expires_after(*timeout);
   } else {
+    // 没有超时时间时，用一个“很远的时间点”模拟永久等待。
     timer->expires_at(asio::steady_timer::time_point::max());
   }
 
@@ -55,10 +67,12 @@ asio::awaitable<std::error_code> Event::async_wait(
   }
 
   if (!ec) {
+    // 定时器正常到期（没有错误码）-> errc::timeout
     co_return make_error_code(errc::timeout);
   }
 
   if (ec == asio::error::operation_aborted) {
+    // 定时器被 cancel() 取消（set/cancel 都会 cancel 定时器）-> errc::cancelled
     co_return make_error_code(errc::cancelled);
   }
 

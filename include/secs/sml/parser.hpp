@@ -59,7 +59,7 @@ class Parser {
   bool parse_if_rule() noexcept;
   bool parse_every_rule() noexcept;
 
-  // 解析 Item
+  // 解析 SECS-II 数据项（<...> 语法）
   std::optional<ii::Item> parse_item() noexcept;
   std::optional<ii::Item> parse_list() noexcept;
   std::optional<ii::Item> parse_ascii() noexcept;

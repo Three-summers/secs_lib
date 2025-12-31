@@ -5,6 +5,9 @@
 namespace secs::core {
 namespace {
 
+// core::errc 的 std::error_category 实现：
+// - name() 用于区分错误域
+// - message() 返回可读的英文描述（便于调试与日志；不参与协议交互）
 class secs_error_category final : public std::error_category {
  public:
   const char* name() const noexcept override { return "secs.core"; }

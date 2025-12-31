@@ -18,7 +18,7 @@
 namespace secs::hsms {
 
 struct ConnectionOptions final {
-  // T8: Network intercharacter timeout（字节间隔超时）。0 表示不启用。
+  // T8：网络字符间隔超时（字节间隔超时）。0 表示不启用。
   core::duration t8{};
 };
 
@@ -26,8 +26,8 @@ struct ConnectionOptions final {
  * @brief HSMS 字节流抽象（用于在受限环境下进行纯内存/非 socket 的单元测试）。
  *
  * 说明：
- * - Connection 只依赖该接口的 read/write/cancel/close 语义。
- * - 生产环境默认使用 TCP stream 实现；测试可注入内存 stream。
+ * - Connection 只依赖该接口的 read/write/cancel/close 语义（不关心底层是 TCP 还是内存队列）。
+ * - 生产环境默认使用 TCP 版本的 Stream；单元测试可注入纯内存 Stream。
  */
 class Stream {
  public:
@@ -44,7 +44,7 @@ class Stream {
 
   virtual asio::awaitable<std::error_code> async_write_all(core::bytes_view src) = 0;
 
-  // 对非 TCP 的 stream，可返回 invalid_argument。
+  // 若底层不支持“连接”语义（例如纯内存流），这里可以直接返回 invalid_argument。
   virtual asio::awaitable<std::error_code> async_connect(const asio::ip::tcp::endpoint& endpoint) = 0;
 };
 

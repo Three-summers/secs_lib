@@ -8,16 +8,16 @@ using namespace secs::core;
 using namespace secs::hsms;
 
 static void bench_hsms_max_payload() {
-  // 16MB payload 编解码（验证 kMaxPayloadSize）
+  // 16MB 负载编解码（验证 kMaxPayloadSize）
   constexpr std::size_t payload_size = 16 * 1024 * 1024;
 
   std::vector<byte> body(payload_size, 0xAA);
   Message msg = make_data_message(
-    0x1234,        // session_id
-    1,             // stream
-    1,             // function
-    false,         // w_bit
-    0x87654321,    // system_bytes
+    0x1234,        // SessionID
+    1,             // Stream 号
+    1,             // Function 号
+    false,         // W 位
+    0x87654321,    // SystemBytes
     bytes_view{body.data(), body.size()});
 
   std::vector<byte> encoded;
@@ -26,7 +26,7 @@ static void bench_hsms_max_payload() {
     encoded = encode_frame(msg);
   });
 
-  // Decode benchmark
+  // 解码基准
   std::size_t frame_size = encoded.size();
   BENCH_RUN("HSMS: Decode 16MB payload", frame_size, 3, {
     Message decoded;
@@ -71,7 +71,7 @@ static void bench_hsms_small_messages() {
     }
   });
 
-  // Decode benchmark
+  // 解码基准
   BENCH_RUN("HSMS: Decode 1000 small messages", total_size, 3, {
     for (const auto& frame : encoded_frames) {
       Message decoded;
@@ -159,7 +159,7 @@ static void bench_hsms_various_sizes() {
 }
 
 static void bench_hsms_decode_payload_only() {
-  // decode_payload 性能测试（不含 4B length field）
+  // decode_payload 性能测试（不含 4B 长度字段）
   constexpr std::size_t payload_size = 8 * 1024 * 1024;  // 8MB
 
   std::vector<byte> body(payload_size, 0xDD);
@@ -172,7 +172,7 @@ static void bench_hsms_decode_payload_only() {
     bytes_view{body.data(), body.size()});
 
   auto full_frame = encode_frame(msg);
-  // 跳过前 4 字节的 length field
+  // 跳过前 4 字节长度字段
   bytes_view payload{full_frame.data() + kLengthFieldSize, full_frame.size() - kLengthFieldSize};
 
   BENCH_RUN("HSMS: decode_payload (8MB)", payload.size(), 3, {

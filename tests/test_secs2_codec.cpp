@@ -140,11 +140,11 @@ void test_item_comparisons() {
 
   const auto f4a = Item::f4(std::vector<float>{0.0f});
   const auto f4b = Item::f4(std::vector<float>{0.0f, 0.0f});
-  TEST_EXPECT(!(f4a == f4b));  // size mismatch
+  TEST_EXPECT(!(f4a == f4b));  // 元素数量不匹配
 
   const auto f4c = Item::f4(std::vector<float>{0.0f, 1.0f});
   const auto f4d = Item::f4(std::vector<float>{0.0f, 2.0f});
-  TEST_EXPECT(!(f4c == f4d));  // element mismatch
+  TEST_EXPECT(!(f4c == f4d));  // 元素内容不匹配
 
   const auto f8c = Item::f8(std::vector<double>{0.0, 1.0});
   const auto f8d = Item::f8(std::vector<double>{0.0, 2.0});
@@ -152,7 +152,7 @@ void test_item_comparisons() {
 
   const auto f8a = Item::f8(std::vector<double>{0.0});
   const auto f8b = Item::f8(std::vector<double>{0.0, 0.0});
-  TEST_EXPECT(!(f8a == f8b));  // size mismatch
+  TEST_EXPECT(!(f8a == f8b));  // 元素数量不匹配
 }
 
 void test_length_field_boundaries_ascii() {
@@ -184,7 +184,7 @@ void test_length_field_boundaries_list() {
     TEST_EXPECT_EQ(header_length_value(empty), 0u);
   }
 
-  // 256 个空 Binary 子元素 -> list length 需要 2 字节
+  // 256 个空 Binary 子元素 -> List 的 length 需要 2 字节
   std::vector<Item> children;
   children.reserve(256u);
   for (std::size_t i = 0; i < 256u; ++i) {
@@ -237,9 +237,9 @@ void test_decode_errors() {
     TEST_EXPECT_EQ(consumed, 0u);
   }
 
-  // 非法 format code
+  // 非法格式码
   {
-    const std::vector<byte> in{byte{0x1C}, byte{0x00}};  // format_bits=0x07, lenBytes=1, length=0
+    const std::vector<byte> in{byte{0x1C}, byte{0x00}};  // format_bits=0x07，lenBytes=1，length=0
     Item out = placeholder_item();
     std::size_t consumed = 0;
     const auto ec = decode_one(bytes_view{in.data(), in.size()}, out, consumed);
@@ -247,9 +247,9 @@ void test_decode_errors() {
     TEST_EXPECT_EQ(consumed, 0u);
   }
 
-  // payload 截断
+  // 负载截断
   {
-    const std::vector<byte> in{byte{0x40}, byte{0x05}, byte{'a'}, byte{'b'}};  // ASCII, length=5 but only 2 bytes
+    const std::vector<byte> in{byte{0x40}, byte{0x05}, byte{'a'}, byte{'b'}};  // ASCII，length=5，但实际只有 2 字节
     Item out = placeholder_item();
     std::size_t consumed = 0;
     const auto ec = decode_one(bytes_view{in.data(), in.size()}, out, consumed);
@@ -259,7 +259,7 @@ void test_decode_errors() {
 
   // 数值类型长度不匹配（I2 长度=1）
   {
-    const std::vector<byte> in{byte{0x68}, byte{0x01}, byte{0x00}};  // I2, lenBytes=1, length=1
+    const std::vector<byte> in{byte{0x68}, byte{0x01}, byte{0x00}};  // I2，lenBytes=1，length=1
     Item out = placeholder_item();
     std::size_t consumed = 0;
     const auto ec = decode_one(bytes_view{in.data(), in.size()}, out, consumed);
@@ -267,7 +267,7 @@ void test_decode_errors() {
     TEST_EXPECT_EQ(consumed, 0u);
   }
 
-  // length 字段截断（lenBytes=3，但只给了 2 字节 length）
+  // 长度字段截断（lenBytes=3，但只给了 2 字节 length）
   {
     const std::vector<byte> in{byte{0x42}, byte{0x00}, byte{0x01}};  // ASCII, lenBytes=3
     Item out = placeholder_item();
@@ -338,7 +338,7 @@ void test_decode_depth_limit_boundary() {
 }
 
 void test_decode_large_ascii_length_truncated() {
-  // 恶意输入：ASCII 声明 length=1MB，但 payload 只有 100 字节，必须返回 truncated。
+  // 恶意输入：ASCII 声明 length=1MB，但负载只有 100 字节，必须返回 truncated。
   constexpr std::uint32_t declared = 1024u * 1024u;  // 1MB
   std::vector<byte> in;
   in.reserve(1u + 3u + 100u);
@@ -356,13 +356,13 @@ void test_decode_large_ascii_length_truncated() {
 }
 
 void test_decode_large_binary_length_truncated() {
-  // 恶意输入：Binary 声明超大 length，但 payload 实际不足，必须安全返回 truncated（不应提前分配超大缓冲区）。
+  // 恶意输入：Binary 声明超大 length，但负载实际不足，必须安全返回 truncated（不应提前分配超大缓冲区）。
   const std::vector<byte> in{
     byte{0x22},  // Binary, lenBytes=3
     byte{0xFF},
     byte{0xFF},
     byte{0xFF},  // length=kMaxLength（16MB）
-    byte{0x00},  // payload 截断
+    byte{0x00},  // 负载截断
   };
 
   Item out = placeholder_item();
@@ -409,9 +409,9 @@ void test_encode_to_buffer_overflow_paths() {
     TEST_EXPECT_EQ(written, 1u);
   }
 
-  // 3) 头部写入成功，但 payload 写不下（write_bytes 溢出）
+  // 3) 头部写入成功，但负载写不下（write_bytes 溢出）
   {
-    const auto item = Item::ascii("AA");  // header=2, payload=2
+    const auto item = Item::ascii("AA");  // header=2，负载=2
     std::vector<byte> out(3);
     std::size_t written = 0;
     const auto ec = encode_to(secs::ii::mutable_bytes_view{out.data(), out.size()}, item, written);
@@ -421,7 +421,7 @@ void test_encode_to_buffer_overflow_paths() {
 
   // 4) 多字节数值写入途中溢出（write_be_uint 内部返回）
   {
-    const auto item = Item::u4(std::vector<std::uint32_t>{0x12345678u});  // total=6
+    const auto item = Item::u4(std::vector<std::uint32_t>{0x12345678u});  // 总长度=6
     std::vector<byte> out(5);
     std::size_t written = 0;
     const auto ec = encode_to(secs::ii::mutable_bytes_view{out.data(), out.size()}, item, written);

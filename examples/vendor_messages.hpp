@@ -15,11 +15,11 @@ using ii::ASCII;
 using ii::U4;
 
 // ============================================================================
-// S1F1 Request (Are You There) - 通常为空 List
+// S1F1 请求（Are You There）- 通常为空 List
 // ============================================================================
 struct S1F1Request {
   static std::optional<S1F1Request> from_item(const ii::Item& item) {
-    // S1F1 通常是空 List 或无 body
+    // S1F1 通常是空 List 或无消息体
     auto* list = item.get_if<List>();
     if (!list) {
       return std::nullopt;
@@ -33,11 +33,11 @@ struct S1F1Request {
 };
 
 // ============================================================================
-// S1F2 Response (On Line Data)
+// S1F2 响应（On Line Data）
 // ============================================================================
 struct S1F2Response {
-  std::string mdln;     // Model name
-  std::string softrev;  // Software revision
+  std::string mdln;     // 设备型号（MDLN）
+  std::string softrev;  // 软件版本（SOFTREV）
 
   static std::optional<S1F2Response> from_item(const ii::Item& item) {
     auto* list = item.get_if<List>();
@@ -63,10 +63,10 @@ struct S1F2Response {
 };
 
 // ============================================================================
-// S2F13 Request (Equipment Constant Request)
+// S2F13 请求（Equipment Constant Request）
 // ============================================================================
 struct S2F13Request {
-  std::vector<std::uint32_t> ecids;  // Equipment Constant IDs
+  std::vector<std::uint32_t> ecids;  // 设备常量 ID 列表（ECID）
 
   static std::optional<S2F13Request> from_item(const ii::Item& item) {
     auto* list = item.get_if<List>();
@@ -96,10 +96,10 @@ struct S2F13Request {
 };
 
 // ============================================================================
-// S2F14 Response (Equipment Constant Data)
+// S2F14 响应（Equipment Constant Data）
 // ============================================================================
 struct S2F14Response {
-  std::vector<std::string> ecvs;  // Equipment Constant Values
+  std::vector<std::string> ecvs;  // 设备常量值列表（ECV）
 
   static std::optional<S2F14Response> from_item(const ii::Item& item) {
     auto* list = item.get_if<List>();
