@@ -1,0 +1,43 @@
+# 构建目录
+build/
+build-*/
+cmake-build-*/
+
+# 覆盖率文件
+*.gcov
+*.gcda
+*.gcno
+coverage.html
+coverage*.html
+*.info
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 编译产物
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.exe
+compile_commands.json
+
+# 第三方依赖（asio 源码应通过 git submodule 或脚本下载）
+third_party/asio/asio/
+third_party/asio/build/
+third_party/*/build/
+
+# 工具目录
+.codex/
+.claude/
+
+# 临时文件
+*.log
+*.tmp
+verification.md

@@ -1,0 +1,37 @@
+add_executable(test_core_buffer test_core_buffer.cpp)
+target_link_libraries(test_core_buffer PRIVATE secs_core)
+add_test(NAME core_buffer COMMAND test_core_buffer)
+
+add_executable(test_core_event test_core_event.cpp)
+target_link_libraries(test_core_event PRIVATE secs_core)
+add_test(NAME core_event COMMAND test_core_event)
+
+add_executable(test_core_error test_core_error.cpp)
+target_link_libraries(test_core_error PRIVATE secs_core)
+add_test(NAME core_error COMMAND test_core_error)
+
+add_executable(test_secs1_framing test_secs1_framing.cpp)
+target_link_libraries(test_secs1_framing PRIVATE secs_secs1)
+add_test(NAME secs1_framing COMMAND test_secs1_framing)
+
+add_executable(test_secs2_codec test_secs2_codec.cpp)
+target_link_libraries(test_secs2_codec PRIVATE secs_ii)
+add_test(NAME secs2_codec COMMAND test_secs2_codec)
+
+add_executable(test_hsms_transport test_hsms_transport.cpp)
+target_link_libraries(test_hsms_transport PRIVATE secs_hsms)
+add_test(NAME hsms_transport COMMAND test_hsms_transport)
+
+add_executable(test_protocol_session test_protocol_session.cpp)
+target_link_libraries(test_protocol_session PRIVATE secs_protocol)
+add_test(NAME protocol_session COMMAND test_protocol_session)
+
+if(SECS_ENABLE_COVERAGE)
+  secs_enable_coverage(test_core_buffer)
+  secs_enable_coverage(test_core_event)
+  secs_enable_coverage(test_core_error)
+  secs_enable_coverage(test_secs1_framing)
+  secs_enable_coverage(test_secs2_codec)
+  secs_enable_coverage(test_hsms_transport)
+  secs_enable_coverage(test_protocol_session)
+endif()
