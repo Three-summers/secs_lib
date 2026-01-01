@@ -10,6 +10,19 @@ option(SECS_ENABLE_COVERAGE "Enable coverage helper targets/flags" OFF)
 option(SECS_BUILD_EXAMPLES "Build example programs" ON)
 option(SECS_BUILD_BENCHMARKS "Build performance benchmarks" OFF)
 
+# 用于判断是独立构建还是作为依赖被嵌入，PROJECT_SOURCE_DIR 取决于当前作用域最近的一次 project()
+set(SECS_PROJECT_IS_TOP_LEVEL OFF)
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+  set(SECS_PROJECT_IS_TOP_LEVEL ON)
+endif()
+
+option(SECS_ENABLE_INSTALL "Enable install() rules and find_package() config" ${SECS_PROJECT_IS_TOP_LEVEL})
+
+# 用于安装的模块
+include(GNUInstallDirs)
+# 用于生成可被 find_package 找到的配置文件
+include(CMakePackageConfigHelpers)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -23,10 +36,13 @@ add_library(secs_core
   src/core/error.cpp
 )
 add_library(secs::core ALIAS secs_core)
+set_target_properties(secs_core PROPERTIES EXPORT_NAME core)
+target_compile_features(secs_core PUBLIC cxx_std_20)
 
 target_include_directories(secs_core
   PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
 add_library(secs_secs1
@@ -36,10 +52,13 @@ add_library(secs_secs1
   src/secs1/timer.cpp
 )
 add_library(secs::secs1 ALIAS secs_secs1)
+set_target_properties(secs_secs1 PROPERTIES EXPORT_NAME secs1)
+target_compile_features(secs_secs1 PUBLIC cxx_std_20)
 
 target_include_directories(secs_secs1
   PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
 target_link_libraries(secs_secs1 PUBLIC secs_core)
@@ -49,10 +68,13 @@ add_library(secs_ii
   src/ii/item.cpp
 )
 add_library(secs::ii ALIAS secs_ii)
+set_target_properties(secs_ii PROPERTIES EXPORT_NAME ii)
+target_compile_features(secs_ii PUBLIC cxx_std_20)
 
 target_include_directories(secs_ii
   PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
 target_link_libraries(secs_ii PUBLIC secs_core)
@@ -64,10 +86,13 @@ add_library(secs_hsms
   src/hsms/session.cpp
 )
 add_library(secs::hsms ALIAS secs_hsms)
+set_target_properties(secs_hsms PROPERTIES EXPORT_NAME hsms)
+target_compile_features(secs_hsms PUBLIC cxx_std_20)
 
 target_include_directories(secs_hsms
   PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
 target_link_libraries(secs_hsms PUBLIC secs_core)
@@ -78,10 +103,13 @@ add_library(secs_protocol
   src/protocol/session.cpp
 )
 add_library(secs::protocol ALIAS secs_protocol)
+set_target_properties(secs_protocol PROPERTIES EXPORT_NAME protocol)
+target_compile_features(secs_protocol PUBLIC cxx_std_20)
 
 target_include_directories(secs_protocol
   PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
 target_link_libraries(secs_protocol PUBLIC secs_core secs_hsms secs_secs1)
@@ -92,10 +120,13 @@ add_library(secs_sml
   src/sml/runtime.cpp
 )
 add_library(secs::sml ALIAS secs_sml)
+set_target_properties(secs_sml PROPERTIES EXPORT_NAME sml)
+target_compile_features(secs_sml PUBLIC cxx_std_20)
 
 target_include_directories(secs_sml
   PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
 target_link_libraries(secs_sml PUBLIC secs_ii secs_core)
@@ -104,10 +135,13 @@ add_library(secs_c_api
   src/c_api.cpp
 )
 add_library(secs::c_api ALIAS secs_c_api)
+set_target_properties(secs_c_api PROPERTIES EXPORT_NAME c_api)
+target_compile_features(secs_c_api PUBLIC cxx_std_20)
 
 target_include_directories(secs_c_api
   PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
 target_link_libraries(secs_c_api
@@ -136,6 +170,9 @@ endif()
 
 include("${PROJECT_SOURCE_DIR}/cmake/AsioStandalone.cmake")
 secs_link_standalone_asio(secs_core)
+add_library(secs::asio ALIAS secs_asio)
+set_target_properties(secs_asio PROPERTIES EXPORT_NAME asio)
+target_compile_features(secs_asio INTERFACE cxx_std_20)
 
 include(CodeCoverage)
 
@@ -165,4 +202,58 @@ endif()
 
 if(SECS_BUILD_BENCHMARKS)
   add_subdirectory(benchmarks)
+endif()
+
+if(SECS_ENABLE_INSTALL)
+  install(DIRECTORY include/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  )
+
+  # 安装 vendored Asio（保证 find_package(secs) 的消费者无需额外准备 Asio）。
+  install(FILES third_party/asio/asio/asio/include/asio.hpp
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  )
+  install(DIRECTORY third_party/asio/asio/asio/include/asio
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  )
+
+  install(TARGETS
+      secs_asio
+      secs_core
+      secs_secs1
+      secs_ii
+      secs_hsms
+      secs_protocol
+      secs_sml
+      secs_c_api
+    EXPORT secsTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  )
+
+  install(EXPORT secsTargets
+    FILE secsTargets.cmake
+    NAMESPACE secs::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/secs
+  )
+
+  configure_package_config_file(
+    ${PROJECT_SOURCE_DIR}/cmake/secsConfig.cmake.in
+    ${PROJECT_BINARY_DIR}/secsConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/secs
+    NO_CHECK_REQUIRED_COMPONENTS_MACRO
+  )
+
+  write_basic_package_version_file(
+    ${PROJECT_BINARY_DIR}/secsConfigVersion.cmake
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+  )
+
+  install(FILES
+      ${PROJECT_BINARY_DIR}/secsConfig.cmake
+      ${PROJECT_BINARY_DIR}/secsConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/secs
+  )
 endif()

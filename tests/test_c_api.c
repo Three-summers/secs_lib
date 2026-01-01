@@ -47,6 +47,24 @@ static void expect_err(const char *what, secs_error_t err) {
     ++g_failures;
 }
 
+static int wait_until_atomic_eq(const atomic_int *v,
+                                int expected,
+                                int max_tries,
+                                long sleep_ns) {
+    /* 仅用于单测：用短暂 sleep 轮询等待异步事件完成，避免长时间阻塞/偶发挂死。 */
+    struct timespec req;
+    req.tv_sec = 0;
+    req.tv_nsec = (sleep_ns > 0 ? sleep_ns : 1);
+
+    for (int i = 0; i < max_tries; ++i) {
+        if (atomic_load(v) == expected) {
+            return 1;
+        }
+        (void)nanosleep(&req, NULL);
+    }
+    return atomic_load(v) == expected;
+}
+
 static void test_version_and_error_message(void) {
     const char *ver = secs_version_string();
     if (!ver || ver[0] == '\0') {
@@ -180,6 +198,9 @@ static void test_invalid_argument_fast_fail(void) {
     /* destroy/free 对 NULL 应安全 */
     secs_context_destroy(NULL);
     secs_free(NULL);
+    secs_hsms_data_message_free(NULL);
+    secs_data_message_free(NULL);
+    secs_hsms_connection_destroy(NULL);
 
     secs_context_t *ctx = NULL;
     expect_ok("secs_context_create(valid)", secs_context_create(&ctx));
@@ -199,6 +220,24 @@ static void test_invalid_argument_fast_fail(void) {
                    secs_ii_item_create_boolean(NULL, 1, &item));
         expect_err("secs_ii_item_create_i1(NULL,n>0)",
                    secs_ii_item_create_i1(NULL, 1, &item));
+        expect_err("secs_ii_item_create_i2(NULL,n>0)",
+                   secs_ii_item_create_i2(NULL, 1, &item));
+        expect_err("secs_ii_item_create_i4(NULL,n>0)",
+                   secs_ii_item_create_i4(NULL, 1, &item));
+        expect_err("secs_ii_item_create_i8(NULL,n>0)",
+                   secs_ii_item_create_i8(NULL, 1, &item));
+        expect_err("secs_ii_item_create_u1(NULL,n>0)",
+                   secs_ii_item_create_u1(NULL, 1, &item));
+        expect_err("secs_ii_item_create_u2(NULL,n>0)",
+                   secs_ii_item_create_u2(NULL, 1, &item));
+        expect_err("secs_ii_item_create_u4(NULL,n>0)",
+                   secs_ii_item_create_u4(NULL, 1, &item));
+        expect_err("secs_ii_item_create_u8(NULL,n>0)",
+                   secs_ii_item_create_u8(NULL, 1, &item));
+        expect_err("secs_ii_item_create_f4(NULL,n>0)",
+                   secs_ii_item_create_f4(NULL, 1, &item));
+        expect_err("secs_ii_item_create_f8(NULL,n>0)",
+                   secs_ii_item_create_f8(NULL, 1, &item));
 
         secs_ii_item_type_t ty;
         expect_err("secs_ii_item_get_type(NULL)",
@@ -249,8 +288,140 @@ static void test_invalid_argument_fast_fail(void) {
                   secs_hsms_session_create(ctx, &opt, &sess));
         expect_err("secs_hsms_session_open_active_ip(127.0.0.1:65535)",
                    secs_hsms_session_open_active_ip(sess, "127.0.0.1", 65535));
+
+        /* 非法 IP：应在解析阶段直接失败，不做网络尝试 */
+        expect_err("secs_hsms_session_open_active_ip(bad ip)",
+                   secs_hsms_session_open_active_ip(sess, "not_an_ip", 1));
+
+        /* is_selected 参数校验：out_selected 为空 / sess 为空 */
+        {
+            int selected = 0;
+            expect_err("secs_hsms_session_is_selected(NULL out)",
+                       secs_hsms_session_is_selected(sess, NULL));
+            expect_err("secs_hsms_session_is_selected(NULL sess)",
+                       secs_hsms_session_is_selected(NULL, &selected));
+        }
+
+        /* HSMS：其它 API 的快速失败分支（不要求业务意义，只要求不阻塞/不崩溃） */
+        {
+            uint32_t sb = 0;
+            secs_error_t err = secs_hsms_session_send_data_auto_system_bytes(
+                NULL, 1, 1, 0, NULL, 0, &sb);
+            expect_err("secs_hsms_session_send_data_auto_system_bytes(NULL)",
+                       err);
+            if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+                failf("secs_hsms_session_send_data_auto_system_bytes(NULL)", err);
+            }
+
+            err = secs_hsms_session_send_data_with_system_bytes(
+                NULL, 1, 1, 0, 1, NULL, 0);
+            expect_err("secs_hsms_session_send_data_with_system_bytes(NULL)",
+                       err);
+            if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+                failf("secs_hsms_session_send_data_with_system_bytes(NULL)", err);
+            }
+
+            secs_hsms_data_message_t rx;
+            memset(&rx, 0, sizeof(rx));
+            err = secs_hsms_session_receive_data(NULL, 1, &rx);
+            expect_err("secs_hsms_session_receive_data(NULL)", err);
+            if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+                failf("secs_hsms_session_receive_data(NULL)", err);
+            }
+            secs_hsms_data_message_free(&rx);
+
+            err = secs_hsms_session_receive_data(sess, 1, NULL);
+            expect_err("secs_hsms_session_receive_data(NULL out)", err);
+            if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+                failf("secs_hsms_session_receive_data(NULL out)", err);
+            }
+
+            secs_hsms_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            err = secs_hsms_session_request_data(NULL, 1, 1, NULL, 0, 1, &reply);
+            expect_err("secs_hsms_session_request_data(NULL)", err);
+            if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+                failf("secs_hsms_session_request_data(NULL)", err);
+            }
+            secs_hsms_data_message_free(&reply);
+
+            err = secs_hsms_session_request_data(sess, 1, 1, NULL, 0, 1, NULL);
+            expect_err("secs_hsms_session_request_data(NULL out)", err);
+            if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+                failf("secs_hsms_session_request_data(NULL out)", err);
+            }
+
+            err = secs_hsms_session_linktest(NULL);
+            expect_err("secs_hsms_session_linktest(NULL)", err);
+            if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+                failf("secs_hsms_session_linktest(NULL)", err);
+            }
+
+            /* open_active/passive_connection：io_conn 为空/空指针 */
+            err = secs_hsms_session_open_active_connection(NULL, NULL);
+            expect_err("secs_hsms_session_open_active_connection(NULL sess)",
+                       err);
+            if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+                failf("secs_hsms_session_open_active_connection(NULL sess)", err);
+            }
+
+            err = secs_hsms_session_open_active_connection(sess, NULL);
+            expect_err("secs_hsms_session_open_active_connection(NULL io_conn)",
+                       err);
+            if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+                failf("secs_hsms_session_open_active_connection(NULL io_conn)",
+                      err);
+            }
+            {
+                secs_hsms_connection_t *tmp = NULL;
+                err = secs_hsms_session_open_active_connection(sess, &tmp);
+                expect_err("secs_hsms_session_open_active_connection(*NULL)",
+                           err);
+                if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+                    failf("secs_hsms_session_open_active_connection(*NULL)", err);
+                }
+            }
+
+            err = secs_hsms_session_open_passive_connection(NULL, NULL);
+            expect_err("secs_hsms_session_open_passive_connection(NULL sess)",
+                       err);
+            if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+                failf("secs_hsms_session_open_passive_connection(NULL sess)", err);
+            }
+
+            err = secs_hsms_session_open_passive_connection(sess, NULL);
+            expect_err("secs_hsms_session_open_passive_connection(NULL io_conn)",
+                       err);
+            if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+                failf("secs_hsms_session_open_passive_connection(NULL io_conn)",
+                      err);
+            }
+            {
+                secs_hsms_connection_t *tmp = NULL;
+                err = secs_hsms_session_open_passive_connection(sess, &tmp);
+                expect_err("secs_hsms_session_open_passive_connection(*NULL)",
+                           err);
+                if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+                    failf("secs_hsms_session_open_passive_connection(*NULL)", err);
+                }
+            }
+        }
         secs_hsms_session_destroy(sess);
         sess = NULL;
+
+        /* create_from_hsms：options==NULL（覆盖 make_proto_options 的默认分支） */
+        {
+            secs_hsms_session_t *hsms_for_proto = NULL;
+            expect_ok("secs_hsms_session_create(for proto opt null)",
+                      secs_hsms_session_create(ctx, &opt, &hsms_for_proto));
+
+            secs_protocol_session_t *ps = NULL;
+            expect_ok("secs_protocol_session_create_from_hsms(options NULL)",
+                      secs_protocol_session_create_from_hsms(
+                          ctx, hsms_for_proto, opt.session_id, NULL, &ps));
+            secs_protocol_session_destroy(ps);
+            secs_hsms_session_destroy(hsms_for_proto);
+        }
 
         expect_err("secs_hsms_session_open_active_ip(NULL)",
                    secs_hsms_session_open_active_ip(NULL, "127.0.0.1", 1));
@@ -950,6 +1121,81 @@ static secs_error_t server_handler(void *user_data,
     }
 }
 
+struct hsms_wrong_thread_ud {
+    secs_hsms_session_t *server_hsms;
+};
+
+static secs_error_t
+server_handler_hsms_wrong_thread(void *user_data,
+                                 const secs_data_message_view_t *request,
+                                 uint8_t **out_body,
+                                 size_t *out_body_n) {
+    (void)request;
+    struct hsms_wrong_thread_ud *ud = (struct hsms_wrong_thread_ud *)user_data;
+
+    /* “恶意/误用”用例：在 io 线程里调用 HSMS 的阻塞式 API，也必须返回 WRONG_THREAD
+     *（覆盖多个 return-bridge 分支）。 */
+    int selected = 0;
+    uint32_t sb = 0;
+
+    secs_hsms_data_message_t rx;
+    memset(&rx, 0, sizeof(rx));
+    secs_hsms_data_message_t reply;
+    memset(&reply, 0, sizeof(reply));
+
+    const secs_error_t e_is_selected =
+        secs_hsms_session_is_selected(ud->server_hsms, &selected);
+    const secs_error_t e_linktest = secs_hsms_session_linktest(ud->server_hsms);
+    const secs_error_t e_send_auto =
+        secs_hsms_session_send_data_auto_system_bytes(
+            ud->server_hsms, 1, 1, 0, NULL, 0, &sb);
+    const secs_error_t e_send_with =
+        secs_hsms_session_send_data_with_system_bytes(
+            ud->server_hsms, 1, 1, 0, 0x12345678u, NULL, 0);
+    const secs_error_t e_recv =
+        secs_hsms_session_receive_data(ud->server_hsms, 1, &rx);
+    const secs_error_t e_req = secs_hsms_session_request_data(
+        ud->server_hsms, 1, 1, NULL, 0, 1, &reply);
+
+    /* WRONG_THREAD 下不应分配输出资源；此处仍调用 free 以防未来实现调整。 */
+    secs_hsms_data_message_free(&rx);
+    secs_hsms_data_message_free(&reply);
+
+    const uint8_t ok_is_selected =
+        (e_is_selected.value == (int)SECS_C_API_WRONG_THREAD) ? 1u : 0u;
+    const uint8_t ok_linktest =
+        (e_linktest.value == (int)SECS_C_API_WRONG_THREAD) ? 1u : 0u;
+    const uint8_t ok_send_auto =
+        (e_send_auto.value == (int)SECS_C_API_WRONG_THREAD) ? 1u : 0u;
+    const uint8_t ok_send_with =
+        (e_send_with.value == (int)SECS_C_API_WRONG_THREAD) ? 1u : 0u;
+    const uint8_t ok_recv =
+        (e_recv.value == (int)SECS_C_API_WRONG_THREAD) ? 1u : 0u;
+    const uint8_t ok_req =
+        (e_req.value == (int)SECS_C_API_WRONG_THREAD) ? 1u : 0u;
+
+    *out_body_n = 6;
+    *out_body = (uint8_t *)secs_malloc(*out_body_n);
+    if (!*out_body) {
+        secs_error_t oom;
+        oom.value = (int)SECS_C_API_OUT_OF_MEMORY;
+        oom.category = "secs.c_api";
+        return oom;
+    }
+
+    (*out_body)[0] = ok_is_selected;
+    (*out_body)[1] = ok_linktest;
+    (*out_body)[2] = ok_send_auto;
+    (*out_body)[3] = ok_send_with;
+    (*out_body)[4] = ok_recv;
+    (*out_body)[5] = ok_req;
+
+    secs_error_t ok;
+    ok.value = 0;
+    ok.category = "secs.c_api";
+    return ok;
+}
+
 static secs_error_t
 server_handler_empty(void *user_data,
                      const secs_data_message_view_t *request,
@@ -1158,6 +1404,35 @@ static void test_hsms_protocol_loopback(void) {
         }
     }
 
+    /* HSMS：错误分支覆盖（用“未 selected”的临时会话，避免影响主链路） */
+    {
+        secs_hsms_session_t *tmp = NULL;
+        expect_ok("secs_hsms_session_create(tmp for err branches)",
+                  secs_hsms_session_create(ctx, &hsms_opt, &tmp));
+
+        /* receive_data：在无入站数据时应超时返回（不应永久阻塞） */
+        {
+            secs_hsms_data_message_t rx;
+            memset(&rx, 0, sizeof(rx));
+            secs_error_t err = secs_hsms_session_receive_data(tmp, 10, &rx);
+            expect_err("secs_hsms_session_receive_data(timeout)", err);
+            secs_hsms_data_message_free(&rx);
+        }
+
+        /* request_data：未 selected 时应返回错误（不触发断线逻辑） */
+        {
+            const uint8_t body[1] = {0x01u};
+            secs_hsms_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            secs_error_t err = secs_hsms_session_request_data(
+                tmp, 4, 1, body, sizeof(body), 10, &reply);
+            expect_err("secs_hsms_session_request_data(not selected)", err);
+            secs_hsms_data_message_free(&reply);
+        }
+
+        secs_hsms_session_destroy(tmp);
+    }
+
     /* HSMS：显式 LINKTEST（覆盖控制事务路径） */
     expect_ok("secs_hsms_session_linktest(client)",
               secs_hsms_session_linktest(client_hsms));
@@ -1188,6 +1463,67 @@ static void test_hsms_protocol_loopback(void) {
             fprintf(stderr, "FAIL: hsms receive body mismatch\n");
             ++g_failures;
         }
+        secs_hsms_data_message_free(&rx);
+    }
+
+    /* 参数校验：body_bytes==NULL 且 body_n>0 必须快速失败 */
+    {
+        uint32_t sb = 0;
+        secs_error_t err = secs_hsms_session_send_data_auto_system_bytes(
+            client_hsms, 1, 1, 0, NULL, 1, &sb);
+        expect_err("secs_hsms_session_send_data_auto_system_bytes(NULL,1)",
+                   err);
+        if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+            failf("secs_hsms_session_send_data_auto_system_bytes(NULL,1)", err);
+        }
+
+        err = secs_hsms_session_send_data_with_system_bytes(
+            client_hsms, 1, 1, 0, 0x12345678u, NULL, 1);
+        expect_err("secs_hsms_session_send_data_with_system_bytes(NULL,1)",
+                   err);
+        if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+            failf("secs_hsms_session_send_data_with_system_bytes(NULL,1)", err);
+        }
+
+        secs_hsms_data_message_t reply;
+        memset(&reply, 0, sizeof(reply));
+        err = secs_hsms_session_request_data(
+            client_hsms, 1, 1, NULL, 1, 100, &reply);
+        expect_err("secs_hsms_session_request_data(NULL,1)", err);
+        if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+            failf("secs_hsms_session_request_data(NULL,1)", err);
+        }
+        secs_hsms_data_message_free(&reply);
+    }
+
+    /* is_selected 参数校验：sess/out_selected 为空 */
+    {
+        int selected = 0;
+        secs_error_t err =
+            secs_hsms_session_is_selected(client_hsms, (int *)NULL);
+        expect_err("secs_hsms_session_is_selected(NULL out)", err);
+        if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+            failf("secs_hsms_session_is_selected(NULL out)", err);
+        }
+
+        err = secs_hsms_session_is_selected(NULL, &selected);
+        expect_err("secs_hsms_session_is_selected(NULL sess)", err);
+        if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+            failf("secs_hsms_session_is_selected(NULL sess)", err);
+        }
+    }
+
+    /* HSMS：out_system_bytes==NULL 分支 */
+    {
+        const uint8_t body[1] = {0x44u};
+        expect_ok("secs_hsms_session_send_data_auto_system_bytes(out=NULL)",
+                  secs_hsms_session_send_data_auto_system_bytes(
+                      client_hsms, 9, 1, 0, body, sizeof(body), NULL));
+
+        secs_hsms_data_message_t rx;
+        memset(&rx, 0, sizeof(rx));
+        expect_ok("secs_hsms_session_receive_data(out_system_bytes NULL case)",
+                  secs_hsms_session_receive_data(server_hsms, 1000, &rx));
         secs_hsms_data_message_free(&rx);
     }
 
@@ -1288,6 +1624,32 @@ static void test_hsms_protocol_loopback(void) {
         secs_protocol_session_create_from_hsms(
             ctx, server_hsms, hsms_opt.session_id, &proto_opt, &server_proto));
 
+    /* 参数校验：protocol send/request 的 body 指针/长度不一致必须拒绝 */
+    {
+        secs_error_t err =
+            secs_protocol_session_send(client_proto, 1, 1, NULL, 1);
+        expect_err("secs_protocol_session_send(NULL,1)", err);
+        if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+            failf("secs_protocol_session_send(NULL,1)", err);
+        }
+
+        secs_data_message_t reply;
+        memset(&reply, 0, sizeof(reply));
+        err = secs_protocol_session_request(
+            client_proto, 1, 1, NULL, 1, 100, &reply);
+        expect_err("secs_protocol_session_request(NULL,1)", err);
+        if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+            failf("secs_protocol_session_request(NULL,1)", err);
+        }
+        secs_data_message_free(&reply);
+
+        err = secs_protocol_session_erase_handler(NULL, 1, 1);
+        expect_err("secs_protocol_session_erase_handler(NULL)", err);
+        if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+            failf("secs_protocol_session_erase_handler(NULL)", err);
+        }
+    }
+
     /* 注册 handler：验证回包 + “在 io 线程误用阻塞 API 必须拒绝” */
     struct handler_ud ud;
     ud.server_proto = server_proto;
@@ -1328,6 +1690,42 @@ static void test_hsms_protocol_loopback(void) {
         }
 
         secs_data_message_free(&reply);
+    }
+
+    /* 通过 protocol handler 在 io 线程内误用 HSMS 阻塞式 API：必须返回 WRONG_THREAD */
+    {
+        struct hsms_wrong_thread_ud hud;
+        hud.server_hsms = server_hsms;
+
+        expect_ok("secs_protocol_session_set_handler(hsms_wrong_thread)",
+                  secs_protocol_session_set_handler(
+                      server_proto, 10, 11, server_handler_hsms_wrong_thread, &hud));
+
+        secs_data_message_t reply;
+        memset(&reply, 0, sizeof(reply));
+        expect_ok("secs_protocol_session_request(hsms wrong thread)",
+                  secs_protocol_session_request(
+                      client_proto, 10, 11, NULL, 0, 1000, &reply));
+
+        if (reply.body_n != 6u || !reply.body) {
+            fprintf(stderr, "FAIL: hsms wrong-thread reply body invalid\n");
+            ++g_failures;
+        } else {
+            for (size_t i = 0; i < reply.body_n; ++i) {
+                if (reply.body[i] != 1u) {
+                    fprintf(stderr,
+                            "FAIL: hsms wrong-thread flag[%zu] expected 1 got "
+                            "%u\n",
+                            i,
+                            (unsigned)reply.body[i]);
+                    ++g_failures;
+                }
+            }
+        }
+        secs_data_message_free(&reply);
+
+        expect_ok("secs_protocol_session_erase_handler(hsms_wrong_thread)",
+                  secs_protocol_session_erase_handler(server_proto, 10, 11));
     }
 
     /* handler 返回空 body：覆盖 fill_protocol_out_message 的 empty-body 分支 +
@@ -1392,6 +1790,32 @@ static void test_hsms_protocol_loopback(void) {
         if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
             fprintf(stderr,
                     "FAIL: set_handler(NULL) should be INVALID_ARGUMENT\n");
+            ++g_failures;
+        }
+    }
+
+    /* 在 io 线程内调用 stop：覆盖 c_api.cpp 的 is_io_thread 分支 */
+    {
+        atomic_int called;
+        atomic_init(&called, 0);
+
+        struct control_stop_ud sud;
+        sud.server_proto = server_proto;
+        sud.server_hsms = server_hsms;
+        sud.called = &called;
+
+        expect_ok("secs_protocol_session_set_handler(control_stop)",
+                  secs_protocol_session_set_handler(server_proto,
+                                                    7,
+                                                    7,
+                                                    protocol_control_stop_handler,
+                                                    &sud));
+        expect_ok("secs_protocol_session_send(control_stop)",
+                  secs_protocol_session_send(client_proto, 7, 7, NULL, 0));
+
+        if (!wait_until_atomic_eq(&called, 1, 200, 5 * 1000 * 1000)) {
+            fprintf(stderr,
+                    "FAIL: control_stop handler not called within timeout\n");
             ++g_failures;
         }
     }

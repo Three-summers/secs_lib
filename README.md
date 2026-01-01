@@ -121,7 +121,7 @@ ctest --test-dir build --output-on-failure
 
 ### 作为子项目集成到你的工程（推荐）
 
-本仓库当前未提供 `install()`/`find_package()`，推荐以源码方式集成：
+推荐两种集成方式：
 
 ```cmake
 # 你的工程 CMakeLists.txt
@@ -131,11 +131,50 @@ add_executable(my_app main.cpp)
 target_link_libraries(my_app PRIVATE secs::protocol) # 只用 SECS-II 则改为 secs::ii
 ```
 
+如果你的工程是纯 C（`.c`）源文件，也可以链接 C ABI：
+
+```cmake
+add_executable(my_c_app main.c)
+target_link_libraries(my_c_app PRIVATE secs::c_api)
+
+# 由于底层实现是 C++20，链接阶段必须使用 C++ 链接器。
+# CMake 的简便写法：强制该可执行程序用 CXX 链接。
+set_target_properties(my_c_app PROPERTIES LINKER_LANGUAGE CXX)
+```
+
 可选：如果你想强制使用外部 Asio（而不是 third_party），配置时加：
 
 ```bash
 cmake -S . -B build -DSECS_ASIO_ROOT=/path/to/asio/include
 ```
+
+### 安装并通过 find_package 集成（可选）
+
+本仓库提供了 `install()` 与 CMake 包配置文件（`find_package(secs CONFIG)`），适合：
+
+- 你希望“先安装到某个前缀”，再在多个项目里复用
+- 你不想把本仓库作为子目录加入主工程
+
+安装：
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSECS_ENABLE_INSTALL=ON
+cmake --build build -j
+cmake --build build --target install
+```
+
+在你的工程里使用：
+
+```cmake
+find_package(secs CONFIG REQUIRED)
+
+add_executable(my_app main.cpp)
+target_link_libraries(my_app PRIVATE secs::protocol)
+```
+
+说明：
+
+- 安装包会把 `include/secs/` 以及 vendored `third_party/asio` 的头文件一起安装到 `${CMAKE_INSTALL_PREFIX}/include`，因此消费者不需要额外准备 Asio。
 
 ### 常用 CMake 选项
 
@@ -172,6 +211,9 @@ cmake -S . -B build -DSECS_ENABLE_COVERAGE=ON
 - 线程模型：必须先 `secs_context_create()` 创建上下文；内部会启动 1 个 io 线程运行 `asio::io_context`。
   - 部分 API 为阻塞式：会把协程调度到 io 线程执行，并在调用线程等待结果。
   - 防误用：如果在库内部回调线程（io 线程）调用这些阻塞式 API，会返回 `SECS_C_API_WRONG_THREAD`（避免死锁）。
+- 参数约束：
+  - 数值 Item 创建函数允许 `v==NULL && n==0`（表示空数组），但不允许 `v==NULL && n>0`。
+  - `secs_protocol_session_create_from_hsms(ctx, hsms, ...)` 要求 `ctx` 与 `hsms` 创建时使用的 ctx 完全一致，否则会返回 `SECS_C_API_INVALID_ARGUMENT`。
 
 按功能分组的入口（对应文件都在 `include/secs/c_api.h`）：
 
@@ -179,6 +221,31 @@ cmake -S . -B build -DSECS_ENABLE_COVERAGE=ON
 - SML：`secs_sml_runtime_*`
 - HSMS：`secs_hsms_connection_*` + `secs_hsms_session_*`
 - 协议层：`secs_protocol_session_*`（含 handler 注册、send/request）
+
+#### 最小调用顺序（C，不贴源码）
+
+你可以把 C ABI 当成“阻塞式、句柄化”的门面层，典型流程如下（完整可运行用法见 `tests/test_c_api.c`）：
+
+1. 初始化：
+   - `secs_context_create(&ctx)`：创建上下文（内部启动 1 个 io 线程）
+2. 构造/解析 SECS-II（可选）：
+   - `secs_ii_item_create_*()` 构造 `secs_ii_item_t*`
+   - `secs_ii_encode(item, &bytes, &n)` 得到编码后的 payload（`bytes` 用 `secs_free` 释放）
+   - `secs_ii_decode_one(bytes, n, &consumed, &out_item)` 解析一个 Item（流式）
+3. 建立 HSMS 会话（两种方式二选一）：
+   - 真实网络：`secs_hsms_session_create()` → `secs_hsms_session_open_active_ip()`
+   - 单测/仿真：`secs_hsms_connection_create_memory_duplex()` 造出一对“内存互联”连接，再分别注入到 active/passive：
+     - `secs_hsms_session_open_active_connection(client, &client_conn)`
+     - `secs_hsms_session_open_passive_connection(server, &server_conn)`
+4. 协议层（推荐给业务用的统一入口）：
+   - `secs_protocol_session_create_from_hsms(ctx, hsms, session_id, ...)`
+   - `secs_protocol_session_set_handler(stream,function, cb, user_data)` 注册处理器（回调在 io 线程触发）
+   - 主动发送/请求：
+     - `secs_protocol_session_send(...)`（W=0，不等待回应）
+     - `secs_protocol_session_request(...)`（W=1，等待 secondary；reply 用 `secs_data_message_free` 释放）
+5. 退出与释放：
+   - `secs_protocol_session_stop()` / `secs_hsms_session_stop()`（非阻塞，可在任意线程调用）
+   - `*_destroy()` 销毁句柄；任何返回给调用方的堆内存统一 `secs_free()` 释放
 
 ---
 
