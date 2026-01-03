@@ -18,6 +18,20 @@ add_executable(test_secs2_codec test_secs2_codec.cpp)
 target_link_libraries(test_secs2_codec PRIVATE secs_ii)
 add_test(NAME secs2_codec COMMAND test_secs2_codec)
 
+add_executable(test_c_dump_secsii_compat
+               test_c_dump_secsii_compat.cpp
+               ../c_dump/Secs_App/secs_II.c)
+target_include_directories(test_c_dump_secsii_compat PRIVATE ../c_dump/Secs_App)
+target_link_libraries(test_c_dump_secsii_compat PRIVATE secs_sml secs_ii secs_core)
+add_test(NAME c_dump_secsii_compat COMMAND test_c_dump_secsii_compat)
+
+add_executable(test_c_dump_secs1_block_compat
+               test_c_dump_secs1_block_compat.cpp
+               ../c_dump/Secs_App/secs_I.c)
+target_include_directories(test_c_dump_secs1_block_compat PRIVATE ../c_dump/Secs_App)
+target_link_libraries(test_c_dump_secs1_block_compat PRIVATE secs_secs1 secs_core)
+add_test(NAME c_dump_secs1_block_compat COMMAND test_c_dump_secs1_block_compat)
+
 add_executable(test_hsms_transport test_hsms_transport.cpp)
 target_link_libraries(test_hsms_transport PRIVATE secs_hsms)
 add_test(NAME hsms_transport COMMAND test_hsms_transport)
@@ -46,6 +60,8 @@ if(SECS_ENABLE_COVERAGE)
   secs_enable_coverage(test_core_error)
   secs_enable_coverage(test_secs1_framing)
   secs_enable_coverage(test_secs2_codec)
+  secs_enable_coverage(test_c_dump_secsii_compat)
+  secs_enable_coverage(test_c_dump_secs1_block_compat)
   secs_enable_coverage(test_hsms_transport)
   secs_enable_coverage(test_protocol_session)
   secs_enable_coverage(test_typed_handler)

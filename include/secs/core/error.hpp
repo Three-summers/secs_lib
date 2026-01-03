@@ -27,6 +27,8 @@ std::error_code make_error_code(errc e) noexcept;
 } // namespace secs::core
 
 namespace std {
+// 对标准库特征的特化，目的是将 secs::core::errc 告诉标准库
+// 它是一个可以自动转换成 std::error_code 的枚举类型
 template <>
 struct is_error_code_enum<secs::core::errc> : true_type {};
 } // namespace std

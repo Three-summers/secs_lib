@@ -127,7 +127,6 @@ MemoryLink::Endpoint::async_read_byte(
         }
 
         // 队列为空：等待对端写入并 set() 事件，或等待超时/取消。
-        in_event.reset();
         auto ec = co_await in_event.async_wait(timeout);
         if (ec) {
             co_return std::pair{ec, secs::core::byte{0}};

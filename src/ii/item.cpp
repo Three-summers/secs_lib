@@ -120,9 +120,11 @@ Item Item::f8(std::vector<double> values) {
 // 的行号映射导致误报未命中。
 bool operator==(const Item &lhs,
                 const Item &rhs) noexcept { // GCOVR_EXCL_LINE（覆盖率工具指令）
+    // 先判断类型
     if (lhs.storage_.index() != rhs.storage_.index()) {
         return false;
     }
+    // 再判断值
     return std::visit(
         [&](const auto &a) -> bool {
             using T = std::decay_t<decltype(a)>;

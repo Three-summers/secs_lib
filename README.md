@@ -3,7 +3,7 @@
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![CMake](https://img.shields.io/badge/CMake-3.20+-green.svg)](https://cmake.org/)
 
-> 文档更新：2025-12-31（Codex）
+> 文档更新：2026-01-03（Codex）
 
 基于 C++20 与 standalone Asio 协程的 SECS-I / SECS-II / HSMS (HSMS-SS) 协议栈实现，面向半导体设备通信场景。
 
@@ -14,6 +14,25 @@
 如果你需要“字符画形式”的超详细架构拆解（≥1000 行），请直接跳到文末：`附录：超详细架构字符画（≥ 1000 行）`。
 
 ---
+
+## 最近差异（与上一版相比）
+
+本节只记录“会影响互通/集成/测试统计口径”的差异点，不贴源码（你可按路径自行阅读）。
+
+- SECS-II（E5）on-wire 编码对齐 `c_dump/Secs_App/secs_II.c`
+  - 影响点：`FormatByte` 低 2 位含义、`format_code` 码表（整数/浮点/无符号）
+  - 文件：`include/secs/ii/types.hpp`、`src/ii/codec.cpp`
+  - 对齐自测：`tests/test_c_dump_secsii_compat.cpp`
+- SECS-I（E4）Block header/checksum 对齐 `c_dump/Secs_App/secs_I.c`
+  - 对齐自测：`tests/test_c_dump_secs1_block_compat.cpp`
+- `secs::protocol::Session`（SECS-I 后端）新增 R-bit（reverse_bit）方向配置
+  - 新增字段：`SessionOptions::secs1_reverse_bit`（Host=0 / Equipment=1）
+  - 文件：`include/secs/protocol/session.hpp`、`src/protocol/session.cpp`
+  - 覆盖测试：`tests/test_protocol_session.cpp`（搜索 `reverse_bit`）
+- 覆盖率统计口径调整：`coverage` 目标不再统计 `c_dump/`（参考实现不计入库覆盖率）
+  - 文件：`cmake/Modules/CodeCoverage.cmake`
+- 开发体验：新增根目录 `.clangd`，强制 clangd 使用 `build/` 编译数据库
+  - 文件：`.clangd`
 
 ## 架构概览（当前实现）
 
@@ -366,6 +385,14 @@ SECS-I 这一层以“字节流链路”抽象开始：
 
 注意：`function` 必须是 primary（奇数且非 0），否则会返回 `core::errc::invalid_argument`。
 
+补充（仅 SECS-I 后端）：
+
+- SECS-I 的 Block Header 含 R-bit（reverse_bit，方向位）
+- 你需要按角色设置 `protocol::SessionOptions::secs1_reverse_bit`：
+  - Host -> Equipment：`false`（R=0）
+  - Equipment -> Host：`true`（R=1）
+- 参考：`include/secs/secs1/block.hpp`、`include/secs/protocol/session.hpp`
+
 #### 最小代码片段：注册一个 handler，并发起一次 `async_request`
 
 本节不在 README 里贴 C++ 源码（你已明确希望自行阅读），只给“最短阅读路径 + 读代码时的跟踪顺序”：
@@ -460,6 +487,8 @@ ctest --test-dir build --output-on-failure
 
 ```bash
 ctest --test-dir build -R secs2_codec
+ctest --test-dir build -R c_dump_secsii_compat
+ctest --test-dir build -R c_dump_secs1_block_compat
 ctest --test-dir build -R hsms_transport
 ctest --test-dir build -R protocol_session
 ctest --test-dir build -R sml_parser

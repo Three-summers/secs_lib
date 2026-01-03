@@ -272,7 +272,7 @@ Session::async_send_message_(const DataMessage &msg) {
     }
 
     secs::secs1::Header h{};
-    h.reverse_bit = false;
+    h.reverse_bit = options_.secs1_reverse_bit;
     h.device_id = secs1_device_id_;
     h.wait_bit = msg.w_bit;
     h.stream = msg.stream;

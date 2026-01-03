@@ -32,6 +32,11 @@ struct SessionOptions final {
 
     // 接收循环的轮询间隔：用于 stop() 检查与避免永久阻塞。
     secs::core::duration poll_interval{std::chrono::milliseconds{10}};
+
+    // 仅对 SECS-I 后端有效：R-bit（reverse_bit）方向位。
+    // - false：Host -> Equipment（R=0）
+    // - true：Equipment -> Host（R=1）
+    bool secs1_reverse_bit{false};
 };
 
 /**

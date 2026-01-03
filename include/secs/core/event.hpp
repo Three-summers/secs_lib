@@ -19,6 +19,7 @@ namespace secs::core {
 
 /**
  * @brief 协程可等待事件（set/reset/cancel + timeout）。
+ * 将其作为同步原语，async_wait 时会等待，直到 cancel 或者 set 或者 timeout
  *
  * 语义：
  * - set(): 置位并唤醒所有等待者；后续 wait 立即返回成功
@@ -50,6 +51,10 @@ private:
     std::uint64_t set_generation_{0};
     std::uint64_t cancel_generation_{0};
 
+    // asio::steady_timer 基于单调时钟，一般用 async_wait 来异步等待
+    // 可以使用 expires_after 和 expires_at 来分别设置相对和绝对等待时间
+    // 可以使用 cancel 取消所有挂起的等待，已挂起的 async_wait 会尽快
+    // 完成并返回 operation_aborted，挂起表示还未完成，回调还未被调用
     std::list<std::shared_ptr<asio::steady_timer>> waiters_{};
 };
 

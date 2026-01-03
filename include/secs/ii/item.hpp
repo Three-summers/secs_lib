@@ -128,6 +128,7 @@ public:
     }
 
     [[nodiscard]] bool is_list() const noexcept {
+        // 用于判断 storage_ 是否是 List，如果是返回 true
         return std::holds_alternative<List>(storage_);
     }
 

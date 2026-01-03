@@ -16,8 +16,8 @@ namespace {
  * SECS-II（SEMI E5）编码规则（与实现中关键函数的对应关系）：
  *
  * - 每个 Item 的编码形态为：FormatByte(1B) + Length(1~3B) + Payload(NB)
- *   - FormatByte：高 6 位为 format_code；低 2 位表示 Length 字段字节数 -
- * 1（00->1B, 01->2B, 10->3B）
+ *   - FormatByte：高 6 位为 format_code；低 2 位表示 Length 字段字节数
+ *     （01->1B, 10->2B, 11->3B）
  *   - Length：
  *     - 对于 List：表示子元素数量（不是字节数）
  *     - 对于非 List：表示 Payload 字节数
@@ -94,9 +94,9 @@ constexpr std::uint8_t length_bytes_for(std::uint32_t length) noexcept {
 
 constexpr std::uint8_t make_format_byte(format_code code,
                                         std::uint8_t length_bytes) noexcept {
-    // FormatByte：高 6 位为 code，低 2 位为 (length_bytes - 1)。
+    // FormatByte：高 6 位为 code，低 2 位为 length_bytes（1..3）。
     return static_cast<std::uint8_t>((static_cast<std::uint8_t>(code) << 2) |
-                                     (length_bytes - 1));
+                                     length_bytes);
 }
 
 // 解码深度上限：防止恶意输入构造极深嵌套导致栈溢出。
@@ -705,8 +705,8 @@ decode_item(SpanReader &r, Item &out, std::size_t depth) noexcept {
     }
 
     const auto length_bytes =
-        static_cast<std::uint8_t>((format_byte & 0x03u) + 1u);
-    if (length_bytes == 4) {
+        static_cast<std::uint8_t>(format_byte & 0x03u);
+    if (length_bytes == 0 || length_bytes > 3) {
         return make_error_code(errc::invalid_header);
     }
 

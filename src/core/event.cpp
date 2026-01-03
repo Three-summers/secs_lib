@@ -37,6 +37,7 @@ void Event::cancel() noexcept {
 
 asio::awaitable<std::error_code>
 Event::async_wait(std::optional<steady_clock::duration> timeout) {
+    // 说明被 set 唤醒，返回成功
     if (signaled_) {
         co_return std::error_code{};
     }
@@ -57,6 +58,7 @@ Event::async_wait(std::optional<steady_clock::duration> timeout) {
     }
 
     auto it = waiters_.insert(waiters_.end(), timer);
+    // 这里使用 as_tuple 使其返回错误码而不是异常
     auto [ec] = co_await timer->async_wait(asio::as_tuple(asio::use_awaitable));
     waiters_.erase(it);
 

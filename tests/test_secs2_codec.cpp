@@ -39,8 +39,7 @@ Item decode_ok(const std::vector<byte> &in, std::size_t &consumed) {
 
 std::uint8_t header_length_bytes(const std::vector<byte> &encoded) {
     TEST_EXPECT(!encoded.empty());
-    const auto length_bytes =
-        static_cast<std::uint8_t>((encoded[0] & 0x03u) + 1u);
+    const auto length_bytes = static_cast<std::uint8_t>(encoded[0] & 0x03u);
     TEST_EXPECT(length_bytes >= 1u);
     TEST_EXPECT(length_bytes <= 3u);
     return length_bytes;
@@ -243,9 +242,9 @@ void test_decode_errors() {
         TEST_EXPECT_EQ(consumed, 0u);
     }
 
-    // length_bytes == 4（低 2 位为 11）视为非法头部
+    // length_bytes == 0（低 2 位为 00）视为非法头部
     {
-        const std::vector<byte> in{byte{0x43}};
+        const std::vector<byte> in{byte{0x40}};
         Item out = placeholder_item();
         std::size_t consumed = 0;
         const auto ec =
@@ -257,7 +256,7 @@ void test_decode_errors() {
     // 非法格式码
     {
         const std::vector<byte> in{
-            byte{0x1C},
+            byte{0x1D},
             byte{0x00}}; // format_bits=0x07（非法），lenBytes=1，length=0
         Item out = placeholder_item();
         std::size_t consumed = 0;
@@ -270,7 +269,7 @@ void test_decode_errors() {
     // 负载截断
     {
         const std::vector<byte> in{
-            byte{0x40},
+            byte{0x41},
             byte{0x05},
             byte{'a'},
             byte{'b'}}; // ASCII，length=5，但实际只有 2 字节
@@ -285,7 +284,7 @@ void test_decode_errors() {
     // 数值类型长度不匹配（I2 长度=1）
     {
         const std::vector<byte> in{
-            byte{0x68},
+            byte{0x69},
             byte{0x01},
             byte{0x00}}; // I2，lenBytes=1，length=1（不满足 2 字节对齐）
         Item out = placeholder_item();
@@ -299,7 +298,7 @@ void test_decode_errors() {
     // 长度字段截断（lenBytes=3，但只给了 2 字节 length）
     {
         const std::vector<byte> in{
-            byte{0x42},
+            byte{0x43},
             byte{0x00},
             byte{0x01}}; // ASCII，lenBytes=3（长度字段被截断）
         Item out = placeholder_item();
@@ -313,7 +312,7 @@ void test_decode_errors() {
     // 浮点长度不匹配（F4 长度=3）
     {
         const std::vector<byte> in{
-            byte{0x84}, byte{0x03}, byte{0x00}, byte{0x00}, byte{0x00}};
+            byte{0x91}, byte{0x03}, byte{0x00}, byte{0x00}, byte{0x00}};
         Item out = placeholder_item();
         std::size_t consumed = 0;
         const auto ec =
@@ -329,10 +328,10 @@ void test_decode_deep_list_nesting_rejected() {
     std::vector<byte> in;
     in.reserve(depth * 2 + 2);
     for (std::size_t i = 0; i < depth; ++i) {
-        in.push_back(byte{0x00}); // List（列表），lenBytes=1
+        in.push_back(byte{0x01}); // List（列表），lenBytes=1
         in.push_back(byte{0x01}); // length=1（单子元素）
     }
-    in.push_back(byte{0x20}); // Binary（二进制），lenBytes=1
+    in.push_back(byte{0x21}); // Binary（二进制），lenBytes=1
     in.push_back(byte{0x00}); // length=0（空 Binary）
 
     Item out = placeholder_item();
@@ -348,10 +347,10 @@ void test_decode_depth_limit_boundary() {
     std::vector<byte> in;
     in.reserve(depth * 2 + 2);
     for (std::size_t i = 0; i < depth; ++i) {
-        in.push_back(byte{0x00}); // List（列表），lenBytes=1
+        in.push_back(byte{0x01}); // List（列表），lenBytes=1
         in.push_back(byte{0x01}); // length=1（单子元素）
     }
-    in.push_back(byte{0x20}); // Binary（二进制），lenBytes=1
+    in.push_back(byte{0x21}); // Binary（二进制），lenBytes=1
     in.push_back(byte{0x00}); // length=0（空 Binary）
 
     Item out = placeholder_item();
@@ -378,7 +377,7 @@ void test_decode_large_ascii_length_truncated() {
     constexpr std::uint32_t declared = 1024u * 1024u; // 1MB（兆字节）
     std::vector<byte> in;
     in.reserve(1u + 3u + 100u);
-    in.push_back(byte{0x42}); // ASCII，lenBytes=3（声明超大 length）
+    in.push_back(byte{0x43}); // ASCII，lenBytes=3（声明超大 length）
     in.push_back(byte{static_cast<std::uint8_t>((declared >> 16) & 0xFFu)});
     in.push_back(byte{static_cast<std::uint8_t>((declared >> 8) & 0xFFu)});
     in.push_back(byte{static_cast<std::uint8_t>(declared & 0xFFu)});
@@ -395,7 +394,7 @@ void test_decode_large_binary_length_truncated() {
     // 恶意输入：Binary 声明超大 length，但负载实际不足，必须安全返回
     // truncated（不应提前分配超大缓冲区）。
     const std::vector<byte> in{
-        byte{0x22}, // Binary（二进制），lenBytes=3
+        byte{0x23}, // Binary（二进制），lenBytes=3
         byte{0xFF},
         byte{0xFF},
         byte{0xFF}, // length=kMaxLength（16MB 上限）

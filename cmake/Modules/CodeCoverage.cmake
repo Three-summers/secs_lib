@@ -32,7 +32,17 @@ function(secs_add_coverage_target target_name)
       --merge-mode-functions=merge-use-line-min
       --html --html-details
       -o ${PROJECT_BINARY_DIR}/coverage.html
+      # 兼容两种路径形态：
+      # - 绝对路径：/home/.../tests/...
+      # - 相对路径：tests/...
+      #
+      # 注意：不要在这里使用带括号/管道符的正则（例如 "(^|.*/)"），因为
+      # Makefile 生成器会把它们以未加引号的形式交给 /bin/sh，导致语法错误。
+      --exclude '^tests/.*'
       --exclude '.*/tests/.*'
+      --exclude '^c_dump/.*'
+      --exclude '.*/c_dump/.*'
+      --exclude '^third_party/.*'
       --exclude '.*/third_party/.*'
     WORKING_DIRECTORY ${PROJECT_BINARY_DIR}
     USES_TERMINAL

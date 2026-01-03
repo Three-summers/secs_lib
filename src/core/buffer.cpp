@@ -158,6 +158,7 @@ std::error_code FixedBuffer::ensure_writable(std::size_t n) noexcept {
     if (write_pos_ > capacity_) {
         return make_error_code(errc::invalid_argument);
     }
+    // 代表有足够空间，返回 {} 即可
     if (capacity_ - write_pos_ >= n) {
         return {};
     }
@@ -199,6 +200,7 @@ std::error_code FixedBuffer::grow(std::size_t min_capacity) noexcept {
     }
 
     // 扩容策略：按 2 倍增长，直到 >= min_capacity，且不超过 max_capacity_。
+    // 这里的如果 capacity_ 为 0，则赋值成 1 是为了防止扩容操作无效
     std::size_t new_capacity =
         std::max<std::size_t>(capacity_ == 0 ? 1 : capacity_, 1);
     while (new_capacity < min_capacity) {
@@ -226,6 +228,7 @@ std::error_code FixedBuffer::append(bytes_view data) noexcept {
         return {};
     }
     auto ec = ensure_writable(data.size());
+    // std::error_code 重载了 bool 运算符，当是 {} 是为 false
     if (ec) {
         return ec;
     }

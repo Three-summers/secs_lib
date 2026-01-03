@@ -9,6 +9,7 @@
 #include "secs/hsms/message.hpp"
 #include "secs/hsms/session.hpp"
 #include "secs/secs1/link.hpp"
+#include "secs/secs1/block.hpp"
 #include "secs/secs1/state_machine.hpp"
 
 #include "test_main.hpp"
@@ -857,6 +858,124 @@ void test_secs1_protocol_echo_100() {
     TEST_EXPECT_EQ(handled.load(), 100U);
 }
 
+class RecordingLink final : public secs::secs1::Link {
+public:
+    explicit RecordingLink(secs::secs1::Link &inner) : inner_(inner) {}
+
+    [[nodiscard]] asio::any_io_executor executor() const noexcept override {
+        return inner_.executor();
+    }
+
+    asio::awaitable<std::error_code> async_write(bytes_view data) override {
+        writes_.emplace_back(data.begin(), data.end());
+        co_return co_await inner_.async_write(data);
+    }
+
+    asio::awaitable<std::pair<std::error_code, byte>>
+    async_read_byte(std::optional<secs::core::duration> timeout =
+                        std::nullopt) override {
+        co_return co_await inner_.async_read_byte(timeout);
+    }
+
+    [[nodiscard]] const std::vector<std::vector<byte>> &
+    writes() const noexcept {
+        return writes_;
+    }
+
+private:
+    secs::secs1::Link &inner_;
+    std::vector<std::vector<byte>> writes_{};
+};
+
+void test_secs1_protocol_reverse_bit_respects_options() {
+    asio::io_context ioc;
+
+    auto [a_raw, b_raw] = MemoryLink::create(ioc.get_executor());
+    RecordingLink host_link(a_raw);
+    RecordingLink equip_link(b_raw);
+
+    Timeouts timeouts{};
+    timeouts.t1_intercharacter = 50ms;
+    timeouts.t2_protocol = 100ms;
+    timeouts.t3_reply = 200ms;
+    timeouts.t4_interblock = 100ms;
+
+    constexpr std::uint16_t device_id = 0x0001;
+    StateMachine host_sm(host_link, device_id, timeouts);
+    StateMachine equip_sm(equip_link, device_id, timeouts);
+
+    SessionOptions host_opts{};
+    host_opts.t3 = 200ms;
+    host_opts.poll_interval = 1ms;
+    host_opts.secs1_reverse_bit = false; // Host -> Equipment
+
+    SessionOptions equip_opts{};
+    equip_opts.t3 = 200ms;
+    equip_opts.poll_interval = 1ms;
+    equip_opts.secs1_reverse_bit = true; // Equipment -> Host
+
+    Session proto_equip(equip_sm, device_id, equip_opts);
+    Session proto_host(host_sm, device_id, host_opts);
+
+    proto_equip.router().set(
+        2,
+        3,
+        [&](const DataMessage &msg)
+            -> asio::awaitable<secs::protocol::HandlerResult> {
+            std::vector<byte> out = msg.body;
+            out.push_back(static_cast<byte>(0xEE));
+            co_return secs::protocol::HandlerResult{std::error_code{},
+                                                    std::move(out)};
+        });
+
+    asio::co_spawn(ioc, proto_equip.async_run(), asio::detached);
+
+    std::atomic<bool> done{false};
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            std::vector<byte> payload = {byte{0x11}};
+            auto [ec, rsp] = co_await proto_host.async_request(
+                2, 3, bytes_view{payload.data(), payload.size()});
+            TEST_EXPECT_OK(ec);
+            TEST_EXPECT_EQ(rsp.stream, 2);
+            TEST_EXPECT_EQ(rsp.function, 4);
+            TEST_EXPECT(!rsp.w_bit);
+            TEST_EXPECT_EQ(rsp.body.size(), payload.size() + 1U);
+
+            proto_equip.stop();
+            proto_host.stop();
+            done = true;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(done);
+
+    const auto expect_frames_reverse_bit =
+        [&](const std::vector<std::vector<byte>> &writes,
+            bool expected_reverse_bit) {
+            std::size_t frames = 0;
+            for (const auto &w : writes) {
+                if (w.size() <= 1) {
+                    continue;
+                }
+                secs::secs1::DecodedBlock decoded{};
+                const auto ec = secs::secs1::decode_block(
+                    bytes_view{w.data(), w.size()}, decoded);
+                TEST_EXPECT_OK(ec);
+                TEST_EXPECT_EQ(decoded.header.reverse_bit, expected_reverse_bit);
+                ++frames;
+            }
+            TEST_EXPECT(frames > 0);
+        };
+
+    // Host 发出去的 block：reverse_bit 必须为 0
+    expect_frames_reverse_bit(host_link.writes(), false);
+    // Equipment 发出去的 block：reverse_bit 必须为 1
+    expect_frames_reverse_bit(equip_link.writes(), true);
+}
+
 void test_session_invalid_arguments() {
     asio::io_context ioc;
     const std::uint16_t session_id = 0x2001;
@@ -905,6 +1024,7 @@ int main() {
     test_hsms_protocol_echo_1000();
     test_hsms_protocol_t3_timeout();
     test_secs1_protocol_echo_100();
+    test_secs1_protocol_reverse_bit_respects_options();
     test_session_invalid_arguments();
     return secs::tests::run_and_report();
 }

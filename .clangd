@@ -1,0 +1,6 @@
+CompileFlags:
+  # 让 clangd 无论从哪个子目录启动，都能稳定找到 CMake 生成的编译数据库。
+  # 依赖：项目根目录下的 `build/compile_commands.json`（或根目录已有的
+  # `compile_commands.json` 软链）。
+  CompilationDatabase: build
+
