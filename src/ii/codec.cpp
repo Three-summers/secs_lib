@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <new>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -32,7 +33,7 @@ namespace {
  *
  * 备注：
  * - 由于 List 支持递归嵌套，decode
- * 侧设置了深度上限（kMaxDecodeDepth），避免恶意输入导致栈溢出。
+ * 侧支持配置解码限制（DecodeLimits），避免恶意输入导致栈溢出或资源失控。
  */
 class secs_ii_error_category final : public std::error_category {
 public:
@@ -54,6 +55,14 @@ public:
             return "secs-ii length mismatch";
         case errc::buffer_overflow:
             return "output buffer overflow";
+        case errc::list_too_large:
+            return "secs-ii list too large";
+        case errc::payload_too_large:
+            return "secs-ii payload too large";
+        case errc::total_budget_exceeded:
+            return "secs-ii total budget exceeded";
+        case errc::out_of_memory:
+            return "secs-ii out of memory";
         default:
             return "unknown secs.ii error";
         }
@@ -99,8 +108,10 @@ constexpr std::uint8_t make_format_byte(format_code code,
                                      length_bytes);
 }
 
-// 解码深度上限：防止恶意输入构造极深嵌套导致栈溢出。
-constexpr std::size_t kMaxDecodeDepth = 64;
+struct DecodeBudget final {
+    std::size_t total_items{0};
+    std::size_t total_bytes{0};
+};
 
 class SpanWriter final {
 public:
@@ -213,7 +224,11 @@ private:
 
 std::error_code encode_item(const Item &item, SpanWriter &w) noexcept;
 std::error_code
-decode_item(SpanReader &r, Item &out, std::size_t depth) noexcept;
+decode_item(SpanReader &r,
+            Item &out,
+            std::size_t depth,
+            DecodeBudget &budget,
+            const DecodeLimits &limits) noexcept;
 
 std::error_code encode_header_and_length(format_code code,
                                          std::uint32_t length,
@@ -693,10 +708,18 @@ std::error_code decode_signed_vector(bytes_view payload,
 }
 
 std::error_code
-decode_item(SpanReader &r, Item &out, std::size_t depth) noexcept {
-    if (depth > kMaxDecodeDepth) {
+decode_item(SpanReader &r,
+            Item &out,
+            std::size_t depth,
+            DecodeBudget &budget,
+            const DecodeLimits &limits) noexcept {
+    if (depth > limits.max_depth) {
         return make_error_code(errc::invalid_header);
     }
+    if (budget.total_items >= limits.max_total_items) {
+        return make_error_code(errc::total_budget_exceeded);
+    }
+    ++budget.total_items;
 
     byte format_byte = 0;
     auto ec = r.read_u8(format_byte);
@@ -727,13 +750,22 @@ decode_item(SpanReader &r, Item &out, std::size_t depth) noexcept {
 
     if (*fmt == format_code::list) {
         // List 的 Length 表示“子元素个数”，因此按 count 递归解析每个子项。
+        if (length > limits.max_list_items) {
+            return make_error_code(errc::list_too_large);
+        }
+        const std::size_t want =
+            static_cast<std::size_t>(budget.total_items) +
+            static_cast<std::size_t>(length);
+        if (want > limits.max_total_items) {
+            return make_error_code(errc::total_budget_exceeded);
+        }
         List items;
         items.reserve(length);
         for (std::uint32_t i = 0; i < length; ++i) {
             // Item 禁止默认构造：这里用一个占位值承接递归输出，随后会被
             // decode_item 覆盖。
             Item child = Item::binary({});
-            ec = decode_item(r, child, depth + 1);
+            ec = decode_item(r, child, depth + 1, budget, limits);
             if (ec) {
                 return ec;
             }
@@ -743,11 +775,25 @@ decode_item(SpanReader &r, Item &out, std::size_t depth) noexcept {
         return {};
     }
 
+    if (length > limits.max_payload_bytes) {
+        return make_error_code(errc::payload_too_large);
+    }
+    std::size_t next_total_bytes = 0;
+    if (!checked_add(budget.total_bytes,
+                     static_cast<std::size_t>(length),
+                     next_total_bytes)) {
+        return make_error_code(errc::total_budget_exceeded);
+    }
+    if (next_total_bytes > limits.max_total_bytes) {
+        return make_error_code(errc::total_budget_exceeded);
+    }
+
     bytes_view payload{};
     ec = r.read_payload(length, payload);
     if (ec) {
         return ec;
     }
+    budget.total_bytes = next_total_bytes;
 
     switch (*fmt) {
     case format_code::ascii: {
@@ -929,14 +975,30 @@ std::error_code encode_to(mutable_bytes_view out,
 
 std::error_code
 decode_one(bytes_view in, Item &out, std::size_t &consumed) noexcept {
+    return decode_one(in, out, consumed, DecodeLimits{});
+}
+
+std::error_code decode_one(bytes_view in,
+                           Item &out,
+                           std::size_t &consumed,
+                           const DecodeLimits &limits) noexcept {
     SpanReader r(in);
-    auto ec = decode_item(r, out, 0);
-    if (ec) {
+    DecodeBudget budget{};
+    try {
+        auto ec = decode_item(r, out, 0, budget, limits);
+        if (ec) {
+            consumed = 0;
+            return ec;
+        }
+        consumed = r.consumed();
+        return {};
+    } catch (const std::bad_alloc &) {
         consumed = 0;
-        return ec;
+        return make_error_code(errc::out_of_memory);
+    } catch (...) {
+        consumed = 0;
+        return make_error_code(errc::invalid_header);
     }
-    consumed = r.consumed();
-    return {};
 }
 
 } // namespace secs::ii

@@ -41,6 +41,8 @@ struct SessionOptions final {
 
     // 链路测试（LINKTEST）周期（0 表示不自动发送）。
     core::duration linktest_interval{};
+    // Linktest 连续失败阈值：达到阈值后断线（默认 1：一次失败即断线，保持当前行为）。
+    std::uint32_t linktest_max_consecutive_failures{1};
 
     bool auto_reconnect{true};
 
@@ -131,6 +133,7 @@ private:
 
     void reset_state_() noexcept;
     void set_selected_() noexcept;
+    void set_not_selected_() noexcept;
     void on_disconnected_(std::error_code reason) noexcept;
 
     void start_reader_();
@@ -146,6 +149,7 @@ private:
     async_data_transaction_(const Message &req, core::duration timeout);
 
     [[nodiscard]] bool fulfill_pending_(const Message &msg) noexcept;
+    void cancel_pending_data_(std::error_code reason) noexcept;
 
     asio::any_io_executor executor_;
     SessionOptions options_{};

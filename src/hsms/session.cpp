@@ -10,6 +10,9 @@
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 
+#include <algorithm>
+#include <vector>
+
 namespace secs::hsms {
 namespace {
 
@@ -54,6 +57,7 @@ Session::Session(asio::any_io_executor ex, SessionOptions options)
 
 void Session::reset_state_() noexcept {
     state_ = SessionState::connected;
+    connection_.disable_data_writes(core::make_error_code(core::errc::cancelled));
 
     selected_event_.reset();
     inbound_event_.reset();
@@ -68,6 +72,7 @@ void Session::set_selected_() noexcept {
         return;
     }
     state_ = SessionState::selected;
+    connection_.enable_data_writes();
     const auto gen = selected_generation_.fetch_add(1U) + 1U;
     selected_event_.set();
 
@@ -81,8 +86,28 @@ void Session::set_selected_() noexcept {
     }
 }
 
+void Session::set_not_selected_() noexcept {
+    if (state_ == SessionState::disconnected) {
+        return;
+    }
+
+    state_ = SessionState::connected;
+    connection_.disable_data_writes(core::make_error_code(core::errc::cancelled));
+
+    // 退出 selected 后必须 reset selected_event_，否则等待方可能进入忙等。
+    selected_event_.reset();
+
+    // NOT_SELECTED 期间不应继续向上层交付 data message；同时唤醒等待者。
+    inbound_data_.clear();
+    inbound_event_.cancel();
+    inbound_event_.reset();
+
+    cancel_pending_data_(core::make_error_code(core::errc::cancelled));
+}
+
 void Session::on_disconnected_(std::error_code reason) noexcept {
     state_ = SessionState::disconnected;
+    connection_.disable_data_writes(reason);
 
     // 唤醒所有等待者：已选择（selected）状态等待、入站队列等待、挂起事务等待。
     selected_event_.cancel();
@@ -124,12 +149,17 @@ asio::awaitable<void> Session::reader_loop_() {
     while (!stop_requested_) {
         auto [ec, msg] = co_await connection_.async_read_message();
         if (ec) {
+            connection_.cancel_and_close();
             on_disconnected_(ec);
             break;
         }
 
         if (msg.is_data()) {
             if (fulfill_pending_(msg)) {
+                continue;
+            }
+            if (state_ != SessionState::selected) {
+                // NOT_SELECTED 期间收到 data：按协议不向上层交付（直接丢弃）。
                 continue;
             }
             inbound_data_.push_back(std::move(msg));
@@ -180,37 +210,38 @@ asio::awaitable<void> Session::reader_loop_() {
             // 主动端收到 SELECT.rsp：
             // - 先尝试唤醒挂起的控制事务（对应 async_control_transaction_）
             // - 若接受则进入 selected
-            (void)fulfill_pending_(msg);
-            if (msg.header.session_id == kRspOk) {
+            const bool matched = fulfill_pending_(msg);
+            if (matched && msg.header.session_id == kRspOk) {
                 set_selected_();
             }
             break;
         }
         case SType::deselect_req: {
-            // 收到 DESELECT.req：按协议回复后断线（保持实现简单）
+            // 收到 DESELECT.req：先立即阻断 data，再回复 DESELECT.rsp，并退回 NOT_SELECTED。
+            set_not_selected_();
             (void)co_await connection_.async_write_message(
                 make_deselect_rsp(kRspOk, msg.header.system_bytes));
-            (void)co_await connection_.async_close();
-            on_disconnected_(core::make_error_code(core::errc::cancelled));
-            should_exit = true;
             break;
         }
         case SType::deselect_rsp: {
             (void)fulfill_pending_(msg);
-            // DESELECT 交互完成后主动断开，保持实现简单。
-            (void)co_await connection_.async_close();
-            on_disconnected_(core::make_error_code(core::errc::cancelled));
-            should_exit = true;
+            // 对端确认 DESELECT：退回 NOT_SELECTED（保持连接 open）。
+            set_not_selected_();
             break;
         }
         case SType::linktest_req: {
             // 收到 LINKTEST.req：立即回复 LINKTEST.rsp（不进入 inbound_data_）
             (void)co_await connection_.async_write_message(
-                make_linktest_rsp(kRspOk, msg.header.system_bytes));
+                make_linktest_rsp(options_.session_id, msg.header.system_bytes));
             break;
         }
         case SType::linktest_rsp: {
             (void)fulfill_pending_(msg);
+            break;
+        }
+        case SType::reject_req: {
+            // Reject.req：当前不向上层暴露，仅保持会话稳定（后续可扩展 reason code
+            // 解析/回调）。
             break;
         }
         case SType::separate_req: {
@@ -220,7 +251,9 @@ asio::awaitable<void> Session::reader_loop_() {
             break;
         }
         default: {
-            // 未实现的控制类型：忽略（后续可扩展 Reject 等）。
+            // 未实现/未知的控制类型：按 Reject 反馈，避免对端只能靠断线诊断。
+            (void)co_await connection_.async_write_message(
+                make_reject_req(/*reason_code=*/1, msg.header));
             break;
         }
         }
@@ -235,6 +268,10 @@ asio::awaitable<void> Session::reader_loop_() {
 }
 
 asio::awaitable<void> Session::linktest_loop_(std::uint64_t generation) {
+    std::uint32_t consecutive_failures = 0;
+    const std::uint32_t max_failures =
+        std::max<std::uint32_t>(1U, options_.linktest_max_consecutive_failures);
+
     while (!stop_requested_) {
         if (state_ != SessionState::selected ||
             selected_generation_.load() != generation) {
@@ -261,9 +298,14 @@ asio::awaitable<void> Session::linktest_loop_(std::uint64_t generation) {
 
         ec = co_await async_linktest();
         if (ec) {
-            (void)co_await connection_.async_close();
-            co_return;
+            ++consecutive_failures;
+            if (consecutive_failures >= max_failures) {
+                (void)co_await connection_.async_close();
+                co_return;
+            }
+            continue;
         }
+        consecutive_failures = 0;
     }
 }
 
@@ -290,6 +332,24 @@ bool Session::fulfill_pending_(const Message &msg) noexcept {
     return true;
 }
 
+void Session::cancel_pending_data_(std::error_code reason) noexcept {
+    std::vector<std::uint32_t> to_erase;
+    to_erase.reserve(pending_.size());
+
+    for (const auto &[sb, pending] : pending_) {
+        if (pending->expected_stype != SType::data) {
+            continue;
+        }
+        pending->ec = reason;
+        pending->ready.cancel();
+        to_erase.push_back(sb);
+    }
+
+    for (const auto sb : to_erase) {
+        pending_.erase(sb);
+    }
+}
+
 asio::awaitable<std::pair<std::error_code, Message>>
 Session::async_control_transaction_(const Message &req,
                                     SType expected_rsp,
@@ -307,10 +367,9 @@ Session::async_control_transaction_(const Message &req,
 
     ec = co_await pending->ready.async_wait(timeout);
     if (ec == core::make_error_code(core::errc::timeout)) {
-        // 控制事务超时：按断线处理（关闭连接并取消所有等待者），避免会话进入“不一致的半状态”。
+        // 控制事务超时：不强制断线；由调用方按控制消息语义决定后续动作
+        // （例如 Select.req 超时应回到 NOT_SELECTED 并保持连接可继续交互）。
         pending_.erase(sb);
-        (void)co_await connection_.async_close();
-        on_disconnected_(ec);
         co_return std::pair{ec, Message{}};
     }
 
@@ -540,7 +599,7 @@ asio::awaitable<std::error_code> Session::async_linktest() {
     if (ec) {
         co_return ec;
     }
-    if (rsp.header.session_id != kRspOk) {
+    if (rsp.header.session_id != options_.session_id) {
         co_return core::make_error_code(core::errc::invalid_argument);
     }
     co_return std::error_code{};

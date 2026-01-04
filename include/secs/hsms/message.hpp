@@ -73,8 +73,11 @@ struct Message final {
                                         std::uint32_t system_bytes);
 [[nodiscard]] Message make_linktest_req(std::uint16_t session_id,
                                         std::uint32_t system_bytes);
-[[nodiscard]] Message make_linktest_rsp(std::uint16_t status,
+[[nodiscard]] Message make_linktest_rsp(std::uint16_t session_id,
                                         std::uint32_t system_bytes);
+// Reject.req：SessionID 字段承载 reason code；body 为被拒绝消息的 10B header。
+[[nodiscard]] Message make_reject_req(std::uint16_t reason_code,
+                                      const Header &rejected_header);
 [[nodiscard]] Message make_separate_req(std::uint16_t session_id,
                                         std::uint32_t system_bytes);
 

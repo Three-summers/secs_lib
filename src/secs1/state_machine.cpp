@@ -52,6 +52,15 @@ StateMachine::async_send(const Header &header, secs::core::bytes_view body) {
             secs::core::errc::invalid_argument);
     }
 
+    // 对齐 c_dump：BlockNumber 为 8 位，单条消息最多 255 个 Block（起始为 1）。
+    if (!body.empty()) {
+        const auto blocks =
+            (body.size() + kMaxBlockDataSize - 1) / kMaxBlockDataSize;
+        if (blocks > 0x00FFu) {
+            co_return secs::core::make_error_code(secs::core::errc::invalid_argument);
+        }
+    }
+
     // 进入“等待对端允许发送”的阶段（ENQ -> 等待 EOT/ACK）。
     state_ = State::wait_eot;
 

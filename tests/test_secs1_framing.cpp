@@ -222,9 +222,24 @@ void test_encode_invalid_device_id() {
     TEST_EXPECT_EQ(ec, make_error_code(errc::invalid_argument));
 }
 
+void test_encode_device_id_boundary_values() {
+    auto h = sample_header();
+
+    // 最大合法值：0x7FFF
+    h.device_id = 0x7FFF;
+    std::vector<byte> ok_frame;
+    TEST_EXPECT_OK(secs::secs1::encode_block(h, as_bytes("x"), ok_frame));
+
+    // 最高位与 reverse_bit 冲突：0x8000 必须被拒绝（避免产生歧义字节流）
+    h.device_id = 0x8000;
+    std::vector<byte> bad_frame;
+    auto ec = secs::secs1::encode_block(h, as_bytes("x"), bad_frame);
+    TEST_EXPECT_EQ(ec, make_error_code(errc::invalid_argument));
+}
+
 void test_encode_invalid_block_number() {
     auto h = sample_header();
-    h.block_number = 0xFFFF; // 超出 15 位有效范围
+    h.block_number = 0x0100; // 超出 8 位有效范围（对齐 c_dump）
 
     std::vector<byte> frame;
     auto ec = secs::secs1::encode_block(h, as_bytes("x"), frame);
@@ -241,7 +256,7 @@ void test_encode_data_too_large() {
     TEST_EXPECT_EQ(ec, make_error_code(errc::invalid_argument));
 }
 
-void test_encode_decode_variant_bits_and_block_number_hi() {
+void test_encode_decode_variant_bits_and_block_number_max() {
     Header h{};
     h.reverse_bit = false;
     h.device_id = 0x0001;
@@ -249,7 +264,7 @@ void test_encode_decode_variant_bits_and_block_number_hi() {
     h.stream = 0x7F;
     h.function = 0xFF;
     h.end_bit = false;
-    h.block_number = 0x0123; // 覆盖 block_number 高位路径
+    h.block_number = 0x00FF; // 覆盖 block_number 最大值路径（8 位）
     h.system_bytes = 0xAABBCCDD;
 
     std::vector<byte> frame;
@@ -1448,6 +1463,86 @@ void test_state_machine_receive_device_id_mismatch() {
     TEST_EXPECT_EQ(done.load(), 2);
 }
 
+void test_state_machine_receive_block_sequence_error() {
+    asio::io_context ioc;
+    auto [a, b] = MemoryLink::create(ioc.get_executor());
+
+    Timeouts timeouts{};
+    timeouts.t1_intercharacter = 50ms;
+    timeouts.t2_protocol = 50ms;
+    timeouts.t4_interblock = 50ms;
+
+    StateMachine receiver(b, 0x1234, timeouts, 3);
+
+    auto h1 = sample_header();
+    h1.end_bit = false;
+    h1.block_number = 1;
+    std::vector<byte> frame1;
+    TEST_EXPECT_OK(secs::secs1::encode_block(h1, as_bytes("a"), frame1));
+
+    auto h2 = h1;
+    h2.end_bit = true;
+    h2.block_number = 3; // 跳过 2，触发 block_sequence_error
+    std::vector<byte> frame2;
+    TEST_EXPECT_OK(secs::secs1::encode_block(h2, as_bytes("b"), frame2));
+
+    std::atomic<int> done{0};
+    asio::steady_timer watchdog(ioc);
+    watchdog.expires_after(1s);
+    watchdog.async_wait([&](const std::error_code &) {
+        TEST_FAIL("watchdog fired");
+        ioc.stop();
+    });
+
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            TEST_EXPECT_OK(co_await write_byte(a, secs::secs1::kEnq));
+            auto [ec0, ch0] = co_await a.async_read_byte(200ms);
+            TEST_EXPECT_OK(ec0);
+            TEST_EXPECT_EQ(ch0, secs::secs1::kEot);
+
+            // 第 1 块应被 ACK
+            TEST_EXPECT_OK(
+                co_await a.async_write(bytes_view{frame1.data(), frame1.size()}));
+            auto [ec1, resp1] = co_await a.async_read_byte(200ms);
+            TEST_EXPECT_OK(ec1);
+            TEST_EXPECT_EQ(resp1, secs::secs1::kAck);
+
+            // 第 2 块序号不连续，应被 NAK
+            TEST_EXPECT_OK(
+                co_await a.async_write(bytes_view{frame2.data(), frame2.size()}));
+            auto [ec2, resp2] = co_await a.async_read_byte(200ms);
+            TEST_EXPECT_OK(ec2);
+            TEST_EXPECT_EQ(resp2, secs::secs1::kNak);
+
+            if (++done == 2) {
+                watchdog.cancel();
+                ioc.stop();
+            }
+            co_return;
+        },
+        asio::detached);
+
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            auto [ec, _] = co_await receiver.async_receive(500ms);
+            TEST_EXPECT_EQ(
+                ec,
+                secs::secs1::make_error_code(secs::secs1::errc::block_sequence_error));
+            if (++done == 2) {
+                watchdog.cancel();
+                ioc.stop();
+            }
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT_EQ(done.load(), 2);
+}
+
 void test_state_machine_receive_ignores_noise_before_enq() {
     asio::io_context ioc;
     auto [a, b] = MemoryLink::create(ioc.get_executor());
@@ -2032,9 +2127,10 @@ int main() {
     test_secs1_error_category_and_messages();
     test_encode_decode_roundtrip_single_block();
     test_encode_invalid_device_id();
+    test_encode_device_id_boundary_values();
     test_encode_invalid_block_number();
     test_encode_data_too_large();
-    test_encode_decode_variant_bits_and_block_number_hi();
+    test_encode_decode_variant_bits_and_block_number_max();
     test_decode_checksum_mismatch();
     test_decode_invalid_too_small();
     test_decode_invalid_length_out_of_range();
@@ -2069,6 +2165,7 @@ int main() {
     test_state_machine_receive_invalid_length_returns_invalid_block();
     test_state_machine_receive_too_many_bad_blocks();
     test_state_machine_receive_device_id_mismatch();
+    test_state_machine_receive_block_sequence_error();
     test_state_machine_receive_ignores_noise_before_enq();
     test_sender_retries_handshake_on_nak_then_ok();
     test_sender_retries_block_on_nak();

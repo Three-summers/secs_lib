@@ -4,6 +4,7 @@
 
 #include <asio/as_tuple.hpp>
 #include <asio/co_spawn.hpp>
+#include <asio/detached.hpp>
 #include <asio/deferred.hpp>
 #include <asio/experimental/cancellation_condition.hpp>
 #include <asio/experimental/parallel_group.hpp>
@@ -78,21 +79,15 @@ private:
 } // namespace
 
 Connection::Connection(asio::any_io_executor ex, ConnectionOptions options)
-    : stream_(std::make_unique<TcpStream>(ex)), options_(options) {
-    write_gate_.set();
-}
+    : stream_(std::make_unique<TcpStream>(ex)), options_(options) {}
 
 Connection::Connection(asio::ip::tcp::socket socket, ConnectionOptions options)
     : stream_(std::make_unique<TcpStream>(std::move(socket))),
-      options_(options) {
-    write_gate_.set();
-}
+      options_(options) {}
 
 Connection::Connection(std::unique_ptr<Stream> stream,
                        ConnectionOptions options)
-    : stream_(std::move(stream)), options_(options) {
-    write_gate_.set();
-}
+    : stream_(std::move(stream)), options_(options) {}
 
 asio::any_io_executor Connection::executor() const noexcept {
     if (!stream_) {
@@ -126,8 +121,9 @@ asio::awaitable<std::error_code> Connection::async_close() {
         stream_->close();
     }
 
-    // 取消可能正在等待写锁的协程。
-    write_gate_.cancel();
+    disable_data_writes(core::make_error_code(core::errc::cancelled));
+    cancel_queued_writes_(core::make_error_code(core::errc::cancelled));
+    write_ready_.cancel();
     co_return std::error_code{};
 }
 
@@ -136,7 +132,91 @@ void Connection::cancel_and_close() noexcept {
         stream_->cancel();
         stream_->close();
     }
-    write_gate_.cancel();
+    disable_data_writes(core::make_error_code(core::errc::cancelled));
+    cancel_queued_writes_(core::make_error_code(core::errc::cancelled));
+    write_ready_.cancel();
+}
+
+void Connection::enable_data_writes() noexcept { data_writes_enabled_ = true; }
+
+void Connection::disable_data_writes(std::error_code reason) noexcept {
+    data_writes_enabled_ = false;
+    cancel_queued_data_writes_(reason);
+}
+
+void Connection::cancel_queued_writes_(std::error_code reason) noexcept {
+    for (auto &req : control_queue_) {
+        req->ec = reason;
+        req->done.set();
+    }
+    for (auto &req : data_queue_) {
+        req->ec = reason;
+        req->done.set();
+    }
+    control_queue_.clear();
+    data_queue_.clear();
+}
+
+void Connection::cancel_queued_data_writes_(std::error_code reason) noexcept {
+    for (auto &req : data_queue_) {
+        req->ec = reason;
+        req->done.set();
+    }
+    data_queue_.clear();
+}
+
+void Connection::start_writer_() {
+    if (writer_running_) {
+        return;
+    }
+    if (!stream_) {
+        return;
+    }
+    writer_running_ = true;
+    asio::co_spawn(
+        stream_->executor(),
+        [this]() -> asio::awaitable<void> { co_await writer_loop_(); },
+        asio::detached);
+}
+
+asio::awaitable<void> Connection::writer_loop_() {
+    struct Reset final {
+        Connection *self;
+        ~Reset() { self->writer_running_ = false; }
+    } reset{this};
+
+    while (stream_ && stream_->is_open()) {
+        std::shared_ptr<WriteRequest> req;
+        if (!control_queue_.empty()) {
+            req = std::move(control_queue_.front());
+            control_queue_.pop_front();
+        } else if (!data_queue_.empty()) {
+            req = std::move(data_queue_.front());
+            data_queue_.pop_front();
+        } else {
+            write_ready_.reset();
+            const auto ec = co_await write_ready_.async_wait();
+            if (ec) {
+                break;
+            }
+            continue;
+        }
+
+        const auto ec = co_await stream_->async_write_all(
+            core::bytes_view{req->frame.data(), req->frame.size()});
+        req->ec = ec;
+        req->done.set();
+        if (ec) {
+            if (stream_) {
+                stream_->cancel();
+                stream_->close();
+            }
+            cancel_queued_writes_(ec);
+            break;
+        }
+    }
+
+    cancel_queued_writes_(core::make_error_code(core::errc::cancelled));
 }
 
 asio::awaitable<std::pair<std::error_code, std::size_t>>
@@ -213,31 +293,30 @@ Connection::async_write_message(const Message &msg) {
     if (!stream_) {
         co_return core::make_error_code(core::errc::invalid_argument);
     }
-
-    // 写入串行化：
-    // - HSMS 帧必须以“整帧”为单位写入，否则并发写会在 TCP
-    // 字节流中交错，破坏分帧边界。
-    // - 这里用 write_in_progress_ + write_gate_ 做一个简单的协程锁：
-    //   - write_in_progress_=true 表示有人持锁；其余协程等待 write_gate_ 被
-    //   set()
-    //   - 当前协程持锁后 reset() write_gate_；写完再 set() write_gate_
-    //   唤醒等待者
-    while (write_in_progress_) {
-        auto ec = co_await write_gate_.async_wait();
-        if (ec) {
-            co_return ec;
-        }
+    if (!stream_->is_open()) {
+        co_return core::make_error_code(core::errc::invalid_argument);
     }
-    write_in_progress_ = true;
-    write_gate_.reset();
+    if (msg.is_data() && !data_writes_enabled_) {
+        co_return core::make_error_code(core::errc::cancelled);
+    }
 
-    const auto frame = encode_frame(msg);
-    const auto ec = co_await stream_->async_write_all(
-        core::bytes_view{frame.data(), frame.size()});
+    auto req = std::make_shared<WriteRequest>();
+    req->frame = encode_frame(msg);
+    req->is_data = msg.is_data();
 
-    write_in_progress_ = false;
-    write_gate_.set();
-    co_return ec;
+    if (req->is_data) {
+        data_queue_.push_back(req);
+    } else {
+        control_queue_.push_back(req);
+    }
+    start_writer_();
+    write_ready_.set();
+
+    auto ec = co_await req->done.async_wait();
+    if (ec) {
+        co_return ec;
+    }
+    co_return req->ec;
 }
 
 asio::awaitable<std::pair<std::error_code, Message>>

@@ -371,6 +371,101 @@ void test_decode_depth_limit_boundary() {
     TEST_EXPECT_EQ(bin->value.size(), 0u);
 }
 
+void test_decode_depth_limit_plus_one_rejected() {
+    // 边界值+1：嵌套深度=65 应该被拒绝（防 off-by-one 回归）。
+    constexpr std::size_t depth = 65;
+    std::vector<byte> in;
+    in.reserve(depth * 2 + 2);
+    for (std::size_t i = 0; i < depth; ++i) {
+        in.push_back(byte{0x01}); // List（列表），lenBytes=1
+        in.push_back(byte{0x01}); // length=1（单子元素）
+    }
+    in.push_back(byte{0x21}); // Binary（二进制），lenBytes=1
+    in.push_back(byte{0x00}); // length=0
+
+    Item out = placeholder_item();
+    std::size_t consumed = 123;
+    const auto ec = decode_one(bytes_view{in.data(), in.size()}, out, consumed);
+    TEST_EXPECT_EQ(ec, make_error_code(errc::invalid_header));
+    TEST_EXPECT_EQ(consumed, 0u);
+}
+
+void test_decode_boolean_non_zero_normalized_to_true() {
+    // Boolean 的元素按字节编码；当前实现将“非 0”视为 true（兼容性更好）。
+    const std::vector<byte> in{
+        byte{0x25}, // Boolean（format_code=0x09），lenBytes=1
+        byte{0x03}, // length=3
+        byte{0x00},
+        byte{0x02},
+        byte{0xFF},
+    };
+
+    Item out = placeholder_item();
+    std::size_t consumed = 0;
+    TEST_EXPECT_OK(decode_one(bytes_view{in.data(), in.size()}, out, consumed));
+    TEST_EXPECT_EQ(consumed, in.size());
+
+    const auto *v = out.get_if<secs::ii::Boolean>();
+    TEST_EXPECT(v != nullptr);
+    TEST_EXPECT_EQ(v->values.size(), 3u);
+    TEST_EXPECT(v->values[0] == false);
+    TEST_EXPECT(v->values[1] == true);
+    TEST_EXPECT(v->values[2] == true);
+}
+
+void test_decode_list_too_large_rejected() {
+    // List 的 length 是“子元素个数”，这里构造 length=65536（超出默认上限 65535）。
+    const std::vector<byte> in{
+        byte{0x03}, // List，lenBytes=3
+        byte{0x01},
+        byte{0x00},
+        byte{0x00}, // length=0x010000
+    };
+
+    Item out = placeholder_item();
+    std::size_t consumed = 0;
+    const auto ec = decode_one(bytes_view{in.data(), in.size()}, out, consumed);
+    TEST_EXPECT_EQ(ec, make_error_code(errc::list_too_large));
+    TEST_EXPECT_EQ(consumed, 0u);
+}
+
+void test_decode_total_item_budget_exceeded_rejected() {
+    // 使用自定义 DecodeLimits，把 total_items 上限压到很小，以便快速覆盖分支。
+    secs::ii::DecodeLimits limits{};
+    limits.max_total_items = 5; // root(1)+children(>4) 会触发 total_budget_exceeded
+
+    const std::vector<byte> in{
+        byte{0x01}, // List，lenBytes=1
+        byte{0x06}, // length=6（子元素个数）
+    };
+
+    Item out = placeholder_item();
+    std::size_t consumed = 0;
+    const auto ec =
+        decode_one(bytes_view{in.data(), in.size()}, out, consumed, limits);
+    TEST_EXPECT_EQ(ec, make_error_code(errc::total_budget_exceeded));
+    TEST_EXPECT_EQ(consumed, 0u);
+}
+
+void test_decode_total_byte_budget_exceeded_before_payload_read() {
+    // 使用自定义 DecodeLimits，把 total_bytes 上限压到 3，构造 ASCII length=4
+    // 的头部，验证在读取 payload 前即可拒绝（避免不必要的读取/分配）。
+    secs::ii::DecodeLimits limits{};
+    limits.max_total_bytes = 3;
+
+    const std::vector<byte> in{
+        byte{0x41}, // ASCII，lenBytes=1
+        byte{0x04}, // length=4
+    };
+
+    Item out = placeholder_item();
+    std::size_t consumed = 0;
+    const auto ec =
+        decode_one(bytes_view{in.data(), in.size()}, out, consumed, limits);
+    TEST_EXPECT_EQ(ec, make_error_code(errc::total_budget_exceeded));
+    TEST_EXPECT_EQ(consumed, 0u);
+}
+
 void test_decode_large_ascii_length_truncated() {
     // 恶意输入：ASCII 声明 length=1MB，但负载只有 100 字节，必须返回
     // truncated。
@@ -391,14 +486,30 @@ void test_decode_large_ascii_length_truncated() {
 }
 
 void test_decode_large_binary_length_truncated() {
-    // 恶意输入：Binary 声明超大 length，但负载实际不足，必须安全返回
-    // truncated（不应提前分配超大缓冲区）。
+    // 恶意输入：Binary 声明超大 length，但负载实际不足：
+    // - 若超过解码硬上限，应优先返回 payload_too_large；
+    // - 关键点：不得提前分配超大缓冲区。
     const std::vector<byte> in{
         byte{0x23}, // Binary（二进制），lenBytes=3
         byte{0xFF},
         byte{0xFF},
         byte{0xFF}, // length=kMaxLength（16MB 上限）
         byte{0x00}, // 负载截断
+    };
+
+    Item out = placeholder_item();
+    std::size_t consumed = 0;
+    const auto ec = decode_one(bytes_view{in.data(), in.size()}, out, consumed);
+    TEST_EXPECT_EQ(ec, make_error_code(errc::payload_too_large));
+    TEST_EXPECT_EQ(consumed, 0u);
+}
+
+void test_decode_binary_length_truncated() {
+    // Binary 声明 length=2，但实际只有 1 字节 payload，必须返回 truncated。
+    const std::vector<byte> in{
+        byte{0x21}, // Binary，lenBytes=1
+        byte{0x02}, // length=2
+        byte{0xAA}, // payload 被截断（只有 1B）
     };
 
     Item out = placeholder_item();
@@ -538,8 +649,14 @@ int main() {
     test_decode_errors();
     test_decode_deep_list_nesting_rejected();
     test_decode_depth_limit_boundary();
+    test_decode_depth_limit_plus_one_rejected();
     test_decode_large_ascii_length_truncated();
     test_decode_large_binary_length_truncated();
+    test_decode_binary_length_truncated();
+    test_decode_boolean_non_zero_normalized_to_true();
+    test_decode_list_too_large_rejected();
+    test_decode_total_item_budget_exceeded_rejected();
+    test_decode_total_byte_budget_exceeded_before_payload_read();
     test_encode_to_buffer_overflow();
     test_encode_to_buffer_overflow_paths();
     test_length_overflow_limits();

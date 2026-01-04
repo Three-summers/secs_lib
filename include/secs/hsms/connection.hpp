@@ -10,10 +10,12 @@
 #include <asio/ip/tcp.hpp>
 #include <asio/use_awaitable.hpp>
 
+#include <deque>
 #include <cstdint>
 #include <memory>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 namespace secs::hsms {
 
@@ -77,10 +79,23 @@ public:
 
     void cancel_and_close() noexcept;
 
+    // data 写门禁：
+    // - NOT_SELECTED 状态下可禁用 data 写入，避免控制流期间出现“data 抢写”竞态。
+    // - 禁用时会快速失败队列中尚未写出的 data。
+    void enable_data_writes() noexcept;
+    void disable_data_writes(std::error_code reason) noexcept;
+
     asio::awaitable<std::error_code> async_write_message(const Message &msg);
     asio::awaitable<std::pair<std::error_code, Message>> async_read_message();
 
 private:
+    struct WriteRequest final {
+        std::vector<core::byte> frame{};
+        secs::core::Event done{};
+        std::error_code ec{};
+        bool is_data{false};
+    };
+
     asio::awaitable<std::error_code>
     async_read_exactly(core::mutable_bytes_view dst);
 
@@ -89,12 +104,23 @@ private:
 
     static std::uint32_t read_u32_be_(const core::byte *p) noexcept;
 
+    void start_writer_();
+    asio::awaitable<void> writer_loop_();
+    void cancel_queued_writes_(std::error_code reason) noexcept;
+    void cancel_queued_data_writes_(std::error_code reason) noexcept;
+
     std::unique_ptr<Stream> stream_;
     ConnectionOptions options_{};
 
-    // 写入串行化（避免多个协程并发发起 async_write 造成未定义行为）。
-    secs::core::Event write_gate_{};
-    bool write_in_progress_{false};
+    // 写入串行化 + 控制消息优先级：
+    // - 统一由 writer_loop_ 串行写出，避免并发 async_write 未定义行为
+    // - control_queue_ 优先于 data_queue_，避免 Deselect/Separate 等控制消息被 data
+    //   抢占写入顺序
+    secs::core::Event write_ready_{};
+    std::deque<std::shared_ptr<WriteRequest>> control_queue_{};
+    std::deque<std::shared_ptr<WriteRequest>> data_queue_{};
+    bool writer_running_{false};
+    bool data_writes_enabled_{true};
 };
 
 } // namespace secs::hsms

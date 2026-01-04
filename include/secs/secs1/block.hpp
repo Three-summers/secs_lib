@@ -42,8 +42,8 @@ std::error_code make_error_code(errc e) noexcept;
  * - Byte2: DeviceID[7:0]
  * - Byte3: W(1b) + Stream(7b)
  * - Byte4: Function(8b)
- * - Byte5: E(1b) + BlockNumber[14:8](7b)
- * - Byte6: BlockNumber[7:0]
+ * - Byte5: E(1b) + 预留(7b，固定为 0)
+ * - Byte6: BlockNumber(8b)
  * - Byte7..10: SystemBytes（big-endian）
  */
 struct Header final {
@@ -55,7 +55,7 @@ struct Header final {
     std::uint8_t function{0};
 
     bool end_bit{false};
-    std::uint16_t block_number{1}; // 15 位有效（0x0000-0x7FFF）
+    std::uint16_t block_number{1}; // 8 位有效（0x0000-0x00FF）
 
     std::uint32_t system_bytes{0};
 };

@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <system_error>
 #include <unordered_set>
@@ -25,7 +26,21 @@ namespace secs::protocol {
  */
 class SystemBytes final {
 public:
-    explicit SystemBytes(std::uint32_t initial = 1U) noexcept;
+    /**
+     * @brief 创建 SystemBytes 分配器。
+     *
+     * @param initial 初始候选值（0 会被归一化为 1）。
+     * @param max_value 允许分配的最大值（包含该值，0 表示使用 UINT32_MAX）。
+     *
+     * 说明：
+     * - 默认 max_value=UINT32_MAX，对应可用空间为 1..UINT32_MAX（排除 0）。
+     * - max_value 参数主要用于单元测试中的“小空间注入”，以覆盖 wrap/exhaustion
+     *   分支；生产使用建议保持默认值。
+     */
+    explicit SystemBytes(
+        std::uint32_t initial = 1U,
+        std::uint32_t max_value =
+            std::numeric_limits<std::uint32_t>::max()) noexcept;
 
     /**
      * @brief 分配一个新的 SystemBytes。
@@ -48,6 +63,7 @@ private:
 
     mutable std::mutex mu_{};
     std::uint32_t next_{1U};
+    std::uint32_t max_{std::numeric_limits<std::uint32_t>::max()};
     std::deque<std::uint32_t> free_{};
     std::unordered_set<std::uint32_t> in_use_{};
 };

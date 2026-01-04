@@ -237,6 +237,30 @@ void test_system_bytes_unique_release_reuse_and_wrap() {
     TEST_EXPECT_EQ(x3, 1U);
 }
 
+void test_system_bytes_exhaustion_small_space() {
+    // “小空间注入”：把可分配空间压到 1..3，覆盖 exhaustion 分支。
+    SystemBytes sb(1U, 3U);
+
+    std::uint32_t a = 0;
+    std::uint32_t b = 0;
+    std::uint32_t c = 0;
+    TEST_EXPECT_OK(sb.allocate(a));
+    TEST_EXPECT_OK(sb.allocate(b));
+    TEST_EXPECT_OK(sb.allocate(c));
+    TEST_EXPECT_EQ(sb.in_use_count(), 3U);
+
+    std::uint32_t d = 0;
+    TEST_EXPECT_EQ(sb.allocate(d), make_error_code(errc::buffer_overflow));
+    TEST_EXPECT_EQ(sb.in_use_count(), 3U);
+
+    // 释放后应能复用。
+    sb.release(b);
+    std::uint32_t b2 = 0;
+    TEST_EXPECT_OK(sb.allocate(b2));
+    TEST_EXPECT_EQ(b2, b);
+    TEST_EXPECT_EQ(sb.in_use_count(), 3U);
+}
+
 void test_router_set_find_erase_clear() {
     Router r;
     TEST_EXPECT(!r.find(1, 1).has_value());
@@ -482,6 +506,105 @@ void test_hsms_protocol_stop_cancels_pending() {
             proto_client.stop();
             client.stop();
             server.stop();
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(done);
+}
+
+void test_hsms_protocol_disconnect_cancels_pending() {
+    asio::io_context ioc;
+    const std::uint16_t session_id = 0x1013;
+
+    secs::core::Event server_opened{};
+    secs::core::Event client_opened{};
+
+    secs::hsms::Session server(ioc.get_executor(),
+                               secs::hsms::SessionOptions{
+                                   .session_id = session_id,
+                                   .t3 = 200ms,
+                                   .t5 = 10ms,
+                                   .t6 = 50ms,
+                                   .t7 = 50ms,
+                                   .t8 = 0ms,
+                                   .linktest_interval = 0ms,
+                                   .auto_reconnect = false,
+                               });
+
+    secs::hsms::Session client(ioc.get_executor(),
+                               secs::hsms::SessionOptions{
+                                   .session_id = session_id,
+                                   .t3 = 200ms,
+                                   .t5 = 10ms,
+                                   .t6 = 50ms,
+                                   .t7 = 50ms,
+                                   .t8 = 0ms,
+                                   .linktest_interval = 0ms,
+                                   .auto_reconnect = false,
+                               });
+
+    Session proto_client(
+        client, session_id, SessionOptions{.t3 = 200ms, .poll_interval = 1ms});
+
+    auto duplex = make_memory_duplex(ioc.get_executor());
+    Connection server_conn(std::move(duplex.server_stream));
+    Connection client_conn(std::move(duplex.client_stream));
+
+    asio::co_spawn(
+        ioc,
+        [&, server_conn = std::move(server_conn)]() mutable
+        -> asio::awaitable<void> {
+            auto ec = co_await server.async_open_passive(std::move(server_conn));
+            TEST_EXPECT_OK(ec);
+            server_opened.set();
+        },
+        asio::detached);
+
+    asio::co_spawn(
+        ioc,
+        [&, client_conn = std::move(client_conn)]() mutable
+        -> asio::awaitable<void> {
+            auto ec = co_await client.async_open_active(std::move(client_conn));
+            TEST_EXPECT_OK(ec);
+            client_opened.set();
+        },
+        asio::detached);
+
+    std::atomic<bool> done{false};
+
+    // 服务端：收到一条主消息后，发送 Separate.req 触发断线。
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            TEST_EXPECT_OK(co_await server_opened.async_wait(200ms));
+            TEST_EXPECT_OK(co_await client_opened.async_wait(200ms));
+
+            auto [rec, _] = co_await server.async_receive_data(200ms);
+            TEST_EXPECT_OK(rec);
+
+            auto ec = co_await server.async_send(secs::hsms::make_separate_req(
+                session_id, server.allocate_system_bytes()));
+            TEST_EXPECT_OK(ec);
+        },
+        asio::detached);
+
+    // 客户端：发起一个会挂起的请求，要求在断线时被立即取消（不等待 T3）。
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            TEST_EXPECT_OK(co_await server_opened.async_wait(200ms));
+            TEST_EXPECT_OK(co_await client_opened.async_wait(200ms));
+
+            auto [ec, rsp] = co_await proto_client.async_request(
+                1, 1, as_bytes("will-disconnect"), 200ms);
+            (void)rsp;
+            TEST_EXPECT_EQ(ec, make_error_code(errc::cancelled));
+
+            proto_client.stop();
+            client.stop();
+            server.stop();
+            done = true;
         },
         asio::detached);
 
@@ -1017,9 +1140,11 @@ void test_session_invalid_arguments() {
 
 int main() {
     test_system_bytes_unique_release_reuse_and_wrap();
+    test_system_bytes_exhaustion_small_space();
     test_router_set_find_erase_clear();
     test_hsms_protocol_pending_filters();
     test_hsms_protocol_stop_cancels_pending();
+    test_hsms_protocol_disconnect_cancels_pending();
     test_hsms_protocol_run_without_poll_interval();
     test_hsms_protocol_echo_1000();
     test_hsms_protocol_t3_timeout();

@@ -30,21 +30,16 @@ void write_u32_be(core::byte *p, std::uint32_t v) noexcept {
     p[3] = static_cast<core::byte>(v & 0xFFU);
 }
 
-bool is_known_stype(SType s) noexcept {
-    switch (s) {
-    case SType::data:
-    case SType::select_req:
-    case SType::select_rsp:
-    case SType::deselect_req:
-    case SType::deselect_rsp:
-    case SType::linktest_req:
-    case SType::linktest_rsp:
-    case SType::reject_req:
-    case SType::separate_req:
-        return true;
-    default:
-        return false;
-    }
+std::vector<core::byte> encode_header_bytes(const Header &h) {
+    std::vector<core::byte> out;
+    out.resize(kHeaderSize);
+    write_u16_be(out.data() + 0, h.session_id);
+    out[2] = h.header_byte2;
+    out[3] = h.header_byte3;
+    out[4] = h.p_type;
+    out[5] = static_cast<core::byte>(h.s_type);
+    write_u32_be(out.data() + 6, h.system_bytes);
+    return out;
 }
 
 Message make_control_base(SType stype,
@@ -85,8 +80,19 @@ Message make_linktest_req(std::uint16_t session_id,
     return make_control_base(SType::linktest_req, session_id, system_bytes);
 }
 
-Message make_linktest_rsp(std::uint16_t status, std::uint32_t system_bytes) {
-    return make_control_base(SType::linktest_rsp, status, system_bytes);
+Message make_linktest_rsp(std::uint16_t session_id, std::uint32_t system_bytes) {
+    return make_control_base(SType::linktest_rsp, session_id, system_bytes);
+}
+
+Message make_reject_req(std::uint16_t reason_code,
+                        const Header &rejected_header) {
+    // 约定：Reject.req 的 SessionID 字段承载 reason code（与 Select/Deselect.rsp
+    // 同套路）；消息体携带被拒绝消息的 10B header（字节级回显）。
+    auto m = make_control_base(SType::reject_req,
+                               reason_code,
+                               rejected_header.system_bytes);
+    m.body = encode_header_bytes(rejected_header);
+    return m;
 }
 
 Message make_separate_req(std::uint16_t session_id,
@@ -154,9 +160,6 @@ std::error_code decode_payload(core::bytes_view payload,
     h.system_bytes = read_u32_be(p + 6);
 
     if (h.p_type != kPTypeSecs2) {
-        return core::make_error_code(core::errc::invalid_argument);
-    }
-    if (!is_known_stype(h.s_type)) {
         return core::make_error_code(core::errc::invalid_argument);
     }
 

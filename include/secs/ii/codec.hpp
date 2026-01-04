@@ -2,6 +2,8 @@
 
 #include "secs/ii/item.hpp"
 
+#include <cstddef>
+#include <cstdint>
 #include <system_error>
 #include <vector>
 
@@ -15,10 +17,40 @@ enum class errc : int {
     length_overflow = 4,
     length_mismatch = 5,
     buffer_overflow = 6,
+    list_too_large = 7,
+    payload_too_large = 8,
+    total_budget_exceeded = 9,
+    out_of_memory = 10,
 };
 
 const std::error_category &error_category() noexcept;
 std::error_code make_error_code(errc e) noexcept;
+
+/**
+ * @brief 解码资源限制（用于约束不可信输入的资源消耗）。
+ *
+ * 说明：
+ * - 该限制仅作用于 decode_one（解码方向），编码不受影响。
+ * - 默认值为“较宽松但有上界”的设置；上层可按互通对象能力（例如 max nested
+ * level=16）收紧。
+ */
+struct DecodeLimits final {
+    // 允许的最大嵌套深度：depth 从 0 开始，只有 depth > max_depth 才拒绝。
+    std::size_t max_depth{64};
+
+    // List 的 length 语义是“子元素个数”（不是字节数），这里做硬上限防止超大
+    // reserve/循环。
+    std::uint32_t max_list_items{65'535u};
+
+    // 单个 Item 的 payload 最大字节数（例如 Binary/ASCII）。
+    std::uint32_t max_payload_bytes{4u * 1024u * 1024u}; // 4MB
+
+    // 整棵树的最大节点数（含 List 节点与叶子节点）。
+    std::size_t max_total_items{1u * 1024u * 1024u}; // 1,048,576
+
+    // 整棵树的 payload 总字节数上限（仅累计非 List 的 payload bytes）。
+    std::size_t max_total_bytes{64u * 1024u * 1024u}; // 64MB
+};
 
 /**
  * @brief 计算 Item 编码后的字节数（含头部与 payload）。
@@ -54,6 +86,14 @@ std::error_code encode_to(mutable_bytes_view out,
  */
 std::error_code
 decode_one(bytes_view in, Item &out, std::size_t &consumed) noexcept;
+
+/**
+ * @brief 从输入缓冲区解码一个 Item（带资源限制）。
+ */
+std::error_code decode_one(bytes_view in,
+                           Item &out,
+                           std::size_t &consumed,
+                           const DecodeLimits &limits) noexcept;
 
 } // namespace secs::ii
 

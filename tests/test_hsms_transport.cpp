@@ -190,14 +190,16 @@ void test_message_encode_decode_roundtrip() {
         bytes_view{bad.data(), bad.size()}, out, consumed);
     TEST_EXPECT_EQ(ec, make_error_code(errc::invalid_argument));
 
-    // 非法：未知 SType
+    // 未知 SType：允许解析并保留原始值，供上层发送 Reject.req。
     std::vector<byte> unknown(4 + 10, 0);
     unknown[3] = 10;
     unknown[4 + 4] = 0;    // PType（协议类型）
     unknown[4 + 5] = 0xFF; // SType（消息类型）
     ec = secs::hsms::decode_frame(
         bytes_view{unknown.data(), unknown.size()}, out, consumed);
-    TEST_EXPECT_EQ(ec, make_error_code(errc::invalid_argument));
+    TEST_EXPECT_OK(ec);
+    TEST_EXPECT_EQ(consumed, unknown.size());
+    TEST_EXPECT_EQ(static_cast<byte>(out.header.s_type), 0xFF);
 
     // decode_frame：帧长度 < 4B
     std::vector<byte> too_short = {0x00, 0x01, 0x02};
@@ -565,7 +567,7 @@ void test_connection_async_read_message_invalid_frames() {
                 TEST_EXPECT_EQ(rec, make_error_code(errc::buffer_overflow));
             }
 
-            // 4) decode_payload 失败：SType 非法
+            // 4) decode_payload：未知 SType 允许解析（供上层发送 Reject）
             {
                 std::vector<byte> frame(4 + 10, 0);
                 frame[3] = 10;
@@ -575,9 +577,10 @@ void test_connection_async_read_message_invalid_frames() {
                     bytes_view{frame.data(), frame.size()});
                 TEST_EXPECT_OK(ec);
 
-                std::tie(rec, std::ignore) =
-                    co_await client_conn.async_read_message();
-                TEST_EXPECT_EQ(rec, make_error_code(errc::invalid_argument));
+                Message got;
+                std::tie(rec, got) = co_await client_conn.async_read_message();
+                TEST_EXPECT_OK(rec);
+                TEST_EXPECT_EQ(static_cast<byte>(got.header.s_type), 0xFF);
             }
 
             client_conn.cancel_and_close();
@@ -792,7 +795,7 @@ void test_session_select_req_session_id_mismatch_disconnects() {
     TEST_EXPECT(done.load());
 }
 
-void test_session_deselect_req_disconnects_both_sides() {
+void test_session_deselect_req_moves_to_not_selected() {
     asio::io_context ioc;
 
     SessionOptions opt;
@@ -829,10 +832,21 @@ void test_session_deselect_req_disconnects_both_sides() {
             t.expires_after(10ms);
             (void)co_await t.async_wait(asio::as_tuple(asio::use_awaitable));
 
-            TEST_EXPECT_EQ(server.state(),
-                           secs::hsms::SessionState::disconnected);
-            TEST_EXPECT_EQ(client.state(),
-                           secs::hsms::SessionState::disconnected);
+            TEST_EXPECT_EQ(server.state(), secs::hsms::SessionState::connected);
+            TEST_EXPECT_EQ(client.state(), secs::hsms::SessionState::connected);
+            TEST_EXPECT(!server.is_selected());
+            TEST_EXPECT(!client.is_selected());
+
+            // NOT_SELECTED 期间不允许发送 data message
+            Message data = secs::hsms::make_data_message(
+                opt.session_id,
+                1,
+                1,
+                false,
+                client.allocate_system_bytes(),
+                bytes_view{});
+            auto send_ec = co_await client.async_send(data);
+            TEST_EXPECT_EQ(send_ec, make_error_code(errc::invalid_argument));
 
             client.stop();
             server.stop();
@@ -1128,6 +1142,73 @@ void test_session_t6_timeout_on_select() {
     TEST_EXPECT(done.load());
 }
 
+void test_session_select_timeout_late_select_rsp_is_ignored() {
+    asio::io_context ioc;
+
+    SessionOptions opt;
+    opt.session_id = 0x0001;
+    opt.t6 = 20ms;
+    opt.t7 = 200ms;
+    opt.t8 = secs::core::duration{};
+
+    Session client(ioc.get_executor(), opt);
+
+    auto duplex = make_memory_duplex(ioc.get_executor());
+    Connection client_conn(std::move(duplex.client_stream),
+                           ConnectionOptions{.t8 = opt.t8});
+    Connection server_conn(std::move(duplex.server_stream),
+                           ConnectionOptions{.t8 = opt.t8});
+
+    std::atomic<bool> done{false};
+
+    // 服务端：收到 Select.req 后延迟到 T6+δ 再回 Select.rsp(OK)。
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            auto [ec1, m1] = co_await server_conn.async_read_message();
+            TEST_EXPECT_OK(ec1);
+            TEST_EXPECT_EQ(m1.header.s_type, secs::hsms::SType::select_req);
+
+            asio::steady_timer t(ioc);
+            t.expires_after(opt.t6 + 10ms);
+            (void)co_await t.async_wait(asio::as_tuple(asio::use_awaitable));
+
+            ec1 = co_await server_conn.async_write_message(
+                secs::hsms::make_select_rsp(0, m1.header.system_bytes));
+            TEST_EXPECT_OK(ec1);
+            co_return;
+        },
+        asio::detached);
+
+    asio::co_spawn(
+        ioc,
+        [&, client_conn = std::move(client_conn)]() mutable
+        -> asio::awaitable<void> {
+            const auto gen0 = client.selected_generation();
+
+            auto ec = co_await client.async_open_active(std::move(client_conn));
+            TEST_EXPECT_EQ(ec, make_error_code(errc::timeout));
+
+            // 迟到的 Select.rsp 不得把会话推进到 selected，也不得递增 generation。
+            asio::steady_timer t(ioc);
+            t.expires_after(40ms);
+            (void)co_await t.async_wait(asio::as_tuple(asio::use_awaitable));
+
+            TEST_EXPECT_EQ(client.state(), secs::hsms::SessionState::connected);
+            TEST_EXPECT(!client.is_selected());
+            TEST_EXPECT_EQ(client.selected_generation(), gen0);
+
+            client.stop();
+            server_conn.cancel_and_close();
+            done = true;
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(done.load());
+}
+
 void test_session_pending_cancelled_on_disconnect() {
     asio::io_context ioc;
 
@@ -1182,6 +1263,90 @@ void test_session_pending_cancelled_on_disconnect() {
                 1, 1, bytes_view{body.data(), body.size()});
             TEST_EXPECT(rec.value() != 0);
             TEST_EXPECT(rec != make_error_code(errc::timeout));
+
+            client.stop();
+            server_conn.cancel_and_close();
+            done = true;
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(done.load());
+}
+
+void test_session_deselect_drops_inbound_data_when_not_selected() {
+    asio::io_context ioc;
+
+    SessionOptions opt;
+    opt.session_id = 0x0001;
+    opt.t6 = 50ms;
+    opt.t7 = 200ms;
+    opt.t8 = secs::core::duration{};
+
+    Session client(ioc.get_executor(), opt);
+
+    auto duplex = make_memory_duplex(ioc.get_executor());
+    Connection client_conn(std::move(duplex.client_stream),
+                           ConnectionOptions{.t8 = opt.t8});
+    Connection server_conn(std::move(duplex.server_stream),
+                           ConnectionOptions{.t8 = opt.t8});
+
+    std::atomic<bool> done{false};
+
+    // 服务端：完成 Select -> Deselect 往返后，违规发送一条 data message。
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            auto [ec1, m1] = co_await server_conn.async_read_message();
+            TEST_EXPECT_OK(ec1);
+            TEST_EXPECT_EQ(m1.header.s_type, secs::hsms::SType::select_req);
+            ec1 = co_await server_conn.async_write_message(
+                secs::hsms::make_select_rsp(0, m1.header.system_bytes));
+            TEST_EXPECT_OK(ec1);
+
+            auto [ec2, m2] = co_await server_conn.async_read_message();
+            TEST_EXPECT_OK(ec2);
+            TEST_EXPECT_EQ(m2.header.s_type, secs::hsms::SType::deselect_req);
+            ec2 = co_await server_conn.async_write_message(
+                secs::hsms::make_deselect_rsp(0, m2.header.system_bytes));
+            TEST_EXPECT_OK(ec2);
+
+            const std::vector<byte> body = {0xDE, 0xAD};
+            auto data = secs::hsms::make_data_message(
+                opt.session_id,
+                1,
+                1,
+                false,
+                0x11111111,
+                bytes_view{body.data(), body.size()});
+            (void)co_await server_conn.async_write_message(data);
+            co_return;
+        },
+        asio::detached);
+
+    asio::co_spawn(
+        ioc,
+        [&, client_conn = std::move(client_conn)]() mutable
+        -> asio::awaitable<void> {
+            auto ec = co_await client.async_open_active(std::move(client_conn));
+            TEST_EXPECT_OK(ec);
+            TEST_EXPECT(client.is_selected());
+
+            ec = co_await client.async_send(secs::hsms::make_deselect_req(
+                opt.session_id, client.allocate_system_bytes()));
+            TEST_EXPECT_OK(ec);
+
+            asio::steady_timer t(ioc);
+            t.expires_after(20ms);
+            (void)co_await t.async_wait(asio::as_tuple(asio::use_awaitable));
+
+            TEST_EXPECT_EQ(client.state(), secs::hsms::SessionState::connected);
+            TEST_EXPECT(!client.is_selected());
+
+            // NOT_SELECTED 期间收到的 data message 必须被丢弃，不得进入 inbound 队列。
+            auto [rec, _] = co_await client.async_receive_data(20ms);
+            TEST_EXPECT_EQ(rec, make_error_code(errc::timeout));
 
             client.stop();
             server_conn.cancel_and_close();
@@ -1320,6 +1485,101 @@ void test_session_linktest_interval_disconnect_on_failure() {
     TEST_EXPECT(done.load());
 }
 
+void test_session_linktest_interval_disconnects_after_threshold() {
+    asio::io_context ioc;
+
+    SessionOptions opt;
+    opt.session_id = 0x0001;
+    opt.t6 = 20ms;
+    opt.t7 = 200ms;
+    opt.t8 = secs::core::duration{};
+    opt.linktest_interval = 30ms;
+    opt.linktest_max_consecutive_failures = 3;
+
+    Session client(ioc.get_executor(), opt);
+
+    auto duplex = make_memory_duplex(ioc.get_executor());
+    Connection client_conn(std::move(duplex.client_stream),
+                           ConnectionOptions{.t8 = secs::core::duration{}});
+    Connection server_conn(std::move(duplex.server_stream),
+                           ConnectionOptions{.t8 = secs::core::duration{}});
+
+    std::atomic<std::uint32_t> linktests{0};
+    std::atomic<bool> done{false};
+
+    // 服务端：select 成功后丢弃所有 linktest.req（不回复），用于制造超时失败。
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            auto [ec1, m1] = co_await server_conn.async_read_message();
+            TEST_EXPECT_OK(ec1);
+            TEST_EXPECT_EQ(m1.header.s_type, secs::hsms::SType::select_req);
+            ec1 = co_await server_conn.async_write_message(
+                secs::hsms::make_select_rsp(0, m1.header.system_bytes));
+            TEST_EXPECT_OK(ec1);
+
+            while (server_conn.is_open()) {
+                auto [ec2, m2] = co_await server_conn.async_read_message();
+                if (ec2) {
+                    break;
+                }
+                if (m2.header.s_type == secs::hsms::SType::linktest_req) {
+                    ++linktests;
+                }
+            }
+            co_return;
+        },
+        asio::detached);
+
+    asio::co_spawn(
+        ioc,
+        [&, client_conn = std::move(client_conn)]() mutable
+        -> asio::awaitable<void> {
+            auto ec = co_await client.async_open_active(std::move(client_conn));
+            TEST_EXPECT_OK(ec);
+
+            // 等到第 2 次 linktest.req 发出，并确保第 2 次超时已发生。
+            while (linktests.load() < 2U) {
+                asio::steady_timer spin(ioc);
+                spin.expires_after(1ms);
+                (void)co_await spin.async_wait(
+                    asio::as_tuple(asio::use_awaitable));
+            }
+            {
+                asio::steady_timer t(ioc);
+                t.expires_after(opt.t6 + 10ms);
+                (void)co_await t.async_wait(
+                    asio::as_tuple(asio::use_awaitable));
+            }
+            TEST_EXPECT_EQ(client.state(), secs::hsms::SessionState::selected);
+
+            // 第 3 次失败后才断线。
+            while (linktests.load() < 3U) {
+                asio::steady_timer spin(ioc);
+                spin.expires_after(1ms);
+                (void)co_await spin.async_wait(
+                    asio::as_tuple(asio::use_awaitable));
+            }
+            {
+                asio::steady_timer t(ioc);
+                t.expires_after(opt.t6 + 50ms);
+                (void)co_await t.async_wait(
+                    asio::as_tuple(asio::use_awaitable));
+            }
+            TEST_EXPECT_EQ(client.state(),
+                           secs::hsms::SessionState::disconnected);
+
+            client.stop();
+            server_conn.cancel_and_close();
+            done = true;
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(done.load());
+}
+
 void test_async_wait_selected_timeout() {
     asio::io_context ioc;
 
@@ -1334,6 +1594,94 @@ void test_async_wait_selected_timeout() {
         [&]() -> asio::awaitable<void> {
             auto ec = co_await client.async_wait_selected(1, 5ms);
             TEST_EXPECT_EQ(ec, make_error_code(errc::timeout));
+            done = true;
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(done.load());
+}
+
+void test_session_separate_clears_inbound_and_cancels_pending() {
+    asio::io_context ioc;
+
+    SessionOptions opt;
+    opt.session_id = 0x0001;
+    opt.t3 = 200ms;
+    opt.t6 = 50ms;
+    opt.t7 = 200ms;
+    opt.t8 = secs::core::duration{};
+
+    Session client(ioc.get_executor(), opt);
+
+    auto duplex = make_memory_duplex(ioc.get_executor());
+    Connection client_conn(std::move(duplex.client_stream),
+                           ConnectionOptions{.t8 = secs::core::duration{}});
+    Connection server_conn(std::move(duplex.server_stream),
+                           ConnectionOptions{.t8 = secs::core::duration{}});
+
+    std::atomic<bool> done{false};
+
+    // 服务端：
+    // 1) select 成功
+    // 2) 发送一条未消费的入站 data
+    // 3) 读到 client 的挂起请求后，发送 Separate.req 并关闭连接
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            auto [ec1, m1] = co_await server_conn.async_read_message();
+            TEST_EXPECT_OK(ec1);
+            TEST_EXPECT_EQ(m1.header.s_type, secs::hsms::SType::select_req);
+            ec1 = co_await server_conn.async_write_message(
+                secs::hsms::make_select_rsp(0, m1.header.system_bytes));
+            TEST_EXPECT_OK(ec1);
+
+            const std::vector<byte> body = {0xAA, 0xBB};
+            auto inbound = secs::hsms::make_data_message(
+                opt.session_id,
+                1,
+                2,
+                false,
+                0x11111111,
+                bytes_view{body.data(), body.size()});
+            (void)co_await server_conn.async_write_message(inbound);
+
+            auto [ec2, m2] = co_await server_conn.async_read_message();
+            TEST_EXPECT_OK(ec2);
+            TEST_EXPECT_EQ(m2.header.s_type, secs::hsms::SType::data);
+            TEST_EXPECT(m2.w_bit());
+
+            (void)co_await server_conn.async_write_message(
+                secs::hsms::make_separate_req(opt.session_id, 0xABCDEF01));
+            (void)co_await server_conn.async_close();
+            co_return;
+        },
+        asio::detached);
+
+    asio::co_spawn(
+        ioc,
+        [&, client_conn = std::move(client_conn)]() mutable
+        -> asio::awaitable<void> {
+            auto ec = co_await client.async_open_active(std::move(client_conn));
+            TEST_EXPECT_OK(ec);
+
+            const std::vector<byte> req_body = {0x01};
+            auto [rec, _] = co_await client.async_request_data(
+                1, 1, bytes_view{req_body.data(), req_body.size()});
+            TEST_EXPECT(rec.value() != 0);
+            TEST_EXPECT(rec != make_error_code(errc::timeout));
+
+            TEST_EXPECT_OK(co_await client.async_wait_reader_stopped(200ms));
+            TEST_EXPECT_EQ(client.state(),
+                           secs::hsms::SessionState::disconnected);
+
+            // Separate 后必须清空 inbound_data_，否则这里会读到旧数据。
+            auto [rec2, _2] = co_await client.async_receive_data(20ms);
+            TEST_EXPECT_EQ(rec2, make_error_code(errc::timeout));
+
+            client.stop();
+            server_conn.cancel_and_close();
             done = true;
             co_return;
         },
@@ -1593,16 +1941,20 @@ int main() {
     test_session_select_and_linktest();
     test_session_select_req_when_already_selected();
     test_session_select_req_session_id_mismatch_disconnects();
-    test_session_deselect_req_disconnects_both_sides();
+    test_session_deselect_req_moves_to_not_selected();
     test_session_select_reject();
     test_session_open_passive_socket_overload_executes();
     test_session_control_response_type_mismatch_times_out();
     test_session_t6_timeout_on_select();
+    test_session_select_timeout_late_select_rsp_is_ignored();
     test_session_pending_cancelled_on_disconnect();
+    test_session_deselect_drops_inbound_data_when_not_selected();
     test_session_t3_reply_timeout();
     test_session_linktest_interval_disconnect_on_failure();
+    test_session_linktest_interval_disconnects_after_threshold();
     test_async_wait_selected_timeout();
     test_async_wait_selected_success();
+    test_session_separate_clears_inbound_and_cancels_pending();
     test_session_reopen_after_separate();
     test_session_concurrent_sends_system_bytes_unique();
     test_run_active_exits_when_auto_reconnect_disabled();
