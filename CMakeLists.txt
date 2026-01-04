@@ -209,13 +209,19 @@ if(SECS_ENABLE_INSTALL)
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
   )
 
-  # 安装 vendored Asio（保证 find_package(secs) 的消费者无需额外准备 Asio）。
-  install(FILES third_party/asio/asio/asio/include/asio.hpp
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-  )
-  install(DIRECTORY third_party/asio/asio/asio/include/asio
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-  )
+  # 安装 Asio（仅当由本仓库提供：vendored/fetch）。如果用户通过 SECS_ASIO_ROOT 使用外部 Asio，
+  # 则不复制其系统头文件，避免把外部环境“打包进” install 前缀。
+  if(DEFINED SECS_ASIO_PROVIDER AND (SECS_ASIO_PROVIDER STREQUAL "vendored" OR SECS_ASIO_PROVIDER STREQUAL "fetch"))
+    if(NOT DEFINED SECS_ASIO_INCLUDE_DIR OR "${SECS_ASIO_INCLUDE_DIR}" STREQUAL "")
+      message(FATAL_ERROR "SECS_ASIO_INCLUDE_DIR is not set; Asio target should have been initialized before install().")
+    endif()
+    install(FILES "${SECS_ASIO_INCLUDE_DIR}/asio.hpp"
+      DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    )
+    install(DIRECTORY "${SECS_ASIO_INCLUDE_DIR}/asio"
+      DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    )
+  endif()
 
   install(TARGETS
       secs_asio

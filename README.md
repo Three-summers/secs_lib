@@ -3,7 +3,7 @@
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![CMake](https://img.shields.io/badge/CMake-3.20+-green.svg)](https://cmake.org/)
 
-> 文档更新：2026-01-03（Codex）
+> 文档更新：2026-01-04（Codex）
 
 基于 C++20 与 standalone Asio 协程的 SECS-I / SECS-II / HSMS (HSMS-SS) 协议栈实现，面向半导体设备通信场景。
 
@@ -19,6 +19,26 @@
 
 本节只记录“会影响互通/集成/测试统计口径”的差异点，不贴源码（你可按路径自行阅读）。
 
+- HSMS：未知 `SType` 不再作为解码错误；允许解析并保留原始值，供上层发送 `Reject.req`
+  - 新增：`make_reject_req()`（Reject.req：SessionID 字段承载 reason code；body 为被拒绝消息的 10B header）
+  - 文件：`include/secs/hsms/message.hpp`、`src/hsms/message.cpp`
+  - 覆盖测试：`tests/test_hsms_transport.cpp`（搜索 `unknown SType` / `reject`）
+- HSMS：控制消息优先级与 NOT_SELECTED 写门禁
+  - 变化：写队列拆分 control/data，控制消息优先写出；NOT_SELECTED 期间可禁用 data 写入并快速失败排队中的 data（避免控制流期间 data 抢写）
+  - 文件：`include/secs/hsms/connection.hpp`、`src/hsms/connection.cpp`
+  - 覆盖测试：`tests/test_hsms_transport.cpp`（搜索 `disable_data_writes` / `NOT_SELECTED`）
+- HSMS：`Deselect.req` 行为调整：不再断线，改为进入 NOT_SELECTED；NOT_SELECTED 期间禁止发送 data message
+  - 文件：`include/secs/hsms/session.hpp`、`src/hsms/session.cpp`
+  - 覆盖测试：`tests/test_hsms_transport.cpp`（搜索 `deselect`）
+- HSMS：LINKTEST 连续失败阈值可配置
+  - 新增字段：`SessionOptions::linktest_max_consecutive_failures`（默认 1：一次失败即断线，保持旧行为）
+  - 文件：`include/secs/hsms/session.hpp`、`src/hsms/session.cpp`
+- SECS-II：解码资源限制升级为可配置 `DecodeLimits`（替代固定深度上限），并补充资源错误码
+  - 新增：`decode_one(..., const DecodeLimits&)`；错误码 `list_too_large` / `payload_too_large` / `total_budget_exceeded` / `out_of_memory`
+  - 文件：`include/secs/ii/codec.hpp`、`src/ii/codec.cpp`
+  - 覆盖测试：`tests/test_secs2_codec.cpp`
+- 新增：审计与修复路线文档（便于追踪互通问题与覆盖缺口）
+  - 目录：`docs/secs_lib_audit/`、`docs/secs_lib_fixes/`
 - SECS-II（E5）on-wire 编码对齐 `c_dump/Secs_App/secs_II.c`
   - 影响点：`FormatByte` 低 2 位含义、`format_code` 码表（整数/浮点/无符号）
   - 文件：`include/secs/ii/types.hpp`、`src/ii/codec.cpp`
@@ -128,7 +148,29 @@ secs_lib/
 
 - C++20 编译器：GCC ≥11 / Clang ≥14 / MSVC ≥19.30
 - CMake ≥3.20
-- standalone Asio：默认使用 `third_party/asio/`；也支持 `-DSECS_ASIO_ROOT=/path/to/asio/include`
+- standalone Asio：
+  - 优先使用 `third_party/asio/`（如果你拉了 submodule / 放了 vendored 代码）
+  - 也支持 `-DSECS_ASIO_ROOT=/path/to/asio/include` 指定外部 Asio
+  - 若以上都不存在：
+    - 顶层构建默认会自动下载（`SECS_FETCH_ASIO` 默认为 ON）
+    - 作为子项目被 `add_subdirectory()` 引入时默认不自动下载（`SECS_FETCH_ASIO` 默认为 OFF）
+
+### Asio 获取策略与常见报错
+
+本仓库只使用 standalone Asio（头文件库），解析优先级如下：
+
+1. vendored：`third_party/asio/asio/asio/include/`
+2. 外部指定：`-DSECS_ASIO_ROOT=/path/to/asio/include`
+3. 自动拉取：`-DSECS_FETCH_ASIO=ON`（需要网络；使用 CMake `FetchContent`）
+
+如果你遇到配置错误：`Standalone Asio not found`，按你的环境选择其一即可：
+
+- 有网络：`cmake -S . -B build -DSECS_FETCH_ASIO=ON`
+- 无网络/内网：准备好 Asio include 目录后 `-DSECS_ASIO_ROOT=...`
+- 想 vendoring：把 asio 仓库（或其 include 目录）放到 `third_party/asio/` 的典型结构下
+
+补充：
+- 子项目场景如果也想自动下载，可在主工程里设置：`set(SECS_FETCH_ASIO ON CACHE BOOL "" FORCE)` 再 `add_subdirectory(secs_lib)`
 
 ### 构建本仓库（开发/跑测试）
 
@@ -167,6 +209,12 @@ set_target_properties(my_c_app PROPERTIES LINKER_LANGUAGE CXX)
 cmake -S . -B build -DSECS_ASIO_ROOT=/path/to/asio/include
 ```
 
+如果你在“子项目集成”场景下没有 vendored Asio，也不想额外安装 Asio，可以让主工程开启自动拉取：
+
+```bash
+cmake -S . -B build -DSECS_FETCH_ASIO=ON
+```
+
 ### 安装并通过 find_package 集成（可选）
 
 本仓库提供了 `install()` 与 CMake 包配置文件（`find_package(secs CONFIG)`），适合：
@@ -193,7 +241,8 @@ target_link_libraries(my_app PRIVATE secs::protocol)
 
 说明：
 
-- 安装包会把 `include/secs/` 以及 vendored `third_party/asio` 的头文件一起安装到 `${CMAKE_INSTALL_PREFIX}/include`，因此消费者不需要额外准备 Asio。
+- 如果 Asio 来自 vendored/FetchContent，安装包会把 `include/secs/` 以及 Asio 的头文件一起安装到 `${CMAKE_INSTALL_PREFIX}/include`，因此消费者不需要额外准备 Asio。
+- 如果你通过 `SECS_ASIO_ROOT` 使用外部 Asio，`install()` 不会把外部 Asio 头文件复制进安装前缀；消费者需要自行提供 Asio。
 
 ### 常用 CMake 选项
 
@@ -291,6 +340,7 @@ cmake -S . -B build -DSECS_ENABLE_COVERAGE=ON
 - `encode(item, out)`：编码并追加到 `out`
 - `encode_to(out_span, item, written)`：编码到固定缓冲区（用于零拷贝/流式写）
 - `decode_one(in_span, out_item, consumed)`：从输入中解析一个 Item（流式，返回消耗字节数）
+- `decode_one(in_span, out_item, consumed, limits)`：带资源限制的解码（用于不可信输入）
 
 #### 最小可运行示例（不贴源码，只给阅读入口）
 
@@ -315,6 +365,11 @@ cmake -S . -B build -DSECS_ENABLE_COVERAGE=ON
   - `async_send(Message)`：发送任意 HSMS 消息（含控制/数据）
   - `async_receive_data(timeout)`：只等待下一条 data message（控制消息内部处理/应答）
   - `async_request_data(stream, function, body)`：发送 data primary（W=1）并等待同 SystemBytes 的回应（T3）
+
+备注（近期行为调整）：
+
+- 未知 `SType` 不再作为解码错误：允许解析并保留原始值，供上层发送 `Reject.req`
+- `Deselect.req` 不再断线：会话进入 NOT_SELECTED；NOT_SELECTED 期间禁止发送 data message（会返回参数错误）
 
 #### 最小阅读路径：Active 侧发送一次 request（不贴源码）
 
@@ -534,7 +589,7 @@ cmake --build build --target coverage
 +============================================================================+
 |导航：如何在 1000+ 行里定位你想看的部分                                                     |
 +============================================================================+
-```text
+```
 建议用编辑器/浏览器的搜索（Ctrl+F）：
   - 搜 “### 7) [secs::core]”    -> 基础设施
   - 搜 “### 8) [secs::ii]”      -> SECS-II Item/编解码
@@ -551,7 +606,7 @@ cmake --build build --target coverage
 ```
 
 ### 0) 图例（读图约定）
-```text
+```
 符号约定：
   [模块]            ：一个命名空间 + CMake target 边界（架构层级）
   (类型/函数)        ：关键类型或关键 API 名称（不贴实现体）
@@ -570,7 +625,7 @@ cmake --build build --target coverage
 ```
 
 ### 1) 总览：分层、职责、边界（超级详细版）
-```text
+```
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │                                 你的业务代码                                  │
 │  - 你决定角色：Host / Equipment / Simulator                                  │
@@ -635,7 +690,7 @@ cmake --build build --target coverage
 ```
 
 ### 2) 目标依赖（链接边界=架构边界）
-```text
+```
 CMake target 与依赖（从 CMakeLists.txt 提炼）：
 
   [secs::core]      = secs_core
@@ -650,7 +705,7 @@ CMake target 与依赖（从 CMakeLists.txt 提炼）：
 ```
 
 ### 3) 推荐阅读顺序（从“最外层可用 API”走到“最底层字节细节”）
-```text
+```
 1) 先看统一协议层（你写业务最常用）：
    - include/secs/protocol/session.hpp
    - include/secs/protocol/router.hpp
@@ -678,7 +733,7 @@ CMake target 与依赖（从 CMakeLists.txt 提炼）：
 ```
 
 ### 4) 错误码体系（你看到的 error_code 都从哪里来？）
-```text
+```
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ core::errc（跨模块通用）                                                       │
 │  文件：include/secs/core/error.hpp + src/core/error.cpp                         │
@@ -713,7 +768,7 @@ CMake target 与依赖（从 CMakeLists.txt 提炼）：
 ```
 
 ### 5) 超时/定时器一览（T1~T8 分别在哪里生效）
-```text
+```
 本仓库的 “T*” 不是一个统一枚举，而是分别存在于不同层：
 
 SECS-I（E4）：include/secs/secs1/timer.hpp（Timeouts）
@@ -738,7 +793,7 @@ HSMS（E37）：include/secs/hsms/session.hpp（SessionOptions）
 ```
 
 ### 6) 协议语义总整理：primary/secondary、W-bit、SystemBytes（sb）
-```text
+```
 SECS 的“应用层语义”在本仓库里被抽象成 protocol::DataMessage：
   - stream/function : SxFy
   - w_bit           : 等待位（primary 是否要求 secondary）
@@ -770,7 +825,7 @@ HSMS vs SECS-I 在 sb 的差异：
 ```
 
 ### 7) [secs::core] 基础设施（你在所有模块里都会间接用到）
-```text
+```
 目标：把“字节/缓冲区/等待/错误码”这些横切关注点抽干净。
 
 [1] bytes/span 视角：
@@ -799,7 +854,7 @@ HSMS vs SECS-I 在 sb 的差异：
 ```
 
 ### 8) [secs::ii] SECS-II（E5）数据模型与编解码
-```text
+```
 目标：提供一个“强类型 Item AST”与“流式编解码”。
 
 [A] Item 模型（强类型 + 嵌套 List）：
@@ -828,7 +883,7 @@ HSMS vs SECS-I 在 sb 的差异：
 ```
 
 ### 9) [secs::secs1] SECS-I（E4）半双工传输：Block + 状态机
-```text
+```
 模块目标：把 SECS-I 的“握手/分包/重组/校验/超时/重试”做成可复用状态机。
 
 [A] Block（字节级编解码）：
@@ -868,7 +923,7 @@ HSMS vs SECS-I 在 sb 的差异：
 ```
 
 ### 10) [secs::hsms] HSMS-SS（E37）全双工会话：framing + 选择状态机
-```text
+```
 模块目标：
   - Connection：只负责“字节流 <-> HSMS 帧”的 framing
   - Session：负责“连接管理 + SELECT/DESELECT/LINKTEST/SEPARATE 控制流 + 定时器”
@@ -912,7 +967,7 @@ HSMS vs SECS-I 在 sb 的差异：
 ```
 
 ### 11) [secs::protocol] 统一协议层：把 HSMS/SECS-I 变成同一种 DataMessage
-```text
+```
 模块目标：让上层“写一次业务逻辑”，可切换 HSMS/SECS-I backend。
 
 [A] DataMessage + Router：
@@ -948,7 +1003,7 @@ HSMS vs SECS-I 在 sb 的差异：
 ```
 
 ### 12) [secs::sml]（可选）SML：用文本描述消息/规则/定时
-```text
+```
 模块目标：提供一个轻量的 SML 子集，用来：
   - 描述消息模板：name: SxFy [W] <Item>.
   - 描述条件响应：if (cond) response.
@@ -983,7 +1038,7 @@ HSMS vs SECS-I 在 sb 的差异：
 ```
 
 ### 13) 测试与恶意用例（为什么这些测试能证明实现“稳”）
-```text
+```
 tests/ 目录是“架构的可执行规格”，建议把它当成文档读：
 
 核心测试文件与覆盖范围：
@@ -1005,188 +1060,108 @@ tests/ 目录是“架构的可执行规格”，建议把它当成文档读：
 
 ### 14) 文件索引（你说“给我位置我自己看”，这里是按模块汇总）
 
-+============================================================================+
-|文件索引：include/secs/core/*.hpp                                                |
-|共 4 个文件                                                                     |
-+============================================================================+
-```text
-include/secs/core/buffer.hpp
-include/secs/core/common.hpp
-include/secs/core/error.hpp
-include/secs/core/event.hpp
-```
+#### 文件索引：include/secs/core/*.hpp（共 4 个文件）
+- `include/secs/core/buffer.hpp`
+- `include/secs/core/common.hpp`
+- `include/secs/core/error.hpp`
+- `include/secs/core/event.hpp`
 
-+============================================================================+
-|文件索引：include/secs/ii/*.hpp                                                  |
-|共 3 个文件                                                                     |
-+============================================================================+
-```text
-include/secs/ii/codec.hpp
-include/secs/ii/item.hpp
-include/secs/ii/types.hpp
-```
+#### 文件索引：include/secs/ii/*.hpp（共 3 个文件）
+- `include/secs/ii/codec.hpp`
+- `include/secs/ii/item.hpp`
+- `include/secs/ii/types.hpp`
 
-+============================================================================+
-|文件索引：include/secs/secs1/*.hpp                                               |
-|共 4 个文件                                                                     |
-+============================================================================+
-```text
-include/secs/secs1/block.hpp
-include/secs/secs1/link.hpp
-include/secs/secs1/state_machine.hpp
-include/secs/secs1/timer.hpp
-```
+#### 文件索引：include/secs/secs1/*.hpp（共 4 个文件）
+- `include/secs/secs1/block.hpp`
+- `include/secs/secs1/link.hpp`
+- `include/secs/secs1/state_machine.hpp`
+- `include/secs/secs1/timer.hpp`
 
-+============================================================================+
-|文件索引：include/secs/hsms/*.hpp                                                |
-|共 4 个文件                                                                     |
-+============================================================================+
-```text
-include/secs/hsms/connection.hpp
-include/secs/hsms/message.hpp
-include/secs/hsms/session.hpp
-include/secs/hsms/timer.hpp
-```
+#### 文件索引：include/secs/hsms/*.hpp（共 4 个文件）
+- `include/secs/hsms/connection.hpp`
+- `include/secs/hsms/message.hpp`
+- `include/secs/hsms/session.hpp`
+- `include/secs/hsms/timer.hpp`
 
-+============================================================================+
-|文件索引：include/secs/protocol/*.hpp                                            |
-|共 4 个文件                                                                     |
-+============================================================================+
-```text
-include/secs/protocol/router.hpp
-include/secs/protocol/session.hpp
-include/secs/protocol/system_bytes.hpp
-include/secs/protocol/typed_handler.hpp
-```
+#### 文件索引：include/secs/protocol/*.hpp（共 4 个文件）
+- `include/secs/protocol/router.hpp`
+- `include/secs/protocol/session.hpp`
+- `include/secs/protocol/system_bytes.hpp`
+- `include/secs/protocol/typed_handler.hpp`
 
-+============================================================================+
-|文件索引：include/secs/sml/*.hpp                                                 |
-|共 5 个文件                                                                     |
-+============================================================================+
-```text
-include/secs/sml/ast.hpp
-include/secs/sml/lexer.hpp
-include/secs/sml/parser.hpp
-include/secs/sml/runtime.hpp
-include/secs/sml/token.hpp
-```
+#### 文件索引：include/secs/sml/*.hpp（共 5 个文件）
+- `include/secs/sml/ast.hpp`
+- `include/secs/sml/lexer.hpp`
+- `include/secs/sml/parser.hpp`
+- `include/secs/sml/runtime.hpp`
+- `include/secs/sml/token.hpp`
 
-+============================================================================+
-|文件索引：src/core/*.cpp                                                         |
-|共 3 个文件                                                                     |
-+============================================================================+
-```text
-src/core/buffer.cpp
-src/core/error.cpp
-src/core/event.cpp
-```
+#### 文件索引：src/core/*.cpp（共 3 个文件）
+- `src/core/buffer.cpp`
+- `src/core/error.cpp`
+- `src/core/event.cpp`
 
-+============================================================================+
-|文件索引：src/ii/*.cpp                                                           |
-|共 2 个文件                                                                     |
-+============================================================================+
-```text
-src/ii/codec.cpp
-src/ii/item.cpp
-```
+#### 文件索引：src/ii/*.cpp（共 2 个文件）
+- `src/ii/codec.cpp`
+- `src/ii/item.cpp`
 
-+============================================================================+
-|文件索引：src/secs1/*.cpp                                                        |
-|共 4 个文件                                                                     |
-+============================================================================+
-```text
-src/secs1/block.cpp
-src/secs1/link.cpp
-src/secs1/state_machine.cpp
-src/secs1/timer.cpp
-```
+#### 文件索引：src/secs1/*.cpp（共 4 个文件）
+- `src/secs1/block.cpp`
+- `src/secs1/link.cpp`
+- `src/secs1/state_machine.cpp`
+- `src/secs1/timer.cpp`
 
-+============================================================================+
-|文件索引：src/hsms/*.cpp                                                         |
-|共 4 个文件                                                                     |
-+============================================================================+
-```text
-src/hsms/connection.cpp
-src/hsms/message.cpp
-src/hsms/session.cpp
-src/hsms/timer.cpp
-```
+#### 文件索引：src/hsms/*.cpp（共 4 个文件）
+- `src/hsms/connection.cpp`
+- `src/hsms/message.cpp`
+- `src/hsms/session.cpp`
+- `src/hsms/timer.cpp`
 
-+============================================================================+
-|文件索引：src/protocol/*.cpp                                                     |
-|共 3 个文件                                                                     |
-+============================================================================+
-```text
-src/protocol/router.cpp
-src/protocol/session.cpp
-src/protocol/system_bytes.cpp
-```
+#### 文件索引：src/protocol/*.cpp（共 3 个文件）
+- `src/protocol/router.cpp`
+- `src/protocol/session.cpp`
+- `src/protocol/system_bytes.cpp`
 
-+============================================================================+
-|文件索引：src/sml/*.cpp                                                          |
-|共 3 个文件                                                                     |
-+============================================================================+
-```text
-src/sml/lexer.cpp
-src/sml/parser.cpp
-src/sml/runtime.cpp
-```
+#### 文件索引：src/sml/*.cpp（共 3 个文件）
+- `src/sml/lexer.cpp`
+- `src/sml/parser.cpp`
+- `src/sml/runtime.cpp`
 
-+============================================================================+
-|文件索引：tests/*                                                                |
-|共 11 个文件                                                                    |
-+============================================================================+
-```text
-tests/CMakeLists.txt
-tests/test_core_buffer.cpp
-tests/test_core_error.cpp
-tests/test_core_event.cpp
-tests/test_hsms_transport.cpp
-tests/test_main.hpp
-tests/test_protocol_session.cpp
-tests/test_secs1_framing.cpp
-tests/test_secs2_codec.cpp
-tests/test_sml_parser.cpp
-tests/test_typed_handler.cpp
-```
+#### 文件索引：tests/*（共 11 个文件）
+- `tests/CMakeLists.txt`
+- `tests/test_core_buffer.cpp`
+- `tests/test_core_error.cpp`
+- `tests/test_core_event.cpp`
+- `tests/test_hsms_transport.cpp`
+- `tests/test_main.hpp`
+- `tests/test_protocol_session.cpp`
+- `tests/test_secs1_framing.cpp`
+- `tests/test_secs2_codec.cpp`
+- `tests/test_sml_parser.cpp`
+- `tests/test_typed_handler.cpp`
 
-+============================================================================+
-|文件索引：examples/*                                                             |
-|共 7 个文件                                                                     |
-+============================================================================+
-```text
-examples/CMakeLists.txt
-examples/README.md
-examples/hsms_client.cpp
-examples/hsms_server.cpp
-examples/secs2_simple.cpp
-examples/typed_handler_example.cpp
-examples/vendor_messages.hpp
-```
+#### 文件索引：examples/*（共 7 个文件）
+- `examples/CMakeLists.txt`
+- `examples/README.md`
+- `examples/hsms_client.cpp`
+- `examples/hsms_server.cpp`
+- `examples/secs2_simple.cpp`
+- `examples/typed_handler_example.cpp`
+- `examples/vendor_messages.hpp`
 
-+============================================================================+
-|文件索引：benchmarks/*                                                           |
-|共 5 个文件                                                                     |
-+============================================================================+
-```text
-benchmarks/CMakeLists.txt
-benchmarks/bench_core_buffer.cpp
-benchmarks/bench_hsms_message.cpp
-benchmarks/bench_main.hpp
-benchmarks/bench_secs2_codec.cpp
-```
+#### 文件索引：benchmarks/*（共 5 个文件）
+- `benchmarks/CMakeLists.txt`
+- `benchmarks/bench_core_buffer.cpp`
+- `benchmarks/bench_hsms_message.cpp`
+- `benchmarks/bench_main.hpp`
+- `benchmarks/bench_secs2_codec.cpp`
 
-+============================================================================+
-|文件索引：cmake/*                                                                |
-|共 2 个文件                                                                     |
-+============================================================================+
-```text
-cmake/AsioStandalone.cmake
-cmake/Modules/CodeCoverage.cmake
-```
+#### 文件索引：cmake/*（共 2 个文件）
+- `cmake/AsioStandalone.cmake`
+- `cmake/Modules/CodeCoverage.cmake`
 
 ### 15) 速查：从“我调用了这个 API”到“实现在哪”
-```text
+```
 [1] 我想“发一个不等待回应的主消息”（W=0）
   - 入口：protocol::Session::async_send
   - 文件：include/secs/protocol/session.hpp
@@ -1238,9 +1213,9 @@ cmake/Modules/CodeCoverage.cmake
 - include/secs/hsms/connection.hpp + src/hsms/connection.cpp（framing/T8/并发写串行化）
 - include/secs/hsms/timer.hpp + src/hsms/timer.cpp（定时器到 std::error_code 的映射）
 
-```text
-[16.1] 三态状态机（实现里的真实状态：disconnected / connected / selected）
+#### 16.1 三态状态机（实现里的真实状态：disconnected / connected / selected）
 
+```
                  async_open_active/passive 成功（连上 TCP + 进入 connected）
 ┌──────────────────────────────┐
 │  SessionState::disconnected   │
@@ -1274,9 +1249,9 @@ cmake/Modules/CodeCoverage.cmake
   - 断线时：会清空 inbound_data_ 与 pending_，避免旧连接遗留状态污染新连接
 ```
 
-```text
-[16.2] 主动端 async_open_active() 的关键时序（为什么必须“先起 reader_loop_ 再做 SELECT”）
+#### 16.2 主动端 async_open_active() 的关键时序（为什么必须“先起 reader_loop_ 再做 SELECT”）
 
+```
 入口函数：include/secs/hsms/session.hpp::async_open_active
 实现位置：src/hsms/session.cpp::async_open_active
 
@@ -1304,13 +1279,13 @@ async_open_active(endpoint)
         |       - 若 T6 超时：connection_.async_close() + on_disconnected(timeout)
         |
         +-- 收到 SELECT.rsp：
-              - rsp.header.session_id == 0  => set_selected_()
-              - 否则 => close + on_disconnected(invalid_argument)
+	      - rsp.header.session_id == 0  => set_selected_()
+	      - 否则 => close + on_disconnected(invalid_argument)
 ```
 
-```text
-[16.3] 被动端 async_open_passive() 的关键时序（核心：等待 reader_loop_ 把状态推进到 selected）
+#### 16.3 被动端 async_open_passive() 的关键时序（核心：等待 reader_loop_ 把状态推进到 selected）
 
+```
 入口函数：include/secs/hsms/session.hpp::async_open_passive
 实现位置：src/hsms/session.cpp::async_open_passive
 
@@ -1328,9 +1303,9 @@ async_open_passive(socket/Connection&& new_conn)
   - 被动端并不主动发 SELECT.req；它靠 reader_loop_ 收到对端 SELECT.req 后 set_selected_()
 ```
 
-```text
-[16.4] reader_loop_ 的控制消息分发（只列实现中确实处理的 SType）
+#### 16.4 reader_loop_ 的控制消息分发（只列实现中确实处理的 SType）
 
+```
 实现位置：src/hsms/session.cpp::reader_loop_
 消息类型：include/secs/hsms/message.hpp::SType
 
@@ -1366,13 +1341,13 @@ async_open_passive(socket/Connection&& new_conn)
      - separate_req：
          * close + on_disconnected(cancelled) 并退出
 
-     - 其它控制类型：
-         * 忽略（实现里留了扩展位，例如 Reject）
+	     - 其它控制类型：
+	         * 忽略（实现里留了扩展位，例如 Reject）
 ```
 
-```text
-[16.5] 事务模型：Pending + fulfill_pending_（控制事务与数据事务复用同一套路）
+#### 16.5 事务模型：Pending + fulfill_pending_（控制事务与数据事务复用同一套路）
 
+```
 Pending 结构（去看：include/secs/hsms/session.hpp::Pending）：
   - expected_stype   : 期望的响应类型（select_rsp/linktest_rsp/data/...）
   - ready(Event)     : 等待点（set=完成，cancel=断线/stop）
@@ -1397,9 +1372,9 @@ Pending 结构（去看：include/secs/hsms/session.hpp::Pending）：
 理由：避免会话进入“我以为还连着/对端以为已经断开”的半状态，强制收敛到 disconnected。
 ```
 
-```text
-[16.6] linktest_loop_（周期心跳）与 selected_generation_（防止“重连后旧协程继续跑”）
+#### 16.6 linktest_loop_（周期心跳）与 selected_generation_（防止“重连后旧协程继续跑”）
 
+```
 触发点：src/hsms/session.cpp::set_selected_
   - state_ 从 connected -> selected 时：
       selected_generation_++（得到 gen）
@@ -1423,9 +1398,9 @@ Pending 结构（去看：include/secs/hsms/session.hpp::Pending）：
 - include/secs/hsms/connection.hpp（Stream 抽象、ConnectionOptions::t8）
 - src/hsms/connection.cpp（async_read_message/async_write_message/async_read_some_with_t8）
 
-```text
-[17.1] TCP framing（实现的真实格式）
+#### 17.1 TCP framing（实现的真实格式）
 
+```
 wire bytes:
   ┌───────────────┬───────────────────────────────┬───────────────────────────┐
   │ Length (4B)   │ HSMS Header (10B)             │ Body (N bytes)            │
@@ -1444,9 +1419,9 @@ Length 的语义（去看：include/secs/hsms/message.hpp）：
   - decode_payload(payload) 得到 Message
 ```
 
-```text
-[17.2] T8（网络字符间隔超时）的实现：并行等待读与定时器，谁先到用谁
+#### 17.2 T8（网络字符间隔超时）的实现：并行等待读与定时器，谁先到用谁
 
+```
 配置入口：include/secs/hsms/connection.hpp::ConnectionOptions::t8
 核心实现：src/hsms/connection.cpp::async_read_some_with_t8
 
@@ -1464,9 +1439,9 @@ Length 的语义（去看：include/secs/hsms/message.hpp）：
   - 如果不 cancel，底层 read 协程可能继续挂着，导致后续 close/重连收尾困难
 ```
 
-```text
-[17.3] 并发写串行化：为什么不能让多个协程同时写 socket？
+#### 17.3 并发写串行化：为什么不能让多个协程同时写 socket？
 
+```
 风险：TCP 是字节流，如果两个协程并发写入：
   - 两个 HSMS frame 的字节可能交错
   - 对端按 length framing 会被破坏（读到“混合 frame”）
@@ -1486,9 +1461,9 @@ Length 的语义（去看：include/secs/hsms/message.hpp）：
 - include/secs/secs1/link.hpp + src/secs1/link.cpp（抽象读写、测试注入延迟/丢字节）
 - include/secs/secs1/timer.hpp + src/secs1/timer.cpp（超时映射）
 
-```text
-[18.1] Block frame 的字节格式（实现注释里写得很全，直接按它理解）
+#### 18.1 Block frame 的字节格式（实现注释里写得很全，直接按它理解）
 
+```
 去看：include/secs/secs1/block.hpp（encode_block/decode_block 相关注释）
 
 frame:
@@ -1511,9 +1486,9 @@ Header(10B) 的 bit 布局（去看：include/secs/secs1/block.hpp::Header 注�
   - Byte7..10: SystemBytes（big-endian）
 ```
 
-```text
-[18.2] SECS-I 状态机（协程版）的发送流程（async_send）
+#### 18.2 SECS-I 状态机（协程版）的发送流程（async_send）
 
+```
 入口：include/secs/secs1/state_machine.hpp::async_send
 实现：src/secs1/state_machine.cpp::async_send
 
@@ -1543,9 +1518,9 @@ handshake_ok 后：
 退出：成功/失败都会回到 state idle
 ```
 
-```text
-[18.3] SECS-I 状态机的接收流程（async_receive）
+#### 18.3 SECS-I 状态机的接收流程（async_receive）
 
+```
 入口：include/secs/secs1/state_machine.hpp::async_receive
 实现：src/secs1/state_machine.cpp::async_receive
 
@@ -1580,9 +1555,9 @@ while !re.has_message():
 完成后：返回 (header, body) 并回到 state idle
 ```
 
-```text
-[18.4] “半双工”对上层意味着什么？
+#### 18.4 “半双工”对上层意味着什么？
 
+```
 你应该在协议层做的事（去看：include/secs/protocol/session.hpp 注释）：
   - 不建议同时跑一个常驻 async_run() 再并发 async_request()/async_send()
   - 如果你要并发请求：最好把并发收敛到你自己的调度层，确保同一时间只有一个协程在驱动 SECS-I 收发
@@ -1598,9 +1573,9 @@ while !re.has_message():
 - include/secs/protocol/router.hpp + src/protocol/router.cpp（路由表与 handler 约定）
 - include/secs/protocol/system_bytes.hpp + src/protocol/system_bytes.cpp（SystemBytes 分配/回收）
 
-```text
-[19.1] 统一后的数据模型：DataMessage（你只需要关心这 5 件事）
+#### 19.1 统一后的数据模型：DataMessage（你只需要关心这 5 件事）
 
+```
 DataMessage 语义（去看：include/secs/protocol/*）：
   - stream / function
   - w_bit（primary 是否要求 secondary）
@@ -1612,9 +1587,9 @@ HSMS 与 SECS-I 在协议层看起来“长得一样”：
   - SECS-I：wire=Block header；system_bytes 在 Block header 里
 ```
 
-```text
-[19.2] 并发模型差异：为什么 HSMS 需要 async_run，而 SECS-I 不推荐？
+#### 19.2 并发模型差异：为什么 HSMS 需要 async_run，而 SECS-I 不推荐？
 
+```
 HSMS（全双工）：
   - 允许多个请求协程并发发起 async_request()
   - 但不允许多个协程并发读同一连接（会竞争）
@@ -1625,9 +1600,9 @@ SECS-I（半双工）：
   => 设计：async_request() 在等待 secondary 期间自己驱动接收（并处理插入 primary）
 ```
 
-```text
-[19.3] HSMS 路径：async_request() -> pending_ -> async_run() 唤醒
+#### 19.3 HSMS 路径：async_request() -> pending_ -> async_run() 唤醒
 
+```
 实现位置：src/protocol/session.cpp
 
 async_request(stream,function,body,timeout)
@@ -1642,9 +1617,9 @@ async_request(stream,function,body,timeout)
   - erase pending_[sb] 并 release(sb)
 ```
 
-```text
-[19.4] SECS-I 路径：async_request() 自己收消息，同时不耽误处理插入的 primary
+#### 19.4 SECS-I 路径：async_request() 自己收消息，同时不耽误处理插入的 primary
 
+```
 实现位置：src/protocol/session.cpp
 
 async_request(...)：
@@ -1658,9 +1633,9 @@ async_request(...)：
   - 超时：release(sb) 并返回 timeout
 ```
 
-```text
-[19.5] Router 自动回包：你只注册 handler，其余交给库
+#### 19.5 Router 自动回包：你只注册 handler，其余交给库
 
+```
 实现位置：src/protocol/session.cpp::handle_inbound_
 
 handle_inbound_(msg):
@@ -1683,9 +1658,9 @@ handle_inbound_(msg):
 - include/secs/protocol/system_bytes.hpp
 - src/protocol/system_bytes.cpp
 
-```text
-[20.1] 内部数据结构（实现里的真实容器）
+#### 20.1 内部数据结构（实现里的真实容器）
 
+```
 SystemBytes:
   - next_   : 下一个候选值（递增 + 回绕到 1；0 永不分配）
   - free_   : 已释放可复用的队列（优先复用）
@@ -1713,9 +1688,9 @@ SystemBytes:
 - src/protocol/session.cpp::cancel_all_pending_（协议层 pending 取消与 system_bytes 回收）
 - src/hsms/timer.cpp、src/secs1/timer.cpp（timer -> error_code 的映射）
 
-```text
-[21.1] core::Event 是全库的“等待/唤醒原语”
+#### 21.1 core::Event 是全库的“等待/唤醒原语”
 
+```
 语义（去看：include/secs/core/event.hpp 注释）：
   - set()    : 置位并唤醒所有等待者；后续 wait 立即成功
   - reset()  : 清除置位；后续 wait 会阻塞
@@ -1728,9 +1703,9 @@ SystemBytes:
   - “实现 pending 唤醒”：Pending::ready
 ```
 
-```text
-[21.2] stop()/断线时的收敛路径（保证没有悬挂协程）
+#### 21.2 stop()/断线时的收敛路径（保证没有悬挂协程）
 
+```
 HSMS：
   - Session::stop():
       stop_requested_=true
@@ -1750,9 +1725,9 @@ SECS-I：
   - async_receive/async_send 的超时直接以 error_code 形式返回给上层（上层决定是否重试/断开）
 ```
 
-```text
-[21.3] “超时”在不同层的含义（你排障时要区分）
+#### 21.3 “超时”在不同层的含义（你排障时要区分）
 
+```
 T8（hsms::Connection）：
   - 表示“字节间隔超时”（读到任何字节前不能超过 T8）
   - 触发点：async_read_some_with_t8
@@ -1780,9 +1755,9 @@ T1/T2/T4（secs1::StateMachine）：
 - include/secs/sml/parser.hpp + src/sml/parser.cpp（parse：语法树、错误码与定位）
 - include/secs/sml/ast.hpp（Document/MessageDef/ConditionRule/TimerRule 等 AST 定义）
 
-```text
-[22.1] SML 解析管线（实现里的真实调用顺序）
+#### 22.1 SML 解析管线（实现里的真实调用顺序）
 
+```
 Runtime::load(source)
   |
   +--> parse_sml(source)                                     (include/secs/sml/runtime.hpp)
@@ -1801,9 +1776,9 @@ Runtime::load(source)
   - parse 失败：看 ParseResult.error_line/error_column/error_message
 ```
 
-```text
-[22.2] Runtime 索引（为什么 get_message(name) 是 O(1)）
+#### 22.2 Runtime 索引（为什么 get_message(name) 是 O(1)）
 
+```
 实现位置：include/secs/sml/runtime.hpp + src/sml/runtime.cpp
 
 两套索引：
@@ -1816,9 +1791,9 @@ Runtime::load(source)
   - 如果没有：遍历 messages 找到第一个匹配（用于命名消息）
 ```
 
-```text
-[22.3] 条件响应匹配（match_response / match_condition / items_equal）
+#### 22.3 条件响应匹配（match_response / match_condition / items_equal）
 
+```
 实现位置：src/sml/runtime.cpp
 
 match_response(stream,function,item):
@@ -1839,7 +1814,7 @@ items_equal 的选择（提升易用性）：
 
 ### 23) 调试地图：遇到问题先从哪打断点/看日志（按现象->入口）
 
-```text
+```
 症状 A：HSMS 连不上 / 一直重连
   - 入口：hsms::Session::async_run_active                     (src/hsms/session.cpp)
   - 关注：Connection::async_connect 的返回 ec                  (src/hsms/connection.cpp)

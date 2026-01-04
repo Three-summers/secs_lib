@@ -1,6 +1,7 @@
 # 构建目录
 build/
 build-*/
+build_*/
 cmake-build-*/
 
 # 覆盖率文件
