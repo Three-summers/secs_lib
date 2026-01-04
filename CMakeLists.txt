@@ -18,6 +18,12 @@ endif()
 
 option(SECS_ENABLE_INSTALL "Enable install() rules and find_package() config" ${SECS_PROJECT_IS_TOP_LEVEL})
 
+# 嵌入式场景：避免目标系统 libstdc++/libgcc 版本过旧导致运行失败。
+# - SECS_STATIC_CPP_RUNTIME：仅静态链接 C++ 运行库（libstdc++/libgcc），不强制静态链接 libc。
+# - SECS_FULLY_STATIC：尽可能全静态（等价于添加 -static），对 glibc 环境可能不可用。
+option(SECS_STATIC_CPP_RUNTIME "Link C++ runtime statically (-static-libstdc++ -static-libgcc)" ${CMAKE_CROSSCOMPILING})
+option(SECS_FULLY_STATIC "Try to link fully static (-static)" OFF)
+
 # 用于安装的模块
 include(GNUInstallDirs)
 # 用于生成可被 find_package 找到的配置文件
@@ -38,6 +44,19 @@ add_library(secs_core
 add_library(secs::core ALIAS secs_core)
 set_target_properties(secs_core PROPERTIES EXPORT_NAME core)
 target_compile_features(secs_core PUBLIC cxx_std_20)
+
+# 静态链接 C++ 运行库：放在最底层依赖（secs_core）上，便于向上游目标/用户程序传递。
+if((SECS_STATIC_CPP_RUNTIME OR SECS_FULLY_STATIC) AND NOT MSVC AND NOT APPLE)
+  if(SECS_STATIC_CPP_RUNTIME)
+    target_link_options(secs_core PUBLIC
+      $<$<LINK_LANG_AND_ID:CXX,GNU,Clang>:-static-libstdc++>
+      $<$<LINK_LANG_AND_ID:CXX,GNU,Clang>:-static-libgcc>
+    )
+  endif()
+  if(SECS_FULLY_STATIC)
+    target_link_options(secs_core PUBLIC -static)
+  endif()
+endif()
 
 target_include_directories(secs_core
   PUBLIC

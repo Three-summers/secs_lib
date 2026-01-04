@@ -180,6 +180,49 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
+### 嵌入式/旧运行库环境：静态链接 C++ 运行库（推荐）
+
+如果目标板子的 `libstdc++`/`libgcc` 版本较旧，建议在配置时开启静态链接：
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSECS_STATIC_CPP_RUNTIME=ON
+```
+
+可选：尝试“全静态”（会额外添加 `-static`，在 glibc 环境可能不可用）：
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSECS_FULLY_STATIC=ON
+```
+
+说明：
+- 以上开关需要你的工具链/SDK 提供对应的静态库（例如 `libstdc++.a`、`libgcc.a`）。
+- 默认情况下 `SECS_STATIC_CPP_RUNTIME` 仅在交叉编译（`CMAKE_CROSSCOMPILING=ON`）时为 ON；你也可以显式设置 ON/OFF。
+
+### 在 `remote_develop-petalinux-dev` Docker 镜像里验证（可选）
+
+如果你在宿主机上有 Docker 权限，可以用该镜像做一次“静态 C++ 运行库”验证构建：
+
+```bash
+docker run --rm -it \
+  -v "$PWD:/workspace" -w /workspace \
+  remote_develop-petalinux-dev \
+  bash -lc '
+    cmake -S . -B build_docker_static \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DSECS_ENABLE_TESTS=OFF \
+      -DSECS_BUILD_EXAMPLES=ON \
+      -DSECS_STATIC_CPP_RUNTIME=ON \
+      -DSECS_FETCH_ASIO=OFF \
+      -DSECS_ASIO_ROOT=/workspace/build/_deps/secs_asio_fc-src/asio/include
+    cmake --build build_docker_static -j
+    readelf -d build_docker_static/examples/secs2_simple | rg NEEDED || true
+  '
+```
+
+注意：
+- 上面的 `SECS_ASIO_ROOT` 示例复用了本仓库现有的 `build/_deps`；如果你没有该目录，请改成你环境里实际的 Asio include 路径，或准备好 vendored Asio。
+- 如果 `docker run` 报 “permission denied while trying to connect to the Docker daemon socket”，需要在宿主机上授予 Docker 权限（例如把当前用户加入 `docker` 组并重新登录）。
+
 ### 作为子项目集成到你的工程（推荐）
 
 推荐两种集成方式：
