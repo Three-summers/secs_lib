@@ -2,6 +2,8 @@
 
 #include "secs/core/error.hpp"
 
+#include <algorithm>
+
 namespace secs::secs1 {
 namespace {
 
@@ -17,7 +19,7 @@ namespace {
  * - 发送流程（async_send）：
  *   1) 发 ENQ，请求占用半双工链路
  *   2) 在 T2 内等待对端 EOT/ACK（NAK/超时会触发重试）
- *   3) 将消息按 243B/块切分为多个“块帧”
+ *   3) 将消息按 244B/块切分为多个“块帧”
  *   4) 逐块发送帧，并在 T2 内等待 ACK/NAK（NAK/超时会重传该块）
  *
  * - 接收流程（async_receive）：
@@ -48,16 +50,21 @@ StateMachine::async_read_byte(std::optional<secs::core::duration> timeout) {
 asio::awaitable<std::error_code>
 StateMachine::async_send(const Header &header, secs::core::bytes_view body) {
     if (state_ != State::idle) {
+        // 并发保护：
+        // SECS-I 是半双工字节流；若同时有两个协程/线程驱动同一条 Link：
+        // - 写入会交错，破坏 frame；
+        // - 读取会错配，把对端控制字节误判为自己等待的响应。
+        // 因此这里要求“同一时刻只能有一个操作在跑”。
         co_return secs::core::make_error_code(
             secs::core::errc::invalid_argument);
     }
 
-    // 对齐 c_dump：BlockNumber 为 8 位，单条消息最多 255 个 Block（起始为 1）。
     if (!body.empty()) {
         const auto blocks =
             (body.size() + kMaxBlockDataSize - 1) / kMaxBlockDataSize;
-        if (blocks > 0x00FFu) {
-            co_return secs::core::make_error_code(secs::core::errc::invalid_argument);
+        if (blocks > 0x7FFFu) {
+            co_return secs::core::make_error_code(
+                secs::core::errc::invalid_argument);
         }
     }
 
@@ -98,7 +105,7 @@ StateMachine::async_send(const Header &header, secs::core::bytes_view body) {
         co_return make_error_code(errc::too_many_retries);
     }
 
-    // SECS-I 规定单个块的数据最大 243 字节：这里把 body 切分并编码成多个帧。
+    // SECS-I 规定单个块的数据最大 244 字节：这里把 body 切分并编码成多个帧。
     auto frames = fragment_message(header, body);
 
     for (const auto &frame : frames) {
@@ -119,6 +126,9 @@ StateMachine::async_send(const Header &header, secs::core::bytes_view body) {
             if (!rec_ec && resp == kAck) {
                 break;
             }
+            // 注意：这里严格期待 ACK/NAK（或超时触发重传）。
+            // 若对端实现违规（例如多线程并发写串口，在 ACK 之前就发送 ENQ），
+            // 这里可能读到 ENQ；这会被判为协议错误并终止本次发送。
             if ((!rec_ec && resp == kNak) || is_timeout(rec_ec)) {
                 ++attempts;
                 if (attempts >= retry_limit_) {
@@ -172,6 +182,8 @@ StateMachine::async_receive(std::optional<secs::core::duration> timeout) {
 
     Reassembler re(expected_device_id_);
     std::size_t nack_count = 0;
+    std::optional<Header> last_accepted_header{};
+    std::vector<secs::core::byte> last_accepted_data{};
 
     auto next_block_timeout = timeouts_.t2_protocol;
     while (!re.has_message()) {
@@ -219,6 +231,35 @@ StateMachine::async_receive(std::optional<secs::core::duration> timeout) {
             continue;
         }
 
+        if (last_accepted_header.has_value() &&
+            decoded.header.reverse_bit == last_accepted_header->reverse_bit &&
+            decoded.header.device_id == last_accepted_header->device_id &&
+            decoded.header.wait_bit == last_accepted_header->wait_bit &&
+            decoded.header.stream == last_accepted_header->stream &&
+            decoded.header.function == last_accepted_header->function &&
+            decoded.header.end_bit == last_accepted_header->end_bit &&
+            decoded.header.block_number == last_accepted_header->block_number &&
+            decoded.header.system_bytes == last_accepted_header->system_bytes) {
+            const bool data_same =
+                decoded.data.size() == last_accepted_data.size() &&
+                std::equal(decoded.data.begin(),
+                           decoded.data.end(),
+                           last_accepted_data.begin());
+
+            if (!data_same) {
+                (void)co_await async_send_control(kNak);
+                state_ = State::idle;
+                co_return std::pair{make_error_code(errc::protocol_error),
+                                    ReceivedMessage{}};
+            }
+
+            // 重复块：典型原因是对端未收到 ACK 而重发；按 E4 语义丢弃并再次 ACK。
+            nack_count = 0;
+            (void)co_await async_send_control(kAck);
+            next_block_timeout = timeouts_.t4_interblock;
+            continue;
+        }
+
         auto acc_ec = re.accept(decoded);
         if (acc_ec) {
             (void)co_await async_send_control(kNak);
@@ -228,6 +269,8 @@ StateMachine::async_receive(std::optional<secs::core::duration> timeout) {
 
         // 当前块校验通过
         nack_count = 0;
+        last_accepted_header = decoded.header;
+        last_accepted_data.assign(decoded.data.begin(), decoded.data.end());
         (void)co_await async_send_control(kAck);
         next_block_timeout = timeouts_.t4_interblock;
     }

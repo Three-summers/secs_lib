@@ -6,6 +6,21 @@
 
 namespace secs::sml {
 
+/*
+ * SML Runtime 实现：在已解析的 Document 上提供查询与匹配能力。
+ *
+ * 主要职责：
+ * - build_index()：构建 “name -> tell index” 与 “(S,F) -> index” 的索引，便于 O(1)
+ *   查找消息模板；
+ * - match_response()：按条件规则匹配入站消息，返回对应的响应消息名；
+ * - items_equal()：为条件匹配提供 Item 比较语义（其中浮点采用容差比较，提高规则
+ *   易用性；其它类型复用 ii::Item 的严格相等）。
+ *
+ * 与 SECS-II 的关系：
+ * - Runtime 处理的是“结构化 Item”（ii::Item），不直接处理 on-wire 编解码；
+ * - 需要从字节解析时，应先用 ii::codec 解码为 Item，再交给 Runtime 匹配。
+ */
+
 namespace {
 
 [[nodiscard]] bool parse_sf(std::string_view name,

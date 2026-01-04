@@ -17,7 +17,7 @@ inline constexpr secs::core::byte kAck = 0x06;
 inline constexpr secs::core::byte kNak = 0x15;
 
 inline constexpr std::size_t kHeaderSize = 10;
-inline constexpr std::size_t kMaxBlockDataSize = 243;
+inline constexpr std::size_t kMaxBlockDataSize = 244;
 inline constexpr std::size_t kMaxBlockLength = kHeaderSize + kMaxBlockDataSize;
 inline constexpr std::size_t kMaxBlockFrameSize = 1 + kMaxBlockLength + 2;
 
@@ -42,8 +42,8 @@ std::error_code make_error_code(errc e) noexcept;
  * - Byte2: DeviceID[7:0]
  * - Byte3: W(1b) + Stream(7b)
  * - Byte4: Function(8b)
- * - Byte5: E(1b) + 预留(7b，固定为 0)
- * - Byte6: BlockNumber(8b)
+ * - Byte5: E(1b) + BlockNumber[14:8](7b)
+ * - Byte6: BlockNumber[7:0](8b)
  * - Byte7..10: SystemBytes（big-endian）
  */
 struct Header final {
@@ -55,7 +55,7 @@ struct Header final {
     std::uint8_t function{0};
 
     bool end_bit{false};
-    std::uint16_t block_number{1}; // 8 位有效（0x0000-0x00FF）
+    std::uint16_t block_number{1}; // 15 位有效（1-32767）
 
     std::uint32_t system_bytes{0};
 };
@@ -71,9 +71,9 @@ struct DecodedBlock final {
  * @brief 编码一个完整 Block frame。
  *
  * frame 格式：
- * - Length(1B)：后续 Header(10B)+Data(N) 的总长度，要求 10<=Length<=253
+ * - Length(1B)：后续 Header(10B)+Data(N) 的总长度，要求 10<=Length<=254
  * - Header(10B)
- * - Data(N)（0<=N<=243）
+ * - Data(N)（0<=N<=244）
  * - Checksum(2B, big-endian)：对 Length 之后的 (Length) 个字节求和（mod 65536）
  */
 std::error_code encode_block(const Header &header,
@@ -88,7 +88,7 @@ std::error_code encode_block(const Header &header,
 std::error_code decode_block(secs::core::bytes_view frame, DecodedBlock &out);
 
 /**
- * @brief 将 payload 按 243B/block 切分并编码为多个 frame。
+ * @brief 将 payload 按 244B/block 切分并编码为多个 frame。
  *
  * base_header 中的 end_bit/block_number 会被覆盖；其余字段会继承。
  */

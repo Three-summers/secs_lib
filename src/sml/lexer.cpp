@@ -7,6 +7,22 @@
 
 namespace secs::sml {
 
+/*
+ * SML（SECS Message Language）词法分析器实现。
+ *
+ * 输入/输出：
+ * - 输入：SML 源文本（按字节扫描；通常为 ASCII/UTF-8 子集）
+ * - 输出：Token 列表（包含 line/column 定位信息，便于报错）
+ *
+ * 支持能力：
+ * - 行注释（// ...）与块注释（以 `/ *` 开始，以 `* /` 结束）
+ * - 字符串、数字、标识符、关键字（见 kKeywords）
+ *
+ * 错误策略：
+ * - 遇到非法字符、未闭合字符串、未闭合块注释等情况：
+ *   立即返回 lexer_errc，并附带 error_line/error_column/error_message。
+ */
+
 namespace {
 
 class LexerErrorCategory : public std::error_category {

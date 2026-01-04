@@ -584,7 +584,7 @@ void test_hsms_protocol_disconnect_cancels_pending() {
             TEST_EXPECT_OK(rec);
 
             auto ec = co_await server.async_send(secs::hsms::make_separate_req(
-                session_id, server.allocate_system_bytes()));
+                0xFFFF, server.allocate_system_bytes()));
             TEST_EXPECT_OK(ec);
         },
         asio::detached);

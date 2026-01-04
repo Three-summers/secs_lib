@@ -16,8 +16,10 @@
 namespace secs::hsms {
 namespace {
 
-constexpr std::uint16_t kRspOk = 0;
-constexpr std::uint16_t kRspReject = 1;
+constexpr std::uint16_t kHsmsSsControlSessionId = 0xFFFF;
+
+constexpr std::uint8_t kRspOk = 0;
+constexpr std::uint8_t kRspReject = 1;
 
 } // namespace
 
@@ -150,7 +152,12 @@ asio::awaitable<void> Session::reader_loop_() {
         auto [ec, msg] = co_await connection_.async_read_message();
         if (ec) {
             connection_.cancel_and_close();
-            on_disconnected_(ec);
+            // reader_loop_ 退出路径可能与外部触发的 on_disconnected_ 重叠（例如
+            // stop()、T6 超时主动断线）。为了避免“第二次断线原因覆盖第一次”的
+            // 语义漂移，这里只在尚未进入 disconnected 时调用 on_disconnected_。
+            if (state_ != SessionState::disconnected) {
+                on_disconnected_(ec);
+            }
             break;
         }
 
@@ -168,16 +175,30 @@ asio::awaitable<void> Session::reader_loop_() {
         }
 
         // 控制消息：SELECT/DESELECT/LINKTEST/SEPARATE 等。
+        if (msg.header.session_id != kHsmsSsControlSessionId) {
+            // HSMS-SS 约束：控制消息的 SessionID 固定为 0xFFFF。
+            // 若对端发来其它值，通常意味着：
+            // - 对端实现不是 HSMS-SS（可能是 HSMS-GS），或
+            // - 对端实现有 bug/字段填充错误。
+            // 当前库选择“断线收敛”，避免会话进入不可预测状态。
+            (void)co_await connection_.async_close();
+            on_disconnected_(
+                core::make_error_code(core::errc::invalid_argument));
+            break;
+        }
+
         bool should_exit = false;
         switch (msg.header.s_type) {
         case SType::select_req: {
             // 被动端收到 SELECT.req：
             // - 可按配置拒绝（用于单元测试覆盖）
-            // - 校验 SessionID（不匹配则拒绝并断线）
+            // - 校验 SessionID（HSMS-SS：固定 0xFFFF，不匹配则拒绝并断线）
             // - 已处于 selected 时重复收到 SELECT.req：回拒绝，但保持连接
             if (!options_.passive_accept_select) {
                 (void)co_await connection_.async_write_message(
-                    make_select_rsp(kRspReject, msg.header.system_bytes));
+                    make_select_rsp(msg.header.session_id,
+                                    kRspReject,
+                                    msg.header.system_bytes));
                 (void)co_await connection_.async_close();
                 on_disconnected_(
                     core::make_error_code(core::errc::invalid_argument));
@@ -187,13 +208,17 @@ asio::awaitable<void> Session::reader_loop_() {
 
             if (state_ == SessionState::selected) {
                 (void)co_await connection_.async_write_message(
-                    make_select_rsp(kRspReject, msg.header.system_bytes));
+                    make_select_rsp(msg.header.session_id,
+                                    kRspReject,
+                                    msg.header.system_bytes));
                 break;
             }
 
-            if (msg.header.session_id != options_.session_id) {
+            if (msg.header.session_id != kHsmsSsControlSessionId) {
                 (void)co_await connection_.async_write_message(
-                    make_select_rsp(kRspReject, msg.header.system_bytes));
+                    make_select_rsp(msg.header.session_id,
+                                    kRspReject,
+                                    msg.header.system_bytes));
                 (void)co_await connection_.async_close();
                 on_disconnected_(
                     core::make_error_code(core::errc::invalid_argument));
@@ -202,7 +227,9 @@ asio::awaitable<void> Session::reader_loop_() {
             }
 
             (void)co_await connection_.async_write_message(
-                make_select_rsp(kRspOk, msg.header.system_bytes));
+                make_select_rsp(msg.header.session_id,
+                                kRspOk,
+                                msg.header.system_bytes));
             set_selected_();
             break;
         }
@@ -211,7 +238,7 @@ asio::awaitable<void> Session::reader_loop_() {
             // - 先尝试唤醒挂起的控制事务（对应 async_control_transaction_）
             // - 若接受则进入 selected
             const bool matched = fulfill_pending_(msg);
-            if (matched && msg.header.session_id == kRspOk) {
+            if (matched && msg.header.header_byte2 == kRspOk) {
                 set_selected_();
             }
             break;
@@ -220,7 +247,9 @@ asio::awaitable<void> Session::reader_loop_() {
             // 收到 DESELECT.req：先立即阻断 data，再回复 DESELECT.rsp，并退回 NOT_SELECTED。
             set_not_selected_();
             (void)co_await connection_.async_write_message(
-                make_deselect_rsp(kRspOk, msg.header.system_bytes));
+                make_deselect_rsp(msg.header.session_id,
+                                  kRspOk,
+                                  msg.header.system_bytes));
             break;
         }
         case SType::deselect_rsp: {
@@ -232,7 +261,7 @@ asio::awaitable<void> Session::reader_loop_() {
         case SType::linktest_req: {
             // 收到 LINKTEST.req：立即回复 LINKTEST.rsp（不进入 inbound_data_）
             (void)co_await connection_.async_write_message(
-                make_linktest_rsp(options_.session_id, msg.header.system_bytes));
+                make_linktest_rsp(msg.header.session_id, msg.header.system_bytes));
             break;
         }
         case SType::linktest_rsp: {
@@ -367,8 +396,11 @@ Session::async_control_transaction_(const Message &req,
 
     ec = co_await pending->ready.async_wait(timeout);
     if (ec == core::make_error_code(core::errc::timeout)) {
-        // 控制事务超时：不强制断线；由调用方按控制消息语义决定后续动作
-        // （例如 Select.req 超时应回到 NOT_SELECTED 并保持连接可继续交互）。
+        // 控制事务超时（T6）：只返回 timeout，不在此处强制断线。
+        //
+        // 说明：
+        // - SELECT 等握手失败是否“立即断线”属于更高层的策略（见 async_open_*）。
+        // - LINKTEST 周期心跳通常需要“连续失败阈值”，因此也不能在这里一刀切断线。
         pending_.erase(sb);
         co_return std::pair{ec, Message{}};
     }
@@ -390,7 +422,8 @@ Session::async_control_transaction_(const Message &req,
 
 asio::awaitable<std::pair<std::error_code, Message>>
 Session::async_data_transaction_(const Message &req, core::duration timeout) {
-    // 数据事务（W=1）：同样用 pending_ 做请求-响应匹配，超时视为连接异常。
+    // 数据事务（W=1）：同样用 pending_ 做请求-响应匹配；按 HSMS-SS 语义，
+    // T3 超时只取消事务，不强制断线。
     const auto sb = req.header.system_bytes;
     auto pending = std::make_shared<Pending>(SType::data);
     pending_.insert_or_assign(sb, pending);
@@ -404,8 +437,6 @@ Session::async_data_transaction_(const Message &req, core::duration timeout) {
     ec = co_await pending->ready.async_wait(timeout);
     if (ec == core::make_error_code(core::errc::timeout)) {
         pending_.erase(sb);
-        (void)co_await connection_.async_close();
-        on_disconnected_(ec);
         co_return std::pair{ec, Message{}};
     }
 
@@ -458,13 +489,17 @@ Session::async_open_active(Connection &&connection) {
 
     start_reader_();
 
-    Message req = make_select_req(options_.session_id, allocate_system_bytes());
+    Message req =
+        make_select_req(kHsmsSsControlSessionId, allocate_system_bytes());
     auto [tr_ec, rsp] = co_await async_control_transaction_(
         req, SType::select_rsp, options_.t6);
     if (tr_ec) {
+        // SELECT 控制事务超时（T6）按“通信失败”处理：断线收敛，避免双方状态机分叉。
+        connection_.cancel_and_close();
+        on_disconnected_(tr_ec);
         co_return tr_ec;
     }
-    if (rsp.header.session_id != kRspOk) {
+    if (rsp.header.header_byte2 != kRspOk) {
         (void)co_await connection_.async_close();
         on_disconnected_(core::make_error_code(core::errc::invalid_argument));
         co_return core::make_error_code(core::errc::invalid_argument);
@@ -579,6 +614,11 @@ Session::async_request_data(std::uint8_t stream,
         co_return std::pair{core::make_error_code(core::errc::invalid_argument),
                             Message{}};
     }
+    if ((options_.session_id & 0x8000U) != 0) {
+        // HSMS-SS：data message 的 SessionID 高位必须为 0（低 15 位为 DeviceID）。
+        co_return std::pair{core::make_error_code(core::errc::invalid_argument),
+                            Message{}};
+    }
 
     const auto sb = allocate_system_bytes();
     Message req = make_data_message(
@@ -593,13 +633,13 @@ asio::awaitable<std::error_code> Session::async_linktest() {
     }
 
     Message req =
-        make_linktest_req(options_.session_id, allocate_system_bytes());
+        make_linktest_req(kHsmsSsControlSessionId, allocate_system_bytes());
     auto [ec, rsp] = co_await async_control_transaction_(
         req, SType::linktest_rsp, options_.t6);
     if (ec) {
         co_return ec;
     }
-    if (rsp.header.session_id != options_.session_id) {
+    if (rsp.header.session_id != kHsmsSsControlSessionId) {
         co_return core::make_error_code(core::errc::invalid_argument);
     }
     co_return std::error_code{};

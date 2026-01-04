@@ -17,6 +17,23 @@
 namespace secs::hsms {
 namespace {
 
+/*
+ * HSMS Connection 层职责（对应 SEMI E37 的 framing 部分）：
+ *
+ * - 读方向：把底层字节流解析为 Message（先读 4B 长度，再读 payload，再 decode）。
+ * - 写方向：把 Message 编码为 frame 并写入底层流。
+ *
+ * 并发模型（与 include/secs/hsms/connection.hpp 的注释保持一致）：
+ * - 读操作建议由单协程驱动（避免多个 reader 同时消费一个流）。
+ * - 写操作允许多协程并发调用 async_write_message()：
+ *   统一入队后由 writer_loop_ 串行写出，避免并发 async_write 的未定义行为。
+ * - 控制消息优先于 data 消息写出，避免 SELECT/SEPARATE 等控制流被 data 抢占。
+ *
+ * T8（网络字符间隔超时）：
+ * - 采用“并行等待 read_some 与 timer”的方式实现；
+ * - 若 timer 先到，则 cancel 底层流，让读协程尽快返回，再向上报告 timeout。
+ */
+
 class TcpStream final : public Stream {
 public:
     explicit TcpStream(asio::any_io_executor ex) : executor_(ex), socket_(ex) {}
@@ -188,6 +205,7 @@ asio::awaitable<void> Connection::writer_loop_() {
     while (stream_ && stream_->is_open()) {
         std::shared_ptr<WriteRequest> req;
         if (!control_queue_.empty()) {
+            // 控制消息优先级：控制流应抢占数据流写入，避免握手/断线控制被延后。
             req = std::move(control_queue_.front());
             control_queue_.pop_front();
         } else if (!data_queue_.empty()) {

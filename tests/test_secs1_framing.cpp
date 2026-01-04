@@ -239,7 +239,7 @@ void test_encode_device_id_boundary_values() {
 
 void test_encode_invalid_block_number() {
     auto h = sample_header();
-    h.block_number = 0x0100; // 超出 8 位有效范围（对齐 c_dump）
+    h.block_number = 0x8000; // 超出 15 位有效范围（SECS-I：1-32767）
 
     std::vector<byte> frame;
     auto ec = secs::secs1::encode_block(h, as_bytes("x"), frame);
@@ -264,7 +264,7 @@ void test_encode_decode_variant_bits_and_block_number_max() {
     h.stream = 0x7F;
     h.function = 0xFF;
     h.end_bit = false;
-    h.block_number = 0x00FF; // 覆盖 block_number 最大值路径（8 位）
+    h.block_number = 0x7FFF; // 覆盖 block_number 最大值路径（15 位）
     h.system_bytes = 0xAABBCCDD;
 
     std::vector<byte> frame;
@@ -309,7 +309,7 @@ void test_decode_invalid_too_small() {
 
 void test_decode_invalid_length_out_of_range() {
     std::vector<byte> frame(1 + secs::secs1::kHeaderSize + 2, 0);
-    frame[0] = 254; // 超过 kMaxBlockLength
+    frame[0] = 255; // 超过 kMaxBlockLength（254）
     DecodedBlock decoded{};
     auto ec = secs::secs1::decode_block(bytes_view{frame.data(), frame.size()},
                                         decoded);
@@ -339,7 +339,7 @@ void test_decode_block_frame_too_large() {
         ec, secs::secs1::make_error_code(secs::secs1::errc::invalid_block));
 }
 
-void test_decode_block_frame_size_256_ok() {
+void test_decode_block_frame_size_257_ok() {
     auto h = sample_header();
     auto payload = make_payload(secs::secs1::kMaxBlockDataSize);
 
@@ -354,7 +354,7 @@ void test_decode_block_frame_size_256_ok() {
     TEST_EXPECT_EQ(decoded.data.size(), payload.size());
 }
 
-void test_decode_block_frame_size_255_ok() {
+void test_decode_block_frame_size_256_ok() {
     auto h = sample_header();
     auto payload = make_payload(secs::secs1::kMaxBlockDataSize - 1);
 
@@ -1988,6 +1988,87 @@ void test_t4_interblock_timeout() {
     TEST_EXPECT(done.load());
 }
 
+void test_duplicate_block_is_acked_and_discarded() {
+    asio::io_context ioc;
+    auto [a, b] = MemoryLink::create(ioc.get_executor());
+
+    Timeouts timeouts{};
+    timeouts.t1_intercharacter = 200ms;
+    timeouts.t2_protocol = 200ms;
+    timeouts.t4_interblock = 200ms;
+
+    StateMachine receiver(b, 0x1234, timeouts, 3);
+    auto h = sample_header();
+
+    auto payload = make_payload(secs::secs1::kMaxBlockDataSize + 10);
+    auto frames = secs::secs1::fragment_message(
+        h, bytes_view{payload.data(), payload.size()});
+    TEST_EXPECT_EQ(frames.size(), 2u);
+
+    std::atomic<bool> done{false};
+    asio::steady_timer watchdog(ioc);
+    watchdog.expires_after(1s);
+    watchdog.async_wait([&](const std::error_code &) {
+        TEST_FAIL("watchdog fired");
+        ioc.stop();
+    });
+
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            // 握手：ENQ -> EOT
+            TEST_EXPECT_OK(co_await write_byte(a, secs::secs1::kEnq));
+            auto [ec0, ch0] = co_await a.async_read_byte(200ms);
+            TEST_EXPECT_OK(ec0);
+            TEST_EXPECT_EQ(ch0, secs::secs1::kEot);
+
+            // 第 1 块
+            TEST_EXPECT_OK(co_await a.async_write(
+                bytes_view{frames[0].data(), frames[0].size()}));
+            auto [ec1, ack1] = co_await a.async_read_byte(200ms);
+            TEST_EXPECT_OK(ec1);
+            TEST_EXPECT_EQ(ack1, secs::secs1::kAck);
+
+            // 重复第 1 块（模拟 ACK 丢失导致的重传）
+            TEST_EXPECT_OK(co_await a.async_write(
+                bytes_view{frames[0].data(), frames[0].size()}));
+            auto [ec2, ack2] = co_await a.async_read_byte(200ms);
+            TEST_EXPECT_OK(ec2);
+            TEST_EXPECT_EQ(ack2, secs::secs1::kAck);
+
+            // 第 2 块（最后一块）
+            TEST_EXPECT_OK(co_await a.async_write(
+                bytes_view{frames[1].data(), frames[1].size()}));
+            auto [ec3, ack3] = co_await a.async_read_byte(200ms);
+            TEST_EXPECT_OK(ec3);
+            TEST_EXPECT_EQ(ack3, secs::secs1::kAck);
+
+            co_return;
+        },
+        asio::detached);
+
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            auto [ec, msg] = co_await receiver.async_receive(800ms);
+            TEST_EXPECT_OK(ec);
+            TEST_EXPECT_EQ(msg.body.size(), payload.size());
+            TEST_EXPECT(std::equal(msg.body.begin(),
+                                   msg.body.end(),
+                                   payload.begin(),
+                                   payload.end()));
+
+            done = true;
+            watchdog.cancel();
+            ioc.stop();
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(done.load());
+}
+
 void test_t3_reply_timeout() {
     asio::io_context ioc;
     auto [a, b] = MemoryLink::create(ioc.get_executor());
@@ -2136,8 +2217,8 @@ int main() {
     test_decode_invalid_length_out_of_range();
     test_decode_invalid_size_mismatch();
     test_decode_block_frame_too_large();
+    test_decode_block_frame_size_257_ok();
     test_decode_block_frame_size_256_ok();
-    test_decode_block_frame_size_255_ok();
     test_fragment_message_splits_and_decodes();
     test_fragment_message_empty_payload();
     test_reassembler_happy_path();
@@ -2173,6 +2254,7 @@ int main() {
     test_t1_intercharacter_timeout();
     test_t2_handshake_timeout_to_too_many_retries();
     test_t4_interblock_timeout();
+    test_duplicate_block_is_acked_and_discarded();
     test_t3_reply_timeout();
     test_t3_reply_success();
     return ::secs::tests::run_and_report();

@@ -69,7 +69,7 @@ std::error_code encode_block(const Header &header,
     if (header.device_id > 0x7FFF) {
         return secs::core::make_error_code(secs::core::errc::invalid_argument);
     }
-    if (header.block_number > 0x00FF) {
+    if (header.block_number == 0 || header.block_number > 0x7FFF) {
         return secs::core::make_error_code(secs::core::errc::invalid_argument);
     }
     if (data.size() > kMaxBlockDataSize) {
@@ -100,8 +100,10 @@ std::error_code encode_block(const Header &header,
         (header.wait_bit ? 0x80 : 0x00) | (header.stream & 0x7F)));
     out.push_back(static_cast<secs::core::byte>(header.function));
 
-    // 对齐 c_dump：BlockNumber 只占 1 字节（Byte6），Byte5 的低 7 位保留为 0。
-    out.push_back(static_cast<secs::core::byte>(header.end_bit ? 0x80 : 0x00));
+    // Byte5: E(1b) + BlockNumber[14:8](7b)；Byte6: BlockNumber[7:0]。
+    out.push_back(static_cast<secs::core::byte>(
+        (header.end_bit ? 0x80 : 0x00) |
+        static_cast<secs::core::byte>((header.block_number >> 8) & 0x7F)));
     out.push_back(
         static_cast<secs::core::byte>(static_cast<std::uint8_t>(
             header.block_number & 0xFF)));
@@ -157,11 +159,6 @@ std::error_code decode_block(secs::core::bytes_view frame, DecodedBlock &out) {
     const auto b5 = payload[4];
     const auto b6 = payload[5];
 
-    // 对齐 c_dump：Byte5 低 7 位为保留位（必须为 0）。
-    if ((b5 & 0x7F) != 0) {
-        return make_error_code(errc::invalid_block);
-    }
-
     Header header{};
     header.reverse_bit = (b1 & 0x80) != 0;
     header.device_id = static_cast<std::uint16_t>(
@@ -173,7 +170,12 @@ std::error_code decode_block(secs::core::bytes_view frame, DecodedBlock &out) {
     header.function = b4;
 
     header.end_bit = (b5 & 0x80) != 0;
-    header.block_number = static_cast<std::uint16_t>(b6);
+    header.block_number = static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(b5 & 0x7F) << 8) |
+        static_cast<std::uint16_t>(b6));
+    if (header.block_number == 0 || header.block_number > 0x7FFF) {
+        return make_error_code(errc::invalid_block);
+    }
 
     header.system_bytes = (static_cast<std::uint32_t>(payload[6]) << 24) |
                           (static_cast<std::uint32_t>(payload[7]) << 16) |
@@ -189,11 +191,10 @@ std::vector<std::vector<secs::core::byte>>
 fragment_message(Header base_header, secs::core::bytes_view payload) {
     std::vector<std::vector<secs::core::byte>> out;
 
-    // 对齐 c_dump：BlockNumber 为 8 位，单条消息最多 255 个 Block（起始为 1）。
     if (!payload.empty()) {
         const auto blocks =
             (payload.size() + kMaxBlockDataSize - 1) / kMaxBlockDataSize;
-        if (blocks > 0x00FFu) {
+        if (blocks > 0x7FFFu) {
             return out;
         }
     }

@@ -10,6 +10,18 @@
 
 namespace secs::ii {
 
+/**
+ * @brief SECS-II Item 的强类型表示（SEMI E5）。
+ *
+ * 说明：
+ * - Item 用一个 std::variant 承载 SECS-II 常见数据类型，并支持嵌套 List；
+ * - 该类型只描述“结构化数据”，不包含 on-wire 编码；编解码见 `codec.hpp/cpp`；
+ * - Boolean 使用 std::vector<bool>（位压缩容器），不保证连续内存；因此 C API
+ *   对 Boolean 提供 copy 输出接口；
+ * - 浮点的严格相等在实现中采用“按位相等”（见 `src/ii/item.cpp`），以匹配
+ *   SECS-II 编解码的字节语义。
+ */
+
 class Item;
 using List = std::vector<Item>;
 

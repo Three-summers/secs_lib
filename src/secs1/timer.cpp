@@ -8,6 +8,14 @@
 
 namespace secs::secs1 {
 
+/*
+ * SECS-I 传输层使用的协程定时器封装：
+ *
+ * - 目的：把 asio::steady_timer 的等待结果统一映射为 std::error_code，
+ *   便于在 SECS-I 状态机中“以返回值控制流程”，而不是依赖异常或回调。
+ * - steady_timer 基于单调时钟，不受系统时间跳变影响，适合实现 T1/T2/T3/T4 等协议超时。
+ */
+
 Timer::Timer(asio::any_io_executor ex) : timer_(ex) {}
 
 void Timer::cancel() noexcept { timer_.cancel(); }

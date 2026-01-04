@@ -4,6 +4,20 @@
 
 namespace secs::hsms {
 
+/*
+ * HSMS 定时器封装实现。
+ *
+ * 目的：
+ * - 统一把 asio::steady_timer 的等待结果映射为 std::error_code，保持库内“无异常”
+ *   的控制流风格；
+ * - 供 HSMS Session/Connection 用于实现 T5/T6/T7/T8 等等待与退避逻辑。
+ *
+ * 约定（与 include/secs/hsms/timer.hpp 保持一致）：
+ * - 正常到期：返回空 error_code
+ * - cancel() 触发的 operation_aborted：映射为 secs::core::errc::cancelled
+ * - 其他底层错误：直接透传
+ */
+
 Timer::Timer(asio::any_io_executor ex) : timer_(ex) {}
 
 void Timer::cancel() noexcept { timer_.cancel(); }

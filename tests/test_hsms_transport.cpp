@@ -20,6 +20,8 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <memory>
 #include <set>
@@ -720,7 +722,7 @@ void test_session_select_req_when_already_selected() {
             // 已经进入“已选择”状态后再次发送 SELECT.req，触发服务端“already
             // selected”分支。
             ec = co_await client.async_send(secs::hsms::make_select_req(
-                opt.session_id, client.allocate_system_bytes()));
+                0xFFFF, client.allocate_system_bytes()));
             TEST_EXPECT_OK(ec);
 
             // 稍等让控制消息往返处理完成。
@@ -745,23 +747,20 @@ void test_session_select_req_when_already_selected() {
 void test_session_select_req_session_id_mismatch_disconnects() {
     asio::io_context ioc;
 
-    SessionOptions server_opt;
-    server_opt.session_id = 0x0001;
-    server_opt.t6 = 50ms;
-    server_opt.t7 = 200ms;
-    server_opt.t8 = 50ms;
+    SessionOptions opt;
+    opt.session_id = 0x0001;
+    opt.t6 = 50ms;
+    opt.t7 = 200ms;
+    opt.t8 = 50ms;
 
-    SessionOptions client_opt = server_opt;
-    client_opt.session_id = 0x0002;
-
-    Session server(ioc.get_executor(), server_opt);
-    Session client(ioc.get_executor(), client_opt);
+    Session server(ioc.get_executor(), opt);
+    Session client(ioc.get_executor(), opt);
 
     auto duplex = make_memory_duplex(ioc.get_executor());
     Connection client_conn(std::move(duplex.client_stream),
-                           ConnectionOptions{.t8 = client_opt.t8});
+                           ConnectionOptions{.t8 = opt.t8});
     Connection server_conn(std::move(duplex.server_stream),
-                           ConnectionOptions{.t8 = server_opt.t8});
+                           ConnectionOptions{.t8 = opt.t8});
 
     std::atomic<bool> done{false};
 
@@ -771,13 +770,19 @@ void test_session_select_req_session_id_mismatch_disconnects() {
     asio::co_spawn(
         ioc,
         [&]() -> asio::awaitable<void> {
-            // 首次 SELECT.req 的 SessionID 即不匹配，服务端将回拒绝并断开。
             auto ec = co_await client.async_open_active(std::move(client_conn));
-            TEST_EXPECT_EQ(ec, make_error_code(errc::invalid_argument));
+            TEST_EXPECT_OK(ec);
+            TEST_EXPECT(client.is_selected());
+            TEST_EXPECT(server.is_selected());
 
-            asio::steady_timer t(ioc);
-            t.expires_after(10ms);
-            (void)co_await t.async_wait(asio::as_tuple(asio::use_awaitable));
+            // HSMS-SS：控制消息 SessionID 必须为 0xFFFF。发送非法 SessionID 的控制消息，
+            // 期望双方断线收敛。
+            ec = co_await client.async_send(secs::hsms::make_select_req(
+                /*session_id=*/0x0001, client.allocate_system_bytes()));
+            TEST_EXPECT_OK(ec);
+
+            TEST_EXPECT_OK(co_await client.async_wait_reader_stopped(200ms));
+            TEST_EXPECT_OK(co_await server.async_wait_reader_stopped(200ms));
 
             TEST_EXPECT_EQ(server.state(),
                            secs::hsms::SessionState::disconnected);
@@ -825,7 +830,7 @@ void test_session_deselect_req_moves_to_not_selected() {
             TEST_EXPECT_OK(ec);
 
             ec = co_await client.async_send(secs::hsms::make_deselect_req(
-                opt.session_id, client.allocate_system_bytes()));
+                0xFFFF, client.allocate_system_bytes()));
             TEST_EXPECT_OK(ec);
 
             asio::steady_timer t(ioc);
@@ -1024,7 +1029,7 @@ void test_session_unknown_control_type_is_ignored() {
 
             // 发送 Reject.req（当前实现走“默认分支”，忽略）。
             Message m;
-            m.header.session_id = opt.session_id;
+            m.header.session_id = 0xFFFF;
             m.header.p_type = secs::hsms::kPTypeSecs2;
             m.header.s_type = secs::hsms::SType::reject_req;
             m.header.system_bytes = client.allocate_system_bytes();
@@ -1077,7 +1082,8 @@ void test_session_control_response_type_mismatch_times_out() {
             TEST_EXPECT_OK(ec1);
             TEST_EXPECT_EQ(m1.header.s_type, secs::hsms::SType::select_req);
             ec1 = co_await server_conn.async_write_message(
-                secs::hsms::make_select_rsp(0, m1.header.system_bytes));
+                secs::hsms::make_select_rsp(
+                    m1.header.session_id, 0, m1.header.system_bytes));
             TEST_EXPECT_OK(ec1);
 
             auto [ec2, m2] = co_await server_conn.async_read_message();
@@ -1086,7 +1092,8 @@ void test_session_control_response_type_mismatch_times_out() {
 
             // 故意使用相同 SystemBytes 回一个 select.rsp（而不是 linktest.rsp）
             (void)co_await server_conn.async_write_message(
-                secs::hsms::make_select_rsp(0, m2.header.system_bytes));
+                secs::hsms::make_select_rsp(
+                    m2.header.session_id, 0, m2.header.system_bytes));
             co_return;
         },
         asio::detached);
@@ -1174,7 +1181,8 @@ void test_session_select_timeout_late_select_rsp_is_ignored() {
             (void)co_await t.async_wait(asio::as_tuple(asio::use_awaitable));
 
             ec1 = co_await server_conn.async_write_message(
-                secs::hsms::make_select_rsp(0, m1.header.system_bytes));
+                secs::hsms::make_select_rsp(
+                    m1.header.session_id, 0, m1.header.system_bytes));
             TEST_EXPECT_OK(ec1);
             co_return;
         },
@@ -1194,7 +1202,9 @@ void test_session_select_timeout_late_select_rsp_is_ignored() {
             t.expires_after(40ms);
             (void)co_await t.async_wait(asio::as_tuple(asio::use_awaitable));
 
-            TEST_EXPECT_EQ(client.state(), secs::hsms::SessionState::connected);
+            // T6 超时按“通信失败”处理：会话应断线收敛，迟到响应不得改变状态。
+            TEST_EXPECT_EQ(client.state(),
+                           secs::hsms::SessionState::disconnected);
             TEST_EXPECT(!client.is_selected());
             TEST_EXPECT_EQ(client.selected_generation(), gen0);
 
@@ -1238,7 +1248,8 @@ void test_session_pending_cancelled_on_disconnect() {
             TEST_EXPECT_OK(ec1);
             TEST_EXPECT_EQ(m1.header.s_type, secs::hsms::SType::select_req);
             ec1 = co_await server_conn.async_write_message(
-                secs::hsms::make_select_rsp(0, m1.header.system_bytes));
+                secs::hsms::make_select_rsp(
+                    m1.header.session_id, 0, m1.header.system_bytes));
             TEST_EXPECT_OK(ec1);
 
             auto [ec2, m2] = co_await server_conn.async_read_message();
@@ -1246,7 +1257,7 @@ void test_session_pending_cancelled_on_disconnect() {
             TEST_EXPECT_EQ(m2.header.s_type, secs::hsms::SType::data);
 
             (void)co_await server_conn.async_write_message(
-                secs::hsms::make_separate_req(opt.session_id, 0xABCDEF01));
+                secs::hsms::make_separate_req(0xFFFF, 0xABCDEF01));
             (void)co_await server_conn.async_close();
             co_return;
         },
@@ -1302,14 +1313,16 @@ void test_session_deselect_drops_inbound_data_when_not_selected() {
             TEST_EXPECT_OK(ec1);
             TEST_EXPECT_EQ(m1.header.s_type, secs::hsms::SType::select_req);
             ec1 = co_await server_conn.async_write_message(
-                secs::hsms::make_select_rsp(0, m1.header.system_bytes));
+                secs::hsms::make_select_rsp(
+                    m1.header.session_id, 0, m1.header.system_bytes));
             TEST_EXPECT_OK(ec1);
 
             auto [ec2, m2] = co_await server_conn.async_read_message();
             TEST_EXPECT_OK(ec2);
             TEST_EXPECT_EQ(m2.header.s_type, secs::hsms::SType::deselect_req);
             ec2 = co_await server_conn.async_write_message(
-                secs::hsms::make_deselect_rsp(0, m2.header.system_bytes));
+                secs::hsms::make_deselect_rsp(
+                    m2.header.session_id, 0, m2.header.system_bytes));
             TEST_EXPECT_OK(ec2);
 
             const std::vector<byte> body = {0xDE, 0xAD};
@@ -1334,7 +1347,7 @@ void test_session_deselect_drops_inbound_data_when_not_selected() {
             TEST_EXPECT(client.is_selected());
 
             ec = co_await client.async_send(secs::hsms::make_deselect_req(
-                opt.session_id, client.allocate_system_bytes()));
+                0xFFFF, client.allocate_system_bytes()));
             TEST_EXPECT_OK(ec);
 
             asio::steady_timer t(ioc);
@@ -1445,7 +1458,8 @@ void test_session_linktest_interval_disconnect_on_failure() {
             TEST_EXPECT_OK(ec1);
             TEST_EXPECT_EQ(m1.header.s_type, secs::hsms::SType::select_req);
             ec1 = co_await server_conn.async_write_message(
-                secs::hsms::make_select_rsp(0, m1.header.system_bytes));
+                secs::hsms::make_select_rsp(
+                    m1.header.session_id, 0, m1.header.system_bytes));
             TEST_EXPECT_OK(ec1);
 
             // 读取并丢弃若干 linktest.req（不回复）
@@ -1515,7 +1529,8 @@ void test_session_linktest_interval_disconnects_after_threshold() {
             TEST_EXPECT_OK(ec1);
             TEST_EXPECT_EQ(m1.header.s_type, secs::hsms::SType::select_req);
             ec1 = co_await server_conn.async_write_message(
-                secs::hsms::make_select_rsp(0, m1.header.system_bytes));
+                secs::hsms::make_select_rsp(
+                    m1.header.session_id, 0, m1.header.system_bytes));
             TEST_EXPECT_OK(ec1);
 
             while (server_conn.is_open()) {
@@ -1634,7 +1649,8 @@ void test_session_separate_clears_inbound_and_cancels_pending() {
             TEST_EXPECT_OK(ec1);
             TEST_EXPECT_EQ(m1.header.s_type, secs::hsms::SType::select_req);
             ec1 = co_await server_conn.async_write_message(
-                secs::hsms::make_select_rsp(0, m1.header.system_bytes));
+                secs::hsms::make_select_rsp(
+                    m1.header.session_id, 0, m1.header.system_bytes));
             TEST_EXPECT_OK(ec1);
 
             const std::vector<byte> body = {0xAA, 0xBB};
@@ -1653,7 +1669,7 @@ void test_session_separate_clears_inbound_and_cancels_pending() {
             TEST_EXPECT(m2.w_bit());
 
             (void)co_await server_conn.async_write_message(
-                secs::hsms::make_separate_req(opt.session_id, 0xABCDEF01));
+                secs::hsms::make_separate_req(0xFFFF, 0xABCDEF01));
             (void)co_await server_conn.async_close();
             co_return;
         },
@@ -1770,7 +1786,7 @@ void test_session_reopen_after_separate() {
 
             // 触发断线
             auto ec = co_await server.async_send(secs::hsms::make_separate_req(
-                opt.session_id, server.allocate_system_bytes()));
+                0xFFFF, server.allocate_system_bytes()));
             TEST_EXPECT_OK(ec);
 
             // 第二次连接（模拟重连）
@@ -1930,33 +1946,46 @@ void test_run_active_exits_when_auto_reconnect_disabled() {
 } // namespace
 
 int main() {
-    test_message_encode_decode_roundtrip();
-    test_timer_wait_and_cancel();
-    test_connection_loopback_framing();
-    test_connection_t8_intercharacter_timeout();
-    test_connection_t8_disabled();
-    test_connection_null_stream_and_tcpstream_error_paths();
-    test_connection_async_read_message_invalid_frames();
-    test_connection_write_serialization_waiters();
-    test_session_select_and_linktest();
-    test_session_select_req_when_already_selected();
-    test_session_select_req_session_id_mismatch_disconnects();
-    test_session_deselect_req_moves_to_not_selected();
-    test_session_select_reject();
-    test_session_open_passive_socket_overload_executes();
-    test_session_control_response_type_mismatch_times_out();
-    test_session_t6_timeout_on_select();
-    test_session_select_timeout_late_select_rsp_is_ignored();
-    test_session_pending_cancelled_on_disconnect();
-    test_session_deselect_drops_inbound_data_when_not_selected();
-    test_session_t3_reply_timeout();
-    test_session_linktest_interval_disconnect_on_failure();
-    test_session_linktest_interval_disconnects_after_threshold();
-    test_async_wait_selected_timeout();
-    test_async_wait_selected_success();
-    test_session_separate_clears_inbound_and_cancels_pending();
-    test_session_reopen_after_separate();
-    test_session_concurrent_sends_system_bytes_unique();
-    test_run_active_exits_when_auto_reconnect_disabled();
+    // 仅用于本地调试定位“卡住在哪个用例”，默认不输出；按需设置：
+    // SECS_TEST_TRACE=1 ./build/tests/test_hsms_transport
+#define RUN_TEST(fn)                                                           \
+    do {                                                                       \
+        if (std::getenv("SECS_TEST_TRACE") != nullptr) {                       \
+            std::fprintf(stderr, "[hsms_transport] %s\n", #fn);                \
+            std::fflush(stderr);                                               \
+        }                                                                      \
+        fn();                                                                  \
+    } while (0)
+
+    RUN_TEST(test_message_encode_decode_roundtrip);
+    RUN_TEST(test_timer_wait_and_cancel);
+    RUN_TEST(test_connection_loopback_framing);
+    RUN_TEST(test_connection_t8_intercharacter_timeout);
+    RUN_TEST(test_connection_t8_disabled);
+    RUN_TEST(test_connection_null_stream_and_tcpstream_error_paths);
+    RUN_TEST(test_connection_async_read_message_invalid_frames);
+    RUN_TEST(test_connection_write_serialization_waiters);
+    RUN_TEST(test_session_select_and_linktest);
+    RUN_TEST(test_session_select_req_when_already_selected);
+    RUN_TEST(test_session_select_req_session_id_mismatch_disconnects);
+    RUN_TEST(test_session_deselect_req_moves_to_not_selected);
+    RUN_TEST(test_session_select_reject);
+    RUN_TEST(test_session_open_passive_socket_overload_executes);
+    RUN_TEST(test_session_control_response_type_mismatch_times_out);
+    RUN_TEST(test_session_t6_timeout_on_select);
+    RUN_TEST(test_session_select_timeout_late_select_rsp_is_ignored);
+    RUN_TEST(test_session_pending_cancelled_on_disconnect);
+    RUN_TEST(test_session_deselect_drops_inbound_data_when_not_selected);
+    RUN_TEST(test_session_t3_reply_timeout);
+    RUN_TEST(test_session_linktest_interval_disconnect_on_failure);
+    RUN_TEST(test_session_linktest_interval_disconnects_after_threshold);
+    RUN_TEST(test_async_wait_selected_timeout);
+    RUN_TEST(test_async_wait_selected_success);
+    RUN_TEST(test_session_separate_clears_inbound_and_cancels_pending);
+    RUN_TEST(test_session_reopen_after_separate);
+    RUN_TEST(test_session_concurrent_sends_system_bytes_unique);
+    RUN_TEST(test_run_active_exits_when_auto_reconnect_disabled);
+
+#undef RUN_TEST
     return ::secs::tests::run_and_report();
 }

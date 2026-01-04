@@ -6,6 +6,23 @@
 
 namespace secs::sml {
 
+/*
+ * SML（SECS Message Language）语法分析器实现。
+ *
+ * 输入/输出：
+ * - 输入：Lexer 产生的 Token 序列
+ * - 输出：Document AST（消息模板、定时规则、条件响应规则等）
+ *
+ * 解析要点：
+ * - 支持解析 SxFy（例如 S1F1 / S15F32）；
+ * - 支持数值字面量（十进制与 0x 十六进制）以及浮点数；
+ * - 解析失败时返回 parser_errc，并携带 line/column + 错误信息，便于用户定位。
+ *
+ * 说明：
+ * - 该解析器以“可读性优先”为目标，错误恢复策略较保守（遇错尽早返回），
+ *   适合在配置加载阶段快速暴露问题。
+ */
+
 namespace {
 
 class ParserErrorCategory : public std::error_category {

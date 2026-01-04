@@ -50,8 +50,14 @@ struct SessionOptions final {
  *
  * 说明：
  * - HSMS（全双工）推荐同时运行 async_run，用于接收并分发消息、唤醒挂起的请求。
- * - SECS-I（半双工）不建议在 async_run 运行期间并发调用
- * async_request/async_send。
+ * - SECS-I（半双工）当前实现不提供“内部排队/自动串行化”：
+ *   1) `async_request/async_send` 请不要并发调用；
+ *   2) 若你需要在多线程环境中使用，建议把所有调用统一调度到一个
+ *      `asio::strand`（或自行加互斥/发送队列），确保底层串口不会被并发读写。
+ *
+ * 你提到的典型问题（多线程 Host 并发发送）在这一层的体现是：
+ * - SECS-I 后端的底层状态机要求“同一时刻只能有一个收发操作”；并发调用会返回
+ *   `invalid_argument`，从而避免把字节流写乱。
  */
 class Session final {
 public:

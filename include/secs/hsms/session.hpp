@@ -27,6 +27,8 @@ enum class SessionState : std::uint8_t {
 };
 
 struct SessionOptions final {
+    // HSMS-SS：data message 的 SessionID（Device ID，低 15 位有效）。
+    // 控制消息（SELECT/LINKTEST/SEPARATE 等）SessionID 固定为 0xFFFF。
     std::uint16_t session_id{0};
 
     // HSMS 定时器（默认值偏向测试可控，生产使用建议由上层显式配置）。

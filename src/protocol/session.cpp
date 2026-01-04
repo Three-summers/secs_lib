@@ -14,6 +14,30 @@
 namespace secs::protocol {
 namespace {
 
+/*
+ * protocol::Session 实现（协议层统一收发接口）。
+ *
+ * 本模块把底层传输层（HSMS / SECS-I）统一抽象为 `DataMessage`：
+ * - stream/function/w_bit/system_bytes/body
+ * - 便于上层用 Router 按 SxFy 注册处理器、发起 request/response。
+ *
+ * SystemBytes 与请求-响应：
+ * - 本端发送 primary 时会分配一个唯一的 system_bytes；
+ * - 对端 secondary 必须回显相同 system_bytes，用于匹配挂起请求；
+ * - 该策略由 SystemBytes 分配器保证“本端当前在用值唯一”。
+ *
+ * 并发模型（与 include/secs/protocol/session.hpp 的说明保持一致）：
+ * - HSMS（全双工）：只允许一个接收循环读取连接；async_request 会确保 async_run
+ *   只启动一次，由 async_run 串行收包并优先 fulfill pending（请求-响应），再把
+ *   入站 primary 交给 Router。
+ * - SECS-I（半双工）：底层 StateMachine 不提供内部排队；async_request 在等待
+ *   secondary 的同时，自己驱动接收并处理可能插入的 primary（按 Router 路由）。
+ *
+ * 错误处理：
+ * - 接收侧任意错误会 cancel 全部 pending，避免调用方协程永久挂起；
+ * - 超时以 std::error_code 返回（errc::timeout），不抛异常。
+ */
+
 using secs::core::errc;
 using secs::core::make_error_code;
 
@@ -45,19 +69,6 @@ normalize_timeout(secs::core::duration d) noexcept {
 
 } // namespace
 
-/*
- * protocol::Session 统一 HSMS 与 SECS-I 的消息收发：
- *
- * - HSMS（全双工）：
- *   - 为避免“多个请求协程并发读取同一连接”造成竞争，async_request 会确保
- * async_run 只启动一次；
- *   - 入站消息由 async_run 统一接收并分发：先尝试匹配
- * pending（请求-响应），否则按 Router 路由给业务处理器。
- *
- * - SECS-I（半双工）：
- *   - async_request 自己驱动接收循环，在等待 secondary
- * 的同时，也会处理可能插入的 primary（按 Router 路由）。
- */
 Session::Session(secs::hsms::Session &hsms,
                  std::uint16_t session_id,
                  SessionOptions options)

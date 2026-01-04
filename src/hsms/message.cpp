@@ -6,6 +6,30 @@
 namespace secs::hsms {
 namespace {
 
+/*
+ * HSMS 字节级编解码（SEMI E37）：
+ *
+ * - TCP 帧格式：
+ *   [Message Length: 4B big-endian] [Header: 10B] [Message Text: 0..N]
+ *
+ * - Header(10B) 字段布局：
+ *   - session_id     : 2B
+ *   - header_byte2   : 1B
+ *   - header_byte3   : 1B
+ *   - p_type         : 1B（本库仅支持 0x00=SECS-II）
+ *   - s_type         : 1B（0=data，其它为控制消息）
+ *   - system_bytes   : 4B（请求-响应关联）
+ *
+ * - 字段语义的层次划分：
+ *   - 本文件只做“字节级”封装/解析（含长度上限校验），不关心会话状态机；
+ *   - 例如：HSMS-SS 控制消息 SessionID=0xFFFF 等约束在 Session 层完成。
+ *
+ * - header_byte2 的复用约定（与 include/secs/hsms/message.hpp 保持一致）：
+ *   - data message：bit7=W-bit，低 7 位为 Stream
+ *   - Select/Deselect.rsp：header_byte2 = status
+ *   - Reject.req：header_byte2 = reason code；body 回显被拒绝消息的 10B header
+ */
+
 std::uint16_t read_u16_be(const core::byte *p) noexcept {
     return static_cast<std::uint16_t>((static_cast<std::uint16_t>(p[0]) << 8U) |
                                       static_cast<std::uint16_t>(p[1]));
@@ -61,9 +85,12 @@ Message make_select_req(std::uint16_t session_id, std::uint32_t system_bytes) {
     return make_control_base(SType::select_req, session_id, system_bytes);
 }
 
-Message make_select_rsp(std::uint16_t status, std::uint32_t system_bytes) {
-    // 约定：Select.rsp 的 SessionID 字段承载响应码（0=接受，非0=拒绝）。
-    return make_control_base(SType::select_rsp, status, system_bytes);
+Message make_select_rsp(std::uint16_t session_id,
+                        std::uint8_t status,
+                        std::uint32_t system_bytes) {
+    auto m = make_control_base(SType::select_rsp, session_id, system_bytes);
+    m.header.header_byte2 = status;
+    return m;
 }
 
 Message make_deselect_req(std::uint16_t session_id,
@@ -71,8 +98,12 @@ Message make_deselect_req(std::uint16_t session_id,
     return make_control_base(SType::deselect_req, session_id, system_bytes);
 }
 
-Message make_deselect_rsp(std::uint16_t status, std::uint32_t system_bytes) {
-    return make_control_base(SType::deselect_rsp, status, system_bytes);
+Message make_deselect_rsp(std::uint16_t session_id,
+                          std::uint8_t status,
+                          std::uint32_t system_bytes) {
+    auto m = make_control_base(SType::deselect_rsp, session_id, system_bytes);
+    m.header.header_byte2 = status;
+    return m;
 }
 
 Message make_linktest_req(std::uint16_t session_id,
@@ -84,13 +115,13 @@ Message make_linktest_rsp(std::uint16_t session_id, std::uint32_t system_bytes) 
     return make_control_base(SType::linktest_rsp, session_id, system_bytes);
 }
 
-Message make_reject_req(std::uint16_t reason_code,
+Message make_reject_req(std::uint8_t reason_code,
                         const Header &rejected_header) {
-    // 约定：Reject.req 的 SessionID 字段承载 reason code（与 Select/Deselect.rsp
-    // 同套路）；消息体携带被拒绝消息的 10B header（字节级回显）。
+    // Reject.req：消息体携带被拒绝消息的 10B header（字节级回显）。
     auto m = make_control_base(SType::reject_req,
-                               reason_code,
+                               rejected_header.session_id,
                                rejected_header.system_bytes);
+    m.header.header_byte2 = reason_code;
     m.body = encode_header_bytes(rejected_header);
     return m;
 }

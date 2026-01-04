@@ -31,7 +31,26 @@ enum class SType : std::uint8_t {
 };
 
 struct Header final {
+    /**
+     * @brief HSMS SessionID（2B）。
+     *
+     * 语义提示（HSMS-SS 常见约定）：
+     * - 控制消息（SELECT/LINKTEST/SEPARATE 等）：通常固定为 0xFFFF；
+     * - 数据消息（SType=0）：通常低 15 位为 DeviceID（高位为 0）。
+     *
+     * 注意：本库对“控制消息必须为 0xFFFF”的强校验在 Session 层完成，
+     * Header/Message 只负责承载字节级字段。
+     */
     std::uint16_t session_id{0};
+
+    /**
+     * @brief Header Byte 2（1B）。
+     *
+     * - 数据消息：bit7=W-bit，其余 7 bit 为 Stream（0..127）
+     * - 控制消息：E37 对该字段通常定义为保留/状态码等；本库约定：
+     *   - Select.rsp / Deselect.rsp：header_byte2 = status（0=OK）
+     *   - Reject.req：header_byte2 = reason code
+     */
     std::uint8_t header_byte2{0};
     std::uint8_t header_byte3{0};
     std::uint8_t p_type{kPTypeSecs2};
@@ -65,18 +84,22 @@ struct Message final {
 // 控制消息构造助手：控制消息默认消息体为空，header_byte2/3 为 0。
 [[nodiscard]] Message make_select_req(std::uint16_t session_id,
                                       std::uint32_t system_bytes);
-[[nodiscard]] Message make_select_rsp(std::uint16_t status,
+// Select.rsp：header_byte2 承载 1B 状态码（0=接受，其它为拒绝原因）。
+[[nodiscard]] Message make_select_rsp(std::uint16_t session_id,
+                                      std::uint8_t status,
                                       std::uint32_t system_bytes);
 [[nodiscard]] Message make_deselect_req(std::uint16_t session_id,
                                         std::uint32_t system_bytes);
-[[nodiscard]] Message make_deselect_rsp(std::uint16_t status,
+// Deselect.rsp：header_byte2 承载 1B 状态码（0=接受，其它为拒绝原因）。
+[[nodiscard]] Message make_deselect_rsp(std::uint16_t session_id,
+                                        std::uint8_t status,
                                         std::uint32_t system_bytes);
 [[nodiscard]] Message make_linktest_req(std::uint16_t session_id,
                                         std::uint32_t system_bytes);
 [[nodiscard]] Message make_linktest_rsp(std::uint16_t session_id,
                                         std::uint32_t system_bytes);
-// Reject.req：SessionID 字段承载 reason code；body 为被拒绝消息的 10B header。
-[[nodiscard]] Message make_reject_req(std::uint16_t reason_code,
+// Reject.req：header_byte2 承载 1B reason code；body 为被拒绝消息的 10B header。
+[[nodiscard]] Message make_reject_req(std::uint8_t reason_code,
                                       const Header &rejected_header);
 [[nodiscard]] Message make_separate_req(std::uint16_t session_id,
                                         std::uint32_t system_bytes);

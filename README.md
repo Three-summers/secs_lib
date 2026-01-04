@@ -20,7 +20,7 @@
 本节只记录“会影响互通/集成/测试统计口径”的差异点，不贴源码（你可按路径自行阅读）。
 
 - HSMS：未知 `SType` 不再作为解码错误；允许解析并保留原始值，供上层发送 `Reject.req`
-  - 新增：`make_reject_req()`（Reject.req：SessionID 字段承载 reason code；body 为被拒绝消息的 10B header）
+  - 新增：`make_reject_req()`（Reject.req：`header_byte2` 承载 reason code；body 为被拒绝消息的 10B header）
   - 文件：`include/secs/hsms/message.hpp`、`src/hsms/message.cpp`
   - 覆盖测试：`tests/test_hsms_transport.cpp`（搜索 `unknown SType` / `reject`）
 - HSMS：控制消息优先级与 NOT_SELECTED 写门禁
@@ -418,7 +418,7 @@ cmake -S . -B build -DSECS_ENABLE_COVERAGE=ON
 
 关键调用顺序（对照源码阅读）：
 
-1. 构造 `hsms::SessionOptions`（至少设置 `session_id`；生产环境建议显式设置各定时器）
+1. 构造 `hsms::SessionOptions`（至少设置 data message 的 `session_id`（DeviceID，0..32767）；HSMS-SS 控制消息 SessionID 固定为 `0xFFFF`）
 2. 构造 `hsms::Session`（需要 `asio::any_io_executor`）
 3. `async_open_active(endpoint)`：TCP 建连 + `SELECT` 握手，成功后进入 selected
 4. `async_request_data(stream,function,body)`：发送 data primary（W=1），等待同 `system_bytes` 的 data secondary（受 T3/timeout 控制）
@@ -433,7 +433,7 @@ cmake -S . -B build -DSECS_ENABLE_COVERAGE=ON
 
 #### Active（客户端）典型流程
 
-1. 构造 `hsms::SessionOptions`（至少设置 `session_id`，生产建议显式设置各定时器）
+1. 构造 `hsms::SessionOptions`（至少设置 data message 的 `session_id`（DeviceID，0..32767）；HSMS-SS 控制消息 SessionID 固定为 `0xFFFF`）
 2. 构造 `hsms::Session`（需要一个 `asio::any_io_executor`）
 3. `co_await session.async_open_active(endpoint)` 建连并完成 `SELECT` 握手
 4. 通过 `async_request_data()` / `async_send()` / `async_receive_data()` 收发消息
@@ -931,7 +931,7 @@ HSMS vs SECS-I 在 sb 的差异：
 
 [A] Block（字节级编解码）：
   - 协议常量：include/secs/secs1/block.hpp
-      * kHeaderSize=10, kMaxBlockDataSize=243, frame = 1 + length + 2
+      * kHeaderSize=10, kMaxBlockDataSize=244, frame = 1 + length + 2
   - 编码/解码：encode_block / decode_block
   - 实现：src/secs1/block.cpp
   - 测试：tests/test_secs1_framing.cpp（含恶意 frame、边界长度）
@@ -1314,15 +1314,15 @@ async_open_active(endpoint)
         +-- start_reader_()  // co_spawn(reader_loop_)（单一读协程开始串行读取 HSMS 帧）
         |
         +-- SELECT 事务（T6）：
-        |     req = make_select_req(session_id, allocate_system_bytes())
+        |     req = make_select_req(0xFFFF, allocate_system_bytes())  // HSMS-SS：控制消息 SessionID 固定 0xFFFF
         |     async_control_transaction_(req, expected=select_rsp, timeout=T6)
         |       - pending_[sb] = Pending(expected_stype=select_rsp)
         |       - connection_.async_write_message(req)
         |       - Pending::ready.async_wait(T6)
-        |       - 若 T6 超时：connection_.async_close() + on_disconnected(timeout)
+        |       - 若 T6 超时：close + on_disconnected(timeout)（按通信失败处理）
         |
         +-- 收到 SELECT.rsp：
-	      - rsp.header.session_id == 0  => set_selected_()
+	      - rsp.header.header_byte2 == 0  => set_selected_()
 	      - 否则 => close + on_disconnected(invalid_argument)
 ```
 
@@ -1409,10 +1409,10 @@ Pending 结构（去看：include/secs/hsms/session.hpp::Pending）：
            pending->ec = ok
            pending->ready.set()
 
-“超时为什么要当断线处理？”（实现的明确选择）：
-  - 控制事务 T6 超时：close + on_disconnected(timeout)
-  - 数据事务 T3 超时：close + on_disconnected(timeout)
-理由：避免会话进入“我以为还连着/对端以为已经断开”的半状态，强制收敛到 disconnected。
+“超时策略”（对齐 HSMS/HSMS-SS 语义）：
+  - SELECT 控制事务 T6 超时：通信失败，断线收敛（close + on_disconnected(timeout)）
+  - LINKTEST：async_linktest 返回 timeout；linktest_loop_ 按 linktest_max_consecutive_failures 决定何时断线（默认 1 次失败即断线）
+  - 数据事务 T3 超时：只取消事务并返回 timeout，保持连接；迟到响应可能进入 inbound_data_（由上层决定是否丢弃/记录）
 ```
 
 #### 16.6 linktest_loop_（周期心跳）与 selected_generation_（防止“重连后旧协程继续跑”）
@@ -1515,8 +1515,8 @@ frame:
   +---------+-------------------------------+--------------------+
 
 约束：
-  - 10 <= Len <= 253
-  - 0 <= N <= 243（kMaxBlockDataSize）
+  - 10 <= Len <= 254
+  - 0 <= N <= 244（kMaxBlockDataSize）
   - Checksum 为对 Len 之后 “Len 个字节” 求和（mod 65536）
 
 Header(10B) 的 bit 布局（去看：include/secs/secs1/block.hpp::Header 注释）：
@@ -1777,11 +1777,11 @@ T8（hsms::Connection）：
 
 T6（hsms::Session 控制事务）：
   - 表示“控制交互超时”（SELECT/DESELECT/LINKTEST）
-  - 实现选择：超时即 close + on_disconnected(timeout)
+  - 实现选择：超时只返回 timeout；是否断线由调用方/策略决定（例如 linktest 连续失败阈值触发断线）
 
 T3（hsms::Session 数据事务 / protocol::Session 请求-响应）：
   - 表示“等待回应超时”
-  - HSMS 会话层：超时即 close + on_disconnected(timeout)
+  - HSMS 会话层：超时返回给调用者（不强制断线）
   - 协议层：超时返回给调用者（HSMS 情况下会同时 erase pending 并 release(sb)）
 
 T1/T2/T4（secs1::StateMachine）：

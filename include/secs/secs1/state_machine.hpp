@@ -33,9 +33,24 @@ struct ReceivedMessage final {
  *
  * 覆盖能力：
  * - ENQ/EOT 握手（支持 NAK 拒绝 + 重试）
- * - Block 分包/重组（≤243B/block）
+ * - Block 分包/重组（≤244B/block）
  * - Checksum/DeviceID 校验（失败返回 NAK）
  * - T1/T2/T3/T4 超时
+ *
+ * 并发与线程安全（非常重要）：
+ * - SECS-I 是“半双工 + 字节流”，同一条 Link 在同一时刻只能由一个协程驱动读写。
+ * - 本类不做内部互斥/排队：当 state()!=idle 时再次调用
+ *   async_send/async_receive/async_transact 会返回 `invalid_argument`。
+ *   这样做的目的，是避免并发读写导致字节流交错（例如把对端的 ENQ/ACK 当成自己
+ *   正在等待的字节），从而引发难以定位的协议错误。
+ * - 若你的 Host/Equipment 是多线程：请在上层把所有对同一个 StateMachine/Link 的
+ *   调用串行化（例如使用 `asio::strand`，或在业务层加发送队列/互斥锁）。
+ *
+ * 与你提到的“多线程 Host”典型问题的关系：
+ * - 正常情况下：发送方发出一个 block frame 后，接收方必须先回 ACK/NAK，
+ *   再能进入新的 ENQ 发送流程。
+ * - 若对端实现违规（例如多线程并发写串口，导致在 ACK 之前就发送 ENQ），
+ *   本实现会把这种字节序列视为协议错误并返回相应 error_code。
  */
 class StateMachine final {
 public:
