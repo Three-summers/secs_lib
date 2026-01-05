@@ -319,7 +319,10 @@ Connection::async_write_message(const Message &msg) {
     }
 
     auto req = std::make_shared<WriteRequest>();
-    req->frame = encode_frame(msg);
+    auto enc = encode_frame(msg, req->frame);
+    if (enc) {
+        co_return enc;
+    }
     req->is_data = msg.is_data();
 
     if (req->is_data) {

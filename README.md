@@ -290,10 +290,10 @@ target_link_libraries(my_app PRIVATE secs::protocol)
 ### 常用 CMake 选项
 
 ```bash
-# 单元测试（默认 ON）
+# 单元测试（默认：顶层工程 ON，作为子项目 OFF）
 cmake -S . -B build -DSECS_ENABLE_TESTS=ON
 
-# 示例程序（默认 ON）
+# 示例程序（默认：顶层工程 ON，作为子项目 OFF）
 cmake -S . -B build -DSECS_BUILD_EXAMPLES=ON
 
 # 性能基准（默认 OFF）
@@ -301,6 +301,9 @@ cmake -S . -B build -DSECS_BUILD_BENCHMARKS=ON
 
 # 覆盖率（默认 OFF）
 cmake -S . -B build -DSECS_ENABLE_COVERAGE=ON
+
+# 将警告视为错误（默认：顶层工程 ON，作为子项目 OFF）
+cmake -S . -B build -DSECS_ENABLE_WERROR=ON
 ```
 
 ### C 语言集成（C ABI / 对外接口）

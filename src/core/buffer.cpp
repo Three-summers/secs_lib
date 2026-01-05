@@ -35,9 +35,15 @@ FixedBuffer::FixedBuffer(std::size_t initial_capacity, std::size_t max_capacity)
 }
 
 FixedBuffer::FixedBuffer(FixedBuffer &&other) noexcept
-    : inline_(other.inline_), heap_(std::move(other.heap_)),
-      max_capacity_(other.max_capacity_), capacity_(other.capacity_),
-      read_pos_(other.read_pos_), write_pos_(other.write_pos_) {
+    : heap_(std::move(other.heap_)), max_capacity_(other.max_capacity_),
+      capacity_(other.capacity_), read_pos_(other.read_pos_),
+      write_pos_(other.write_pos_) {
+    // 优化：避免在 heap_ 场景下搬运 8KB inline_；仅在 inline_ 场景复制“实际用到”的字节。
+    if (!heap_ && write_pos_ > read_pos_) {
+        std::memcpy(inline_.data() + read_pos_,
+                    other.inline_.data() + read_pos_,
+                    write_pos_ - read_pos_);
+    }
     other.max_capacity_ = 0;
     other.capacity_ = 0;
     other.read_pos_ = 0;
@@ -48,12 +54,17 @@ FixedBuffer &FixedBuffer::operator=(FixedBuffer &&other) noexcept {
     if (this == &other) {
         return *this;
     }
-    inline_ = other.inline_;
     heap_ = std::move(other.heap_);
     max_capacity_ = other.max_capacity_;
     capacity_ = other.capacity_;
     read_pos_ = other.read_pos_;
     write_pos_ = other.write_pos_;
+
+    if (!heap_ && write_pos_ > read_pos_) {
+        std::memcpy(inline_.data() + read_pos_,
+                    other.inline_.data() + read_pos_,
+                    write_pos_ - read_pos_);
+    }
 
     other.max_capacity_ = 0;
     other.capacity_ = 0;

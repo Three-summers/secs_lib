@@ -150,9 +150,35 @@ Message make_data_message(std::uint16_t session_id,
 }
 
 std::vector<core::byte> encode_frame(const Message &msg) {
-    const std::uint32_t payload_len =
-        static_cast<std::uint32_t>(kHeaderSize + msg.body.size());
     std::vector<core::byte> out;
+    auto ec = encode_frame(msg, out);
+    if (ec) {
+        return {};
+    }
+    return out;
+}
+
+std::error_code encode_frame(const Message &msg,
+                             std::vector<core::byte> &out) noexcept {
+    out.clear();
+
+    if (msg.header.p_type != kPTypeSecs2) {
+        return core::make_error_code(core::errc::invalid_argument);
+    }
+
+    const auto header_size = static_cast<std::size_t>(kHeaderSize);
+    const auto max_payload_size = static_cast<std::size_t>(kMaxPayloadSize);
+    if (max_payload_size < header_size) {
+        return core::make_error_code(core::errc::invalid_argument);
+    }
+
+    const std::size_t max_body_size = max_payload_size - header_size;
+    if (msg.body.size() > max_body_size) {
+        return core::make_error_code(core::errc::buffer_overflow);
+    }
+
+    const auto payload_len = static_cast<std::uint32_t>(header_size +
+                                                        msg.body.size());
     out.resize(static_cast<std::size_t>(kLengthFieldSize) + payload_len);
 
     write_u32_be(out.data(), payload_len);
@@ -169,7 +195,7 @@ std::vector<core::byte> encode_frame(const Message &msg) {
         std::memcpy(h + kHeaderSize, msg.body.data(), msg.body.size());
     }
 
-    return out;
+    return {};
 }
 
 std::error_code decode_payload(core::bytes_view payload,

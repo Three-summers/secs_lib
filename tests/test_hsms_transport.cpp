@@ -262,6 +262,76 @@ void test_message_encode_decode_roundtrip() {
     }
 }
 
+void test_encode_frame_rejects_oversized_payload() {
+    const std::size_t max_body =
+        static_cast<std::size_t>(secs::hsms::kMaxPayloadSize) -
+        secs::hsms::kHeaderSize;
+    std::vector<byte> body(max_body + 1u, 0);
+
+    Message msg;
+    msg.header.session_id = 0x0001;
+    msg.header.header_byte2 = 0x01; // stream=1, W=0
+    msg.header.header_byte3 = 0x01; // function=1
+    msg.header.p_type = secs::hsms::kPTypeSecs2;
+    msg.header.s_type = secs::hsms::SType::data;
+    msg.header.system_bytes = 0x01020304;
+    msg.body = std::move(body);
+
+    std::vector<byte> frame;
+    auto ec = secs::hsms::encode_frame(msg, frame);
+    TEST_EXPECT_EQ(ec, make_error_code(errc::buffer_overflow));
+    TEST_EXPECT(frame.empty());
+
+    // 便捷重载在失败时返回空 vector（如需错误码请使用 out 参数版本）。
+    const auto frame2 = secs::hsms::encode_frame(msg);
+    TEST_EXPECT(frame2.empty());
+
+    // PType 不支持：应返回 invalid_argument
+    msg.body.clear();
+    msg.header.p_type = 0x01;
+    ec = secs::hsms::encode_frame(msg, frame);
+    TEST_EXPECT_EQ(ec, make_error_code(errc::invalid_argument));
+}
+
+void test_connection_write_rejects_oversized_message() {
+    asio::io_context ioc;
+    auto duplex = make_memory_duplex(ioc.get_executor());
+
+    Connection client_conn(std::move(duplex.client_stream),
+                           ConnectionOptions{.t8 = 50ms});
+    Connection server_conn(std::move(duplex.server_stream),
+                           ConnectionOptions{.t8 = 50ms});
+    (void)server_conn.executor();
+
+    const std::size_t max_body =
+        static_cast<std::size_t>(secs::hsms::kMaxPayloadSize) -
+        secs::hsms::kHeaderSize;
+    std::vector<byte> body(max_body + 1u, 0);
+
+    Message msg;
+    msg.header.session_id = 0x0001;
+    msg.header.header_byte2 = 0x01;
+    msg.header.header_byte3 = 0x01;
+    msg.header.p_type = secs::hsms::kPTypeSecs2;
+    msg.header.s_type = secs::hsms::SType::data;
+    msg.header.system_bytes = 0x11223344;
+    msg.body = std::move(body);
+
+    std::atomic<bool> done{false};
+    asio::co_spawn(
+        ioc,
+        [&client_conn, &done, msg = std::move(msg)]() -> asio::awaitable<void> {
+            auto ec = co_await client_conn.async_write_message(msg);
+            TEST_EXPECT_EQ(ec, make_error_code(errc::buffer_overflow));
+            done = true;
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(done.load());
+}
+
 void test_timer_wait_and_cancel() {
     asio::io_context ioc;
     Timer t(ioc.get_executor());
@@ -1958,6 +2028,8 @@ int main() {
     } while (0)
 
     RUN_TEST(test_message_encode_decode_roundtrip);
+    RUN_TEST(test_encode_frame_rejects_oversized_payload);
+    RUN_TEST(test_connection_write_rejects_oversized_message);
     RUN_TEST(test_timer_wait_and_cancel);
     RUN_TEST(test_connection_loopback_framing);
     RUN_TEST(test_connection_t8_intercharacter_timeout);

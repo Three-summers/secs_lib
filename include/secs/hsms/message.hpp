@@ -113,6 +113,11 @@ struct Message final {
                                         core::bytes_view body);
 
 // 编码：输出完整 TCP 帧（长度字段 4B + 头部 10B + 消息体）。
+// 注意：
+// - 该函数会校验 payload 上限（kMaxPayloadSize）与 PType（仅支持 0x00=SECS-II）。
+// - 如需拿到错误码，请优先使用带 out 参数的重载。
+std::error_code encode_frame(const Message &msg,
+                             std::vector<core::byte> &out) noexcept;
 [[nodiscard]] std::vector<core::byte> encode_frame(const Message &msg);
 
 // 解码：输入完整 TCP 帧（含 4B 长度字段），若成功 consumed 为该帧总长度。

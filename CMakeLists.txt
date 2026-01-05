@@ -5,16 +5,17 @@ project(secs
   LANGUAGES C CXX
 )
 
-option(SECS_ENABLE_TESTS "Build unit tests" ON)
-option(SECS_ENABLE_COVERAGE "Enable coverage helper targets/flags" OFF)
-option(SECS_BUILD_EXAMPLES "Build example programs" ON)
-option(SECS_BUILD_BENCHMARKS "Build performance benchmarks" OFF)
-
 # 用于判断是独立构建还是作为依赖被嵌入，PROJECT_SOURCE_DIR 取决于当前作用域最近的一次 project()
 set(SECS_PROJECT_IS_TOP_LEVEL OFF)
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
   set(SECS_PROJECT_IS_TOP_LEVEL ON)
 endif()
+
+option(SECS_ENABLE_TESTS "Build unit tests" ${SECS_PROJECT_IS_TOP_LEVEL})
+option(SECS_ENABLE_COVERAGE "Enable coverage helper targets/flags" OFF)
+option(SECS_BUILD_EXAMPLES "Build example programs" ${SECS_PROJECT_IS_TOP_LEVEL})
+option(SECS_BUILD_BENCHMARKS "Build performance benchmarks" OFF)
+option(SECS_ENABLE_WERROR "Treat warnings as errors" ${SECS_PROJECT_IS_TOP_LEVEL})
 
 option(SECS_ENABLE_INSTALL "Enable install() rules and find_package() config" ${SECS_PROJECT_IS_TOP_LEVEL})
 
@@ -169,22 +170,30 @@ target_link_libraries(secs_c_api
     secs_sml
 )
 
+set(_secs_lib_targets
+  secs_core
+  secs_secs1
+  secs_ii
+  secs_hsms
+  secs_protocol
+  secs_sml
+  secs_c_api
+)
+
 if(MSVC)
-  target_compile_options(secs_core PRIVATE /W4 /WX)
-  target_compile_options(secs_secs1 PRIVATE /W4 /WX)
-  target_compile_options(secs_ii PRIVATE /W4 /WX)
-  target_compile_options(secs_hsms PRIVATE /W4 /WX)
-  target_compile_options(secs_protocol PRIVATE /W4 /WX)
-  target_compile_options(secs_sml PRIVATE /W4 /WX)
-  target_compile_options(secs_c_api PRIVATE /W4 /WX)
+  foreach(secs_target IN LISTS _secs_lib_targets)
+    target_compile_options(${secs_target} PRIVATE /W4)
+    if(SECS_ENABLE_WERROR)
+      target_compile_options(${secs_target} PRIVATE /WX)
+    endif()
+  endforeach()
 else()
-  target_compile_options(secs_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
-  target_compile_options(secs_secs1 PRIVATE -Wall -Wextra -Wpedantic -Werror)
-  target_compile_options(secs_ii PRIVATE -Wall -Wextra -Wpedantic -Werror)
-  target_compile_options(secs_hsms PRIVATE -Wall -Wextra -Wpedantic -Werror)
-  target_compile_options(secs_protocol PRIVATE -Wall -Wextra -Wpedantic -Werror)
-  target_compile_options(secs_sml PRIVATE -Wall -Wextra -Wpedantic -Werror)
-  target_compile_options(secs_c_api PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  foreach(secs_target IN LISTS _secs_lib_targets)
+    target_compile_options(${secs_target} PRIVATE -Wall -Wextra -Wpedantic)
+    if(SECS_ENABLE_WERROR)
+      target_compile_options(${secs_target} PRIVATE -Werror)
+    endif()
+  endforeach()
 endif()
 
 include("${PROJECT_SOURCE_DIR}/cmake/AsioStandalone.cmake")
