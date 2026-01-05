@@ -13,6 +13,9 @@ cmake --build build --target examples
 ./build/examples/secs2_simple
 ./build/examples/hsms_server [port]
 ./build/examples/hsms_client [host] [port]
+./build/examples/secs1_loopback
+./build/examples/secs1_serial_server <tty_path>
+./build/examples/secs1_serial_client <tty_path>
 ```
 
 ## HSMS 客户端/服务器示例
@@ -106,6 +109,37 @@ int main() {
 - `tests/test_secs2_codec.cpp` - SECS-II 各种类型编解码
 - `tests/test_hsms_transport.cpp` - HSMS 会话完整流程
 - `tests/test_protocol_session.cpp` - 协议层消息路由
+
+## SECS-I 回环示例（MemoryLink）
+
+`secs1_loopback.cpp` 使用 `secs::secs1::MemoryLink` 在进程内模拟“串口线”，并通过
+`secs::protocol::Session` 跑通 `S1F13(W=1) -> S1F14` 的请求-响应（payload=700B，
+覆盖分包/重组路径）。
+
+## SECS-I 串口/虚拟串口示例（pty / socat）
+
+本仓库提供两个可独立运行的 SECS-I 示例程序：
+
+- `secs1_serial_server`：设备端（Equipment），注册 `S1F13` 回显 handler（自动回 `S1F14`）
+- `secs1_serial_client`：主机端（Host），发送一次 `S1F13(W=1)` 并等待 `S1F14`
+
+推荐用 `socat` 创建一对互联的虚拟串口（pty）进行测试：
+
+```bash
+# 终端 1：创建虚拟串口对（保持该进程不退出）
+socat -d -d pty,raw,echo=0,link=/tmp/secs1_a pty,raw,echo=0,link=/tmp/secs1_b
+
+# 终端 2：启动设备端（使用 /tmp/secs1_b）
+./build/examples/secs1_serial_server /tmp/secs1_b
+
+# 终端 3：启动主机端（使用 /tmp/secs1_a）
+./build/examples/secs1_serial_client /tmp/secs1_a
+```
+
+说明：
+- 上述示例默认 `device_id=1`；如需修改两端需保持一致：`--device-id <n>`
+- 若使用真实串口（例如 `/dev/ttyUSB0`），可设置波特率：`--baud 115200`
+- 若 `socat` 报 `openpty ... Permission denied`，说明当前环境禁用 pty；可在可用的宿主机环境运行，或使用 `integration_tests` 的 `integration_secs1_pty`（在无 pty 时会自动降级为 `socketpair()` 字节流链路）做基础互通验证。
 
 ## API 快速参考
 

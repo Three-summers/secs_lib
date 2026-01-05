@@ -458,6 +458,70 @@ secs_error_t fill_protocol_out_message(const secs::protocol::DataMessage &msg,
     return ok();
 }
 
+[[nodiscard]] secs::ii::DecodeLimits
+make_decode_limits(const secs_ii_decode_limits_t *limits) noexcept {
+    secs::ii::DecodeLimits out{};
+    if (!limits) {
+        return out;
+    }
+
+    // 约定：0 表示“使用库默认值”，便于调用方 memset(0) 后仅覆盖少数字段。
+    if (limits->max_depth != 0) {
+        out.max_depth = limits->max_depth;
+    }
+    if (limits->max_list_items != 0) {
+        out.max_list_items = limits->max_list_items;
+    }
+    if (limits->max_payload_bytes != 0) {
+        out.max_payload_bytes = limits->max_payload_bytes;
+    }
+    if (limits->max_total_items != 0) {
+        out.max_total_items = limits->max_total_items;
+    }
+    if (limits->max_total_bytes != 0) {
+        out.max_total_bytes = limits->max_total_bytes;
+    }
+    return out;
+}
+
+[[nodiscard]] secs::hsms::SessionOptions
+make_hsms_options(const secs_hsms_session_options_t *options) {
+    secs::hsms::SessionOptions opt{};
+    opt.session_id = options->session_id;
+    opt.t3 = ms_to_duration_or_default(options->t3_ms, opt.t3);
+    opt.t5 = ms_to_duration_or_default(options->t5_ms, opt.t5);
+    opt.t6 = ms_to_duration_or_default(options->t6_ms, opt.t6);
+    opt.t7 = ms_to_duration_or_default(options->t7_ms, opt.t7);
+    opt.t8 = ms_to_duration_or_default(options->t8_ms, opt.t8);
+    opt.linktest_interval = ms_to_duration_or_default(options->linktest_interval_ms,
+                                                      secs::core::duration{});
+    opt.auto_reconnect = options->auto_reconnect != 0;
+    opt.passive_accept_select = options->passive_accept_select != 0;
+    return opt;
+}
+
+[[nodiscard]] secs::hsms::SessionOptions
+make_hsms_options_v2(const secs_hsms_session_options_v2_t *options) {
+    secs::hsms::SessionOptions opt{};
+    opt.session_id = options->session_id;
+    opt.t3 = ms_to_duration_or_default(options->t3_ms, opt.t3);
+    opt.t5 = ms_to_duration_or_default(options->t5_ms, opt.t5);
+    opt.t6 = ms_to_duration_or_default(options->t6_ms, opt.t6);
+    opt.t7 = ms_to_duration_or_default(options->t7_ms, opt.t7);
+    opt.t8 = ms_to_duration_or_default(options->t8_ms, opt.t8);
+    opt.linktest_interval = ms_to_duration_or_default(options->linktest_interval_ms,
+                                                      secs::core::duration{});
+
+    if (options->linktest_max_consecutive_failures != 0) {
+        opt.linktest_max_consecutive_failures =
+            std::max<std::uint32_t>(1U, options->linktest_max_consecutive_failures);
+    }
+
+    opt.auto_reconnect = options->auto_reconnect != 0;
+    opt.passive_accept_select = options->passive_accept_select != 0;
+    return opt;
+}
+
 } // namespace
 
 // ----------------------------- 内存/错误/版本 -----------------------------
@@ -984,6 +1048,56 @@ secs_error_t secs_ii_decode_one(const uint8_t *in_bytes,
     });
 }
 
+void secs_ii_decode_limits_init_default(secs_ii_decode_limits_t *out_limits) {
+    guard_void([&]() {
+        if (!out_limits) {
+            return;
+        }
+        const secs::ii::DecodeLimits d{};
+        out_limits->max_depth = d.max_depth;
+        out_limits->max_list_items = d.max_list_items;
+        out_limits->max_payload_bytes = d.max_payload_bytes;
+        out_limits->max_total_items = d.max_total_items;
+        out_limits->max_total_bytes = d.max_total_bytes;
+    });
+}
+
+secs_error_t secs_ii_decode_one_with_limits(const uint8_t *in_bytes,
+                                            size_t in_n,
+                                            const secs_ii_decode_limits_t *limits,
+                                            size_t *out_consumed,
+                                            secs_ii_item_t **out_item) {
+    return guard_error([&]() -> secs_error_t {
+        if (!in_bytes && in_n != 0) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        if (!out_consumed || !out_item) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_consumed = 0;
+        *out_item = nullptr;
+
+        secs::ii::Item decoded{secs::ii::List{}};
+        std::size_t consumed = 0;
+        const auto ec = secs::ii::decode_one(
+            bytes_view{reinterpret_cast<const byte *>(in_bytes), in_n},
+            decoded,
+            consumed,
+            make_decode_limits(limits));
+        if (ec) {
+            return from_error_code(ec);
+        }
+
+        auto *h = new (std::nothrow) secs_ii_item(std::move(decoded));
+        if (!h) {
+            return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+        }
+        *out_consumed = consumed;
+        *out_item = h;
+        return ok();
+    });
+}
+
 // ----------------------------- SML 运行时 -----------------------------
 
 secs_error_t secs_sml_runtime_create(secs_sml_runtime_t **out_rt) {
@@ -1167,18 +1281,39 @@ secs_hsms_session_create(secs_context_t *ctx,
             return c_api_err(SECS_C_API_OUT_OF_MEMORY);
 
         h->ctx = ctx;
+        const auto opt = make_hsms_options(options);
 
-        secs::hsms::SessionOptions opt{};
-        opt.session_id = options->session_id;
-        opt.t3 = ms_to_duration_or_default(options->t3_ms, opt.t3);
-        opt.t5 = ms_to_duration_or_default(options->t5_ms, opt.t5);
-        opt.t6 = ms_to_duration_or_default(options->t6_ms, opt.t6);
-        opt.t7 = ms_to_duration_or_default(options->t7_ms, opt.t7);
-        opt.t8 = ms_to_duration_or_default(options->t8_ms, opt.t8);
-        opt.linktest_interval = ms_to_duration_or_default(
-            options->linktest_interval_ms, secs::core::duration{});
-        opt.auto_reconnect = options->auto_reconnect != 0;
-        opt.passive_accept_select = options->passive_accept_select != 0;
+        h->options = opt;
+        try {
+            h->sess = std::make_shared<secs::hsms::Session>(
+                ctx->ioc.get_executor(), opt);
+        } catch (...) {
+            delete h;
+            return c_api_err(SECS_C_API_EXCEPTION);
+        }
+
+        *out_sess = h;
+        return ok();
+    });
+}
+
+secs_error_t
+secs_hsms_session_create_v2(secs_context_t *ctx,
+                            const secs_hsms_session_options_v2_t *options,
+                            secs_hsms_session_t **out_sess) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !options || !out_sess) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_sess = nullptr;
+
+        auto *h = new (std::nothrow) secs_hsms_session{};
+        if (!h) {
+            return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+        }
+
+        h->ctx = ctx;
+        const auto opt = make_hsms_options_v2(options);
 
         h->options = opt;
         try {

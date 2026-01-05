@@ -331,9 +331,9 @@ cmake -S . -B build -DSECS_ENABLE_WERROR=ON
 
 按功能分组的入口（对应文件都在 `include/secs/c_api.h`）：
 
-- SECS-II：`secs_ii_item_*` + `secs_ii_encode` / `secs_ii_decode_one`
+- SECS-II：`secs_ii_item_*` + `secs_ii_encode` / `secs_ii_decode_one`（可选：`secs_ii_decode_one_with_limits` + `secs_ii_decode_limits_init_default`）
 - SML：`secs_sml_runtime_*`
-- HSMS：`secs_hsms_connection_*` + `secs_hsms_session_*`
+- HSMS：`secs_hsms_connection_*` + `secs_hsms_session_*`（可选：`secs_hsms_session_create_v2` 用于配置 LINKTEST 连续失败阈值）
 - 协议层：`secs_protocol_session_*`（含 handler 注册、send/request）
 
 #### 最小调用顺序（C，不贴源码）
@@ -574,6 +574,9 @@ cmake --build build --target examples -j
 ./build/examples/hsms_server [port]
 ./build/examples/hsms_client [host] [port]
 ./build/examples/typed_handler_example
+./build/examples/secs1_loopback
+./build/examples/secs1_serial_server <tty_path>   # UNIX
+./build/examples/secs1_serial_client <tty_path>   # UNIX
 ```
 
 示例说明见：`examples/README.md`

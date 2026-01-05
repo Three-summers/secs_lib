@@ -202,6 +202,31 @@ secs_error_t secs_ii_decode_one(const uint8_t *in_bytes,
                                 size_t *out_consumed,
                                 secs_ii_item_t **out_item);
 
+/*
+ * 解码资源限制（对应 C++：secs::ii::DecodeLimits）。
+ *
+ * 约定：
+ * - 若传入指针为 NULL：使用库默认限制；
+ * - 若传入字段值为 0：表示“使用库默认值”（便于 memset(0) 后只覆盖少数字段）。
+ */
+typedef struct secs_ii_decode_limits {
+    size_t max_depth;
+    uint32_t max_list_items;
+    uint32_t max_payload_bytes;
+    size_t max_total_items;
+    size_t max_total_bytes;
+} secs_ii_decode_limits_t;
+
+/* 获取库默认的 DecodeLimits（out_limits 由调用方提供）。 */
+void secs_ii_decode_limits_init_default(secs_ii_decode_limits_t *out_limits);
+
+/* 带资源限制的解码（out_item 需用 secs_ii_item_destroy 释放）。 */
+secs_error_t secs_ii_decode_one_with_limits(const uint8_t *in_bytes,
+                                            size_t in_n,
+                                            const secs_ii_decode_limits_t *limits,
+                                            size_t *out_consumed,
+                                            secs_ii_item_t **out_item);
+
 /* ----------------------------- SML：加载/匹配/取模板
  * ----------------------------- */
 
@@ -258,6 +283,25 @@ typedef struct secs_hsms_session_options {
     int passive_accept_select;
 } secs_hsms_session_options_t;
 
+/*
+ * HSMS 会话参数 v2：
+ * - 新增：linktest_max_consecutive_failures（对应 C++：
+ *   SessionOptions::linktest_max_consecutive_failures）
+ * - 约定：0 表示使用库默认值（默认 1：一次失败即断线）
+ */
+typedef struct secs_hsms_session_options_v2 {
+    uint16_t session_id;
+    uint32_t t3_ms;
+    uint32_t t5_ms;
+    uint32_t t6_ms;
+    uint32_t t7_ms;
+    uint32_t t8_ms;
+    uint32_t linktest_interval_ms; /* 0 表示不自动发送 LINKTEST */
+    uint32_t linktest_max_consecutive_failures;
+    int auto_reconnect;
+    int passive_accept_select;
+} secs_hsms_session_options_v2_t;
+
 typedef struct secs_hsms_data_message {
     uint16_t session_id;
     uint8_t stream;
@@ -281,6 +325,10 @@ secs_error_t
 secs_hsms_session_create(secs_context_t *ctx,
                          const secs_hsms_session_options_t *options,
                          secs_hsms_session_t **out_sess);
+secs_error_t
+secs_hsms_session_create_v2(secs_context_t *ctx,
+                            const secs_hsms_session_options_v2_t *options,
+                            secs_hsms_session_t **out_sess);
 
 /*
  * 打开连接（阻塞式）。

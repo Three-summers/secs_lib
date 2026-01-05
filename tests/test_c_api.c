@@ -622,6 +622,30 @@ static void test_ii_encode_decode_and_malicious(void) {
             if (decoded) {
                 secs_ii_item_destroy(decoded);
             }
+
+            /* 用自定义 DecodeLimits 放宽 max_depth，应允许成功解码 */
+            {
+                secs_ii_decode_limits_t limits;
+                memset(&limits, 0, sizeof(limits));
+                secs_ii_decode_limits_init_default(&limits);
+                limits.max_depth = 128u;
+
+                size_t consumed2 = 0;
+                secs_ii_item_t *decoded2 = NULL;
+                secs_error_t err2 = secs_ii_decode_one_with_limits(
+                    deep_bytes, deep_n, &limits, &consumed2, &decoded2);
+                expect_ok("secs_ii_decode_one_with_limits(deep ok)", err2);
+                if (secs_error_is_ok(err2) && consumed2 != deep_n) {
+                    fprintf(stderr,
+                            "FAIL: decode_one_with_limits consumed mismatch: %zu != %zu\n",
+                            consumed2,
+                            deep_n);
+                    ++g_failures;
+                }
+                if (decoded2) {
+                    secs_ii_item_destroy(decoded2);
+                }
+            }
             if (deep_bytes) {
                 secs_free(deep_bytes);
             }
@@ -646,6 +670,31 @@ static void test_ii_encode_decode_and_malicious(void) {
         secs_free(bytes);
     }
     secs_ii_item_destroy(list);
+}
+
+static void test_hsms_session_create_v2_smoke(void) {
+    secs_context_t *ctx = NULL;
+    expect_ok("secs_context_create(v2)", secs_context_create(&ctx));
+
+    secs_hsms_session_options_v2_t opt;
+    memset(&opt, 0, sizeof(opt));
+    opt.session_id = 0x1010;
+    opt.t3_ms = 2000;
+    opt.t5_ms = 200;
+    opt.t6_ms = 2000;
+    opt.t7_ms = 2000;
+    opt.t8_ms = 2000;
+    opt.linktest_interval_ms = 0;
+    opt.linktest_max_consecutive_failures = 3;
+    opt.auto_reconnect = 0;
+    opt.passive_accept_select = 1;
+
+    secs_hsms_session_t *sess = NULL;
+    expect_ok("secs_hsms_session_create_v2",
+              secs_hsms_session_create_v2(ctx, &opt, &sess));
+    secs_hsms_session_destroy(sess);
+
+    secs_context_destroy(ctx);
 }
 
 static void test_ii_all_types_and_views(void) {
@@ -1837,6 +1886,7 @@ int main(void) {
     test_version_and_error_message();
     test_error_message_category_mapping();
     test_invalid_argument_fast_fail();
+    test_hsms_session_create_v2_smoke();
     test_ii_encode_decode_and_malicious();
     test_ii_all_types_and_views();
     test_sml_runtime_basic();
