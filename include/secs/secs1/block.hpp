@@ -19,6 +19,7 @@ inline constexpr secs::core::byte kNak = 0x15;
 inline constexpr std::size_t kHeaderSize = 10;
 inline constexpr std::size_t kMaxBlockDataSize = 244;
 inline constexpr std::size_t kMaxBlockLength = kHeaderSize + kMaxBlockDataSize;
+// 数据块长度 + SECS-II 转换头信息 + 实际数据 + 校验和
 inline constexpr std::size_t kMaxBlockFrameSize = 1 + kMaxBlockLength + 2;
 
 enum class errc : int {

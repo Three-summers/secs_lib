@@ -3,6 +3,8 @@ build/
 build-*/
 build_*/
 cmake-build-*/
+bin/
+obj/
 
 # 覆盖率文件
 *.gcov
@@ -37,6 +39,7 @@ third_party/*/build/
 # 工具目录
 .codex/
 .claude/
+.dotnet_cache/
 
 # 临时文件
 *.log

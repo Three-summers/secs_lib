@@ -290,16 +290,37 @@ Connection::async_read_some_with_t8(core::byte *dst, std::size_t n) {
 }
 
 asio::awaitable<std::error_code>
-Connection::async_read_exactly(core::mutable_bytes_view dst) {
+Connection::async_read_exactly(core::mutable_bytes_view dst,
+                               bool &frame_started) {
     std::size_t offset = 0;
     while (offset < dst.size()) {
-        auto [ec, n] = co_await async_read_some_with_t8(dst.data() + offset,
-                                                        dst.size() - offset);
+        if (!stream_) {
+            co_return core::make_error_code(core::errc::invalid_argument);
+        }
+
+        const auto remaining = dst.size() - offset;
+
+        // T8（网络字符间隔超时）是“同一条消息/帧的字节间隔超时”：
+        // - 在尚未收到该帧任何字节前，不应由 T8 限制“等待首字节”的时长（等待首字节应由更高层
+        //   的 T3/T6/T7 等事务/状态机超时控制）。
+        // - 一旦收到首字节，则后续字节的间隔应受 T8 限制（避免半包/卡死）。
+        std::error_code ec{};
+        std::size_t n = 0;
+        if (options_.t8 == core::duration{} || !frame_started) {
+            std::tie(ec, n) = co_await stream_->async_read_some(
+                core::mutable_bytes_view{dst.data() + offset, remaining});
+        } else {
+            std::tie(ec, n) = co_await async_read_some_with_t8(dst.data() + offset,
+                                                               remaining);
+        }
         if (ec) {
             co_return ec;
         }
         if (n == 0) {
             co_return core::make_error_code(core::errc::invalid_argument);
+        }
+        if (!frame_started) {
+            frame_started = true;
         }
         offset += n;
     }
@@ -343,8 +364,9 @@ Connection::async_write_message(const Message &msg) {
 asio::awaitable<std::pair<std::error_code, Message>>
 Connection::async_read_message() {
     std::array<core::byte, kLengthFieldSize> len_buf{};
+    bool frame_started = false;
     auto ec = co_await async_read_exactly(
-        core::mutable_bytes_view{len_buf.data(), len_buf.size()});
+        core::mutable_bytes_view{len_buf.data(), len_buf.size()}, frame_started);
     if (ec) {
         co_return std::pair{ec, Message{}};
     }
@@ -362,7 +384,7 @@ Connection::async_read_message() {
     std::vector<core::byte> payload;
     payload.resize(payload_len);
     ec = co_await async_read_exactly(
-        core::mutable_bytes_view{payload.data(), payload.size()});
+        core::mutable_bytes_view{payload.data(), payload.size()}, frame_started);
     if (ec) {
         co_return std::pair{ec, Message{}};
     }

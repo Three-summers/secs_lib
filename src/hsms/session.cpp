@@ -199,10 +199,9 @@ asio::awaitable<void> Session::reader_loop_() {
                     make_select_rsp(msg.header.session_id,
                                     kRspReject,
                                     msg.header.system_bytes));
-                (void)co_await connection_.async_close();
-                on_disconnected_(
-                    core::make_error_code(core::errc::invalid_argument));
-                should_exit = true;
+                // 仅拒绝 SELECT，不进入 selected；保持连接处于 NOT_SELECTED，
+                // 便于对端读取到拒绝响应并自行决定后续行为（例如断线/重试）。
+                set_not_selected_();
                 break;
             }
 

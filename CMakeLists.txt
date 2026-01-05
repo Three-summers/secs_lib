@@ -12,6 +12,7 @@ if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
 endif()
 
 option(SECS_ENABLE_TESTS "Build unit tests" ${SECS_PROJECT_IS_TOP_LEVEL})
+option(SECS_ENABLE_INTEGRATION_TESTS "Build integration tests (HSMS+SECS-I connectivity)" OFF)
 option(SECS_ENABLE_COVERAGE "Enable coverage helper targets/flags" OFF)
 option(SECS_BUILD_EXAMPLES "Build example programs" ${SECS_PROJECT_IS_TOP_LEVEL})
 option(SECS_BUILD_BENCHMARKS "Build performance benchmarks" OFF)
@@ -215,13 +216,20 @@ if(SECS_ENABLE_COVERAGE)
   secs_enable_coverage_compile(secs_c_api)
 endif()
 
-if(SECS_ENABLE_TESTS)
+if(SECS_ENABLE_TESTS OR SECS_ENABLE_INTEGRATION_TESTS)
   enable_testing()
+endif()
+
+if(SECS_ENABLE_TESTS)
   add_subdirectory(tests)
 endif()
 
 if(SECS_ENABLE_TESTS AND SECS_ENABLE_COVERAGE)
   secs_add_coverage_target(coverage)
+endif()
+
+if(SECS_ENABLE_INTEGRATION_TESTS)
+  add_subdirectory(integration_tests)
 endif()
 
 if(SECS_BUILD_EXAMPLES)

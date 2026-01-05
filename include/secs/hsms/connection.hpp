@@ -96,8 +96,11 @@ private:
         bool is_data{false};
     };
 
+    // 读取“当前帧”的指定字节数，并以 frame_started 控制 T8 的启用时机：
+    // - frame_started==false：表示尚未收到该帧的任何字节（等待首字节不受 T8 限制）
+    // - frame_started==true：表示该帧已开始接收（后续字节间隔受 T8 限制）
     asio::awaitable<std::error_code>
-    async_read_exactly(core::mutable_bytes_view dst);
+    async_read_exactly(core::mutable_bytes_view dst, bool &frame_started);
 
     asio::awaitable<std::pair<std::error_code, std::size_t>>
     async_read_some_with_t8(core::byte *dst, std::size_t n);
