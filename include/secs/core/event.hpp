@@ -1,7 +1,6 @@
 #pragma once
 
 #include "secs/core/common.hpp"
-#include "secs/core/error.hpp"
 
 #include <asio/as_tuple.hpp>
 #include <asio/awaitable.hpp>

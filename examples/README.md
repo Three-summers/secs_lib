@@ -12,15 +12,16 @@ cmake --build build --target examples
 # 运行
 ./build/examples/secs2_simple
 ./build/examples/c_api_secs2_simple
-./build/examples/typed_handler_example
-./build/examples/protocol_custom_reply_example
-./build/examples/hsms_server [port]
-./build/examples/hsms_client [host] [port]
-./build/examples/hsms_pipe_server [device_id]
-./build/examples/hsms_pipe_client [device_id]
-./build/examples/secs1_loopback
-./build/examples/secs1_serial_server <tty_path>
-./build/examples/secs1_serial_client <tty_path>
+	./build/examples/typed_handler_example
+	./build/examples/protocol_custom_reply_example
+	./build/examples/hsms_server [port]
+	./build/examples/hsms_client [host] [port]
+	./build/examples/hsms_sml_peer --help
+	./build/examples/hsms_pipe_server [device_id]
+	./build/examples/hsms_pipe_client [device_id]
+	./build/examples/secs1_loopback
+	./build/examples/secs1_serial_server <tty_path>
+	./build/examples/secs1_serial_client <tty_path>
 
 # C API：HSMS（TCP）
 ./build/examples/c_api_hsms_server [ip] [port]
@@ -82,6 +83,26 @@ cmake --build build --target examples
 [客户端] 发送 S1F1 (Are You There)...
 [客户端] 收到 S1F2 响应
 [客户端] 响应内容: "OK"
+```
+
+## HSMS SML 对端示例（主动/被动都加载同一份 SML）
+
+文件：
+- `hsms_sml_peer.cpp`
+
+用途：
+- 主动/被动两种模式都读取同一份 SML（例如 `docs/sample.sml`）；
+- 收到 primary 且 W=1 时，按 SML 条件规则自动选择响应模板并回 secondary；
+- 可选开启 SML 的 `every N send` 规则，周期性发送消息（用于联调时自动出流量）。
+
+示例：
+
+```bash
+# 被动端（监听）：适合 Windows 测试应用作为 active 连接进来
+./build/examples/hsms_sml_peer --mode passive --listen 0.0.0.0 --port 5000 --sml docs/sample.sml --session-id 0x0001
+
+# 主动端（连接）：适合 Windows 测试应用作为 passive 监听
+./build/examples/hsms_sml_peer --mode active --connect <windows_ip> --port 5000 --sml docs/sample.sml --session-id 0x0001
 ```
 
 ## HSMS（pipe）客户端/服务器示例（受限环境推荐）

@@ -58,6 +58,11 @@ add_executable(hsms_client hsms_client.cpp)
 target_link_libraries(hsms_client PRIVATE secs::hsms secs::ii secs::core)
 list(APPEND _secs_example_targets hsms_client)
 
+# HSMS（TCP）SML 对端：主动/被动都加载同一份 SML，并按规则自动回包
+add_executable(hsms_sml_peer hsms_sml_peer.cpp)
+target_link_libraries(hsms_sml_peer PRIVATE secs::protocol secs::sml secs::hsms secs::ii secs::core)
+list(APPEND _secs_example_targets hsms_sml_peer)
+
 # TypedHandler 示例
 add_executable(typed_handler_example typed_handler_example.cpp)
 target_link_libraries(typed_handler_example PRIVATE secs::protocol secs::ii secs::core)

@@ -41,7 +41,7 @@ public:
 
     /**
      * @brief 获取消息模板
-     * @param name 消息名称
+     * @param name 消息名称；也支持直接传入 SxFy（例如 "S2F22"）
      * @return 消息定义指针，未找到返回 nullptr
      */
     [[nodiscard]] const MessageDef *

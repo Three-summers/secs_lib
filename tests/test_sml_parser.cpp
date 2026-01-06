@@ -194,7 +194,7 @@ void test_parser_if_rule_with_condition() {
     auto result = parse_sml(R"(
     s1f1: S1F1 W <L <F4 0.5567>>.
     s1f2_1: S1F2 <L>.
-    if (s1f1 (1)==<F4 0.5567>) s1f2_1.
+    if (s1f1 (2)==<F4 0.5567>) s1f2_1.
   )");
 
     TEST_EXPECT(!result.ec);
@@ -202,7 +202,7 @@ void test_parser_if_rule_with_condition() {
 
     const auto &rule = result.document.conditions[0];
     TEST_EXPECT(rule.condition.index.has_value());
-    TEST_EXPECT_EQ(*rule.condition.index, 1u);
+    TEST_EXPECT_EQ(*rule.condition.index, 2u);
     TEST_EXPECT(rule.condition.expected.has_value());
 }
 
@@ -463,7 +463,7 @@ void test_parse_sml_exercises_all_item_types() {
     >.
 
     rsp: S1F2 <L>.
-    if (all(1)==<A "hello">) rsp.
+    if (all(2)==<A "hello">) rsp.
     if (S1F1) rsp.
     every 1 send all.
   )";
@@ -720,7 +720,7 @@ void test_runtime_condition_index_and_expected_matching() {
     Runtime rt;
     auto ec = rt.load(R"(
     rsp: S1F2 <L>.
-    if (S1F1(1)==<A "OK">) rsp.
+    if (S1F1(2)==<A "OK">) rsp.
   )");
     TEST_EXPECT_OK(ec);
 
@@ -736,7 +736,7 @@ void test_runtime_condition_index_and_expected_matching() {
                1, 1, Item::list({Item::ascii("BAD"), Item::ascii("OK")}))
              .has_value());
 
-    // 4) 命中：第 1 个元素为 "OK"
+    // 4) 命中：第 1 个子元素为 "OK"
     auto rsp = rt.match_response(1, 1, Item::list({Item::ascii("OK")}));
     TEST_EXPECT(rsp.has_value());
     TEST_EXPECT_EQ(*rsp, std::string("rsp"));
@@ -762,7 +762,7 @@ void test_runtime_float_tolerance_match() {
     Runtime rt;
     auto ec = rt.load(R"(
     rsp: S1F2 <L>.
-    if (S1F1(1)==<F4 1.0>) rsp.
+    if (S1F1(2)==<F4 1.0>) rsp.
   )");
     TEST_EXPECT_OK(ec);
 
@@ -827,11 +827,11 @@ void test_runtime_double_tolerance_and_mismatch_paths() {
     f8_bad_size: S4F2 <L>.
     f8_ok: S5F2 <L>.
 
-    if (S1F1(1)==<A "X">) f4_bad_type.
-    if (S2F1(1)==<F4 1.0 2.0>) f4_bad_size.
-    if (S3F1(1)==<A "X">) f8_bad_type.
-    if (S4F1(1)==<F8 1.0 2.0>) f8_bad_size.
-    if (S5F1(1)==<F8 1.0>) f8_ok.
+    if (S1F1(2)==<A "X">) f4_bad_type.
+    if (S2F1(2)==<F4 1.0 2.0>) f4_bad_size.
+    if (S3F1(2)==<A "X">) f8_bad_type.
+    if (S4F1(2)==<F8 1.0 2.0>) f8_bad_size.
+    if (S5F1(2)==<F8 1.0>) f8_ok.
   )");
     TEST_EXPECT_OK(ec);
 
@@ -902,7 +902,7 @@ void test_parse_sample_sml_fragment() {
       <U2 3002>
     >.
 
-    if (s1f1_1 (2)==<F4 0.5567>) s1f2_1.
+    if (s1f1_1 (4)==<F4 0.5567>) s1f2_1.
     every 5 send s1f1_1.
   )";
 

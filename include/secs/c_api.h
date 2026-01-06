@@ -268,7 +268,7 @@ secs_error_t secs_sml_runtime_match_response(const secs_sml_runtime_t *rt,
                                              char **out_name);
 
 /*
- * 获取消息模板（按消息名）并输出其 SECS-II 消息体（编码 bytes）。
+ * 获取消息模板（按消息名；也支持直接传入 "SxFy"）并输出其 SECS-II 消息体（编码 bytes）。
  * 若不存在返回 NOT_FOUND。
  */
 secs_error_t

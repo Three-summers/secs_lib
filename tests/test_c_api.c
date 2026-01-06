@@ -1039,6 +1039,23 @@ static void test_sml_runtime_basic(void) {
         secs_free(body);
     }
 
+    /* 兼容：允许直接用 "SxFy" 字符串查模板（覆盖 runtime.get_message 的 parse_sf 分支） */
+    {
+        uint8_t *body = NULL;
+        size_t body_n = 0;
+        uint8_t stream = 0;
+        uint8_t function = 0;
+        int w_bit = 0;
+        expect_ok("secs_sml_runtime_get_message_body_by_name(S1F2)",
+                  secs_sml_runtime_get_message_body_by_name(
+                      rt, "S1F2", &body, &body_n, &stream, &function, &w_bit));
+        if (stream != 1u || function != 2u || w_bit != 0) {
+            fprintf(stderr, "FAIL: S1F2 meta mismatch\n");
+            ++g_failures;
+        }
+        secs_free(body);
+    }
+
     /* 条件匹配：s1f1 -> s1f2 */
     {
         secs_ii_item_t *req = NULL;

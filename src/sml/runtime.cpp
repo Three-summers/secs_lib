@@ -72,6 +72,44 @@ namespace {
     return std::fabs(a - b) <= kAbsTol;
 }
 
+// 按先序遍历查找第 N 个 Item（1-based，包含根节点）。
+// 约定：
+// - 仅在根节点为 List 时用于条件匹配（与历史行为保持一致）；
+// - 遍历顺序：node -> children（List 的子元素从左到右）。
+[[nodiscard]] const ii::Item *
+find_preorder_nth(const ii::Item &root, std::size_t n) noexcept {
+    if (n < 1) {
+        return nullptr;
+    }
+
+    std::size_t cur = 0;
+    const ii::Item *found = nullptr;
+
+    struct Walk final {
+        static bool run(const ii::Item &item,
+                        std::size_t n,
+                        std::size_t &cur,
+                        const ii::Item *&found) noexcept {
+            ++cur;
+            if (cur == n) {
+                found = &item;
+                return true;
+            }
+            if (const auto *list = item.get_if<ii::List>()) {
+                for (const auto &child : *list) {
+                    if (run(child, n, cur, found)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+    };
+
+    (void)Walk::run(root, n, cur, found);
+    return found;
+}
+
 } // namespace
 
 std::error_code Runtime::load(std::string_view source) noexcept {
@@ -134,6 +172,13 @@ const MessageDef *Runtime::get_message(std::string_view name) const noexcept {
     auto it = name_index_.find(name);
     if (it != name_index_.end()) {
         return &document_.messages[it->second];
+    }
+
+    // 兼容：允许直接用 "SxFy" 形式查找（例如 sample.sml 中的条件响应常写成 s2f22）。
+    std::uint8_t stream = 0;
+    std::uint8_t function = 0;
+    if (parse_sf(name, stream, function)) {
+        return get_message(stream, function);
     }
     return nullptr;
 }
@@ -200,20 +245,19 @@ bool Runtime::match_condition(const Condition &cond,
 
     // 如果有索引和期望值，检查 Item
     if (cond.index && cond.expected) {
-        // 获取指定索引的元素
-        auto *list = item.get_if<ii::List>();
-        if (!list) {
+        // 兼容 sample.sml：索引采用“先序遍历编号（包含根节点）”。
+        // 注意：仅当根节点为 List 时允许索引匹配（避免对非 List 输入产生歧义）。
+        if (!item.get_if<ii::List>()) {
             return false;
         }
 
-        std::size_t idx = *cond.index;
-        if (idx < 1 || idx > list->size()) {
+        const std::size_t idx = *cond.index;
+        const ii::Item *elem = find_preorder_nth(item, idx);
+        if (!elem) {
             return false;
         }
 
-        // 比较元素
-        const ii::Item &elem = (*list)[idx - 1]; // 约定：SML 中索引从 1 开始
-        if (!items_equal(elem, *cond.expected)) {
+        if (!items_equal(*elem, *cond.expected)) {
             return false;
         }
     }

@@ -1,5 +1,7 @@
 #include "secs/core/event.hpp"
 
+#include "secs/core/error.hpp"
+
 #include <asio/error.hpp>
 
 namespace secs::core {
