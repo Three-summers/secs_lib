@@ -14,7 +14,7 @@
  * 本程序默认注册 S1F13 的 handler：回显 body，并自动发送 S1F14（W=0）。
  */
 
-#include "secs1_serial_link_posix.hpp"
+#include "secs/secs1/posix_serial_link.hpp"
 
 #include "secs/protocol/session.hpp"
 #include "secs/secs1/state_machine.hpp"
@@ -155,15 +155,13 @@ int main(int argc, char **argv) {
 
     asio::io_context ioc;
 
-    auto [open_ec, fd] =
-        secs::examples::open_tty_raw(opt->tty_path, opt->baud);
+    auto [open_ec, link] = secs::secs1::PosixSerialLink::open(
+        ioc.get_executor(), opt->tty_path, opt->baud);
     if (open_ec) {
         std::cerr << "[设备端] 打开/配置 tty 失败: " << open_ec.message()
                   << "\n";
         return 1;
     }
-
-    secs::examples::PosixSerialLink link(ioc.get_executor(), std::move(fd));
 
     secs::secs1::StateMachine sm(link, opt->device_id);
 

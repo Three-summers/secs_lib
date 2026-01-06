@@ -3,6 +3,7 @@
 #include "secs/core/error.hpp"
 
 #include <algorithm>
+#include <spdlog/spdlog.h>
 
 namespace secs::secs1 {
 namespace {
@@ -68,6 +69,16 @@ StateMachine::async_send(const Header &header, secs::core::bytes_view body) {
         }
     }
 
+    SPDLOG_DEBUG(
+        "secs1 async_send start: dev_id={} rbit={} S{}F{} W={} sb={} body_n={}",
+        header.device_id,
+        header.reverse_bit ? 1 : 0,
+        static_cast<int>(header.stream),
+        static_cast<int>(header.function),
+        header.wait_bit ? 1 : 0,
+        header.system_bytes,
+        body.size());
+
     // 进入“等待对端允许发送”的阶段（ENQ -> 等待 EOT/ACK）。
     state_ = State::wait_eot;
 
@@ -76,6 +87,9 @@ StateMachine::async_send(const Header &header, secs::core::bytes_view body) {
         // 发 ENQ：请求占用链路。
         auto ec = co_await async_send_control(kEnq);
         if (ec) {
+            SPDLOG_DEBUG("secs1 async_send ENQ failed: ec={}({})",
+                         ec.value(),
+                         ec.message());
             state_ = State::idle;
             co_return ec;
         }
@@ -93,15 +107,21 @@ StateMachine::async_send(const Header &header, secs::core::bytes_view body) {
             continue;
         }
         if (rec_ec) {
+            SPDLOG_DEBUG("secs1 async_send handshake receive failed: ec={}({})",
+                         rec_ec.value(),
+                         rec_ec.message());
             state_ = State::idle;
             co_return rec_ec;
         }
         state_ = State::idle;
+        SPDLOG_DEBUG("secs1 async_send handshake protocol_error (resp=0x{:02X})",
+                     static_cast<unsigned int>(resp));
         co_return make_error_code(errc::protocol_error);
     }
 
     if (!handshake_ok) {
         state_ = State::idle;
+        SPDLOG_DEBUG("secs1 async_send handshake too_many_retries");
         co_return make_error_code(errc::too_many_retries);
     }
 
@@ -117,6 +137,9 @@ StateMachine::async_send(const Header &header, secs::core::bytes_view body) {
             auto ec = co_await link_.async_write(
                 secs::core::bytes_view{frame.data(), frame.size()});
             if (ec) {
+                SPDLOG_DEBUG("secs1 async_send frame write failed: ec={}({})",
+                             ec.value(),
+                             ec.message());
                 state_ = State::idle;
                 co_return ec;
             }
@@ -133,20 +156,27 @@ StateMachine::async_send(const Header &header, secs::core::bytes_view body) {
                 ++attempts;
                 if (attempts >= retry_limit_) {
                     state_ = State::idle;
+                    SPDLOG_DEBUG("secs1 async_send frame too_many_retries");
                     co_return make_error_code(errc::too_many_retries);
                 }
                 continue;
             }
             if (rec_ec) {
+                SPDLOG_DEBUG("secs1 async_send frame receive failed: ec={}({})",
+                             rec_ec.value(),
+                             rec_ec.message());
                 state_ = State::idle;
                 co_return rec_ec;
             }
             state_ = State::idle;
+            SPDLOG_DEBUG("secs1 async_send frame protocol_error (resp=0x{:02X})",
+                         static_cast<unsigned int>(resp));
             co_return make_error_code(errc::protocol_error);
         }
     }
 
     state_ = State::idle;
+    SPDLOG_DEBUG("secs1 async_send done");
     co_return std::error_code{};
 }
 
@@ -162,6 +192,9 @@ StateMachine::async_receive(std::optional<secs::core::duration> timeout) {
     for (;;) {
         auto [ec, b] = co_await async_read_byte(timeout);
         if (ec) {
+            SPDLOG_DEBUG("secs1 async_receive failed while waiting ENQ: ec={}({})",
+                         ec.value(),
+                         ec.message());
             co_return std::pair{ec, ReceivedMessage{}};
         }
         if (b == kEnq) {
@@ -169,12 +202,17 @@ StateMachine::async_receive(std::optional<secs::core::duration> timeout) {
         }
     }
 
+    SPDLOG_DEBUG("secs1 async_receive got ENQ");
+
     state_ = State::wait_block;
 
     // 默认总是允许对方发送（若未来需要“忙/拒绝”，可在这里发送 NAK）
     {
         auto ec = co_await async_send_control(kEot);
         if (ec) {
+            SPDLOG_DEBUG("secs1 async_receive send EOT failed: ec={}({})",
+                         ec.value(),
+                         ec.message());
             state_ = State::idle;
             co_return std::pair{ec, ReceivedMessage{}};
         }
@@ -190,6 +228,9 @@ StateMachine::async_receive(std::optional<secs::core::duration> timeout) {
         // 长度字段（第 1 个块用 T2；后续块用 T4）
         auto [len_ec, len_b] = co_await async_read_byte(next_block_timeout);
         if (len_ec) {
+            SPDLOG_DEBUG("secs1 async_receive length read failed: ec={}({})",
+                         len_ec.value(),
+                         len_ec.message());
             state_ = State::idle;
             co_return std::pair{len_ec, ReceivedMessage{}};
         }
@@ -198,6 +239,7 @@ StateMachine::async_receive(std::optional<secs::core::duration> timeout) {
         if (length < kHeaderSize || length > kMaxBlockLength) {
             (void)co_await async_send_control(kNak);
             state_ = State::idle;
+            SPDLOG_DEBUG("secs1 async_receive invalid length: {}", length);
             co_return std::pair{make_error_code(errc::invalid_block),
                                 ReceivedMessage{}};
         }
@@ -211,6 +253,9 @@ StateMachine::async_receive(std::optional<secs::core::duration> timeout) {
             auto [b_ec, b] =
                 co_await async_read_byte(timeouts_.t1_intercharacter);
             if (b_ec) {
+                SPDLOG_DEBUG("secs1 async_receive frame byte read failed: ec={}({})",
+                             b_ec.value(),
+                             b_ec.message());
                 state_ = State::idle;
                 co_return std::pair{b_ec, ReceivedMessage{}};
             }
@@ -225,6 +270,7 @@ StateMachine::async_receive(std::optional<secs::core::duration> timeout) {
             ++nack_count;
             if (nack_count >= retry_limit_) {
                 state_ = State::idle;
+                SPDLOG_DEBUG("secs1 async_receive too_many_retries (decode)");
                 co_return std::pair{make_error_code(errc::too_many_retries),
                                     ReceivedMessage{}};
             }

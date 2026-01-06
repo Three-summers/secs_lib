@@ -2,6 +2,7 @@
 
 #include "secs/core/error.hpp"
 #include "secs/core/event.hpp"
+#include "secs/core/log.hpp"
 #include "secs/hsms/connection.hpp"
 #include "secs/hsms/message.hpp"
 #include "secs/hsms/session.hpp"
@@ -565,6 +566,36 @@ const char *secs_version_string(void) {
 #else
     return "0.1.0";
 #endif
+}
+
+secs_error_t secs_log_set_level(secs_log_level_t level) {
+    return guard_error([&]() -> secs_error_t {
+        using secs::core::LogLevel;
+        switch (level) {
+        case SECS_LOG_TRACE:
+            secs::core::set_log_level(LogLevel::trace);
+            return ok();
+        case SECS_LOG_DEBUG:
+            secs::core::set_log_level(LogLevel::debug);
+            return ok();
+        case SECS_LOG_INFO:
+            secs::core::set_log_level(LogLevel::info);
+            return ok();
+        case SECS_LOG_WARN:
+            secs::core::set_log_level(LogLevel::warn);
+            return ok();
+        case SECS_LOG_ERROR:
+            secs::core::set_log_level(LogLevel::error);
+            return ok();
+        case SECS_LOG_CRITICAL:
+            secs::core::set_log_level(LogLevel::critical);
+            return ok();
+        case SECS_LOG_OFF:
+            secs::core::set_log_level(LogLevel::off);
+            return ok();
+        }
+        return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+    });
 }
 
 // ----------------------------- 上下文 -----------------------------
@@ -1751,57 +1782,127 @@ secs_error_t secs_protocol_session_set_handler(secs_protocol_session_t *sess,
         if (!sess || !sess->state || !sess->state->sess || !cb)
             return c_api_err(SECS_C_API_INVALID_ARGUMENT);
 
-        sess->state->sess->router().set(
-            stream,
-            function,
+        auto make_handler =
             [cb, user_data](const secs::protocol::DataMessage &msg)
-                -> asio::awaitable<secs::protocol::HandlerResult> {
-                uint8_t *out_body = nullptr;
-                size_t out_n = 0;
-                try {
-                    secs_data_message_view_t view{};
-                    view.stream = msg.stream;
-                    view.function = msg.function;
-                    view.w_bit = msg.w_bit ? 1 : 0;
-                    view.system_bytes = msg.system_bytes;
-                    view.body =
-                        reinterpret_cast<const uint8_t *>(msg.body.data());
-                    view.body_n = msg.body.size();
+            -> asio::awaitable<secs::protocol::HandlerResult> {
+            uint8_t *out_body = nullptr;
+            size_t out_n = 0;
+            try {
+                secs_data_message_view_t view{};
+                view.stream = msg.stream;
+                view.function = msg.function;
+                view.w_bit = msg.w_bit ? 1 : 0;
+                view.system_bytes = msg.system_bytes;
+                view.body = reinterpret_cast<const uint8_t *>(msg.body.data());
+                view.body_n = msg.body.size();
 
-                    secs_error_t cec = cb(user_data, &view, &out_body, &out_n);
+                secs_error_t cec = cb(user_data, &view, &out_body, &out_n);
 
-                    if (!secs_error_is_ok(cec)) {
-                        if (out_body) {
-                            secs_free(out_body);
-                        }
-                        co_return secs::protocol::HandlerResult{
-                            make_error_code(errc::invalid_argument), {}};
-                    }
-
-                    if (!out_body && out_n != 0) {
-                        co_return secs::protocol::HandlerResult{
-                            make_error_code(errc::invalid_argument), {}};
-                    }
-
-                    std::vector<byte> rsp;
-                    rsp.resize(out_n);
-                    if (out_n != 0) {
-                        std::memcpy(rsp.data(), out_body, out_n);
-                    }
-                    if (out_body) {
-                        secs_free(out_body);
-                    }
-                    co_return secs::protocol::HandlerResult{std::error_code{},
-                                                            std::move(rsp)};
-                } catch (...) {
+                if (!secs_error_is_ok(cec)) {
                     if (out_body) {
                         secs_free(out_body);
                     }
                     co_return secs::protocol::HandlerResult{
                         make_error_code(errc::invalid_argument), {}};
                 }
-            });
 
+                if (!out_body && out_n != 0) {
+                    co_return secs::protocol::HandlerResult{
+                        make_error_code(errc::invalid_argument), {}};
+                }
+
+                std::vector<byte> rsp;
+                rsp.resize(out_n);
+                if (out_n != 0) {
+                    std::memcpy(rsp.data(), out_body, out_n);
+                }
+                if (out_body) {
+                    secs_free(out_body);
+                }
+                co_return secs::protocol::HandlerResult{std::error_code{},
+                                                        std::move(rsp)};
+            } catch (...) {
+                if (out_body) {
+                    secs_free(out_body);
+                }
+                co_return secs::protocol::HandlerResult{
+                    make_error_code(errc::invalid_argument), {}};
+            }
+        };
+
+        sess->state->sess->router().set(stream, function, std::move(make_handler));
+
+        return ok();
+    });
+}
+
+secs_error_t
+secs_protocol_session_set_default_handler(secs_protocol_session_t *sess,
+                                          secs_protocol_handler_fn cb,
+                                          void *user_data) {
+    return guard_error([&]() -> secs_error_t {
+        if (!sess || !sess->state || !sess->state->sess || !cb)
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+
+        auto make_handler =
+            [cb, user_data](const secs::protocol::DataMessage &msg)
+            -> asio::awaitable<secs::protocol::HandlerResult> {
+            uint8_t *out_body = nullptr;
+            size_t out_n = 0;
+            try {
+                secs_data_message_view_t view{};
+                view.stream = msg.stream;
+                view.function = msg.function;
+                view.w_bit = msg.w_bit ? 1 : 0;
+                view.system_bytes = msg.system_bytes;
+                view.body = reinterpret_cast<const uint8_t *>(msg.body.data());
+                view.body_n = msg.body.size();
+
+                secs_error_t cec = cb(user_data, &view, &out_body, &out_n);
+
+                if (!secs_error_is_ok(cec)) {
+                    if (out_body) {
+                        secs_free(out_body);
+                    }
+                    co_return secs::protocol::HandlerResult{
+                        make_error_code(errc::invalid_argument), {}};
+                }
+
+                if (!out_body && out_n != 0) {
+                    co_return secs::protocol::HandlerResult{
+                        make_error_code(errc::invalid_argument), {}};
+                }
+
+                std::vector<byte> rsp;
+                rsp.resize(out_n);
+                if (out_n != 0) {
+                    std::memcpy(rsp.data(), out_body, out_n);
+                }
+                if (out_body) {
+                    secs_free(out_body);
+                }
+                co_return secs::protocol::HandlerResult{std::error_code{},
+                                                        std::move(rsp)};
+            } catch (...) {
+                if (out_body) {
+                    secs_free(out_body);
+                }
+                co_return secs::protocol::HandlerResult{
+                    make_error_code(errc::invalid_argument), {}};
+            }
+        };
+
+        sess->state->sess->router().set_default(std::move(make_handler));
+        return ok();
+    });
+}
+
+secs_error_t
+secs_protocol_session_clear_default_handler(secs_protocol_session_t *sess) {
+    return guard_error([&]() -> secs_error_t {
+        if (!sess || !sess->state || !sess->state->sess)
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        sess->state->sess->router().clear_default();
         return ok();
     });
 }

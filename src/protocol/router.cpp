@@ -21,24 +21,38 @@ void Router::set(std::uint8_t stream, std::uint8_t function, Handler handler) {
     handlers_.insert_or_assign(make_key_(stream, function), std::move(handler));
 }
 
+void Router::set_default(Handler handler) {
+    std::lock_guard lk(mu_);
+    default_handler_ = std::move(handler);
+}
+
 void Router::erase(std::uint8_t stream, std::uint8_t function) noexcept {
     std::lock_guard lk(mu_);
     handlers_.erase(make_key_(stream, function));
 }
 
+void Router::clear_default() noexcept {
+    std::lock_guard lk(mu_);
+    default_handler_.reset();
+}
+
 void Router::clear() noexcept {
     std::lock_guard lk(mu_);
     handlers_.clear();
+    default_handler_.reset();
 }
 
 std::optional<Handler> Router::find(std::uint8_t stream,
                                     std::uint8_t function) const {
     std::lock_guard lk(mu_);
     const auto it = handlers_.find(make_key_(stream, function));
-    if (it == handlers_.end()) {
-        return std::nullopt;
+    if (it != handlers_.end()) {
+        return it->second;
     }
-    return it->second;
+    if (default_handler_.has_value()) {
+        return *default_handler_;
+    }
+    return std::nullopt;
 }
 
 } // namespace secs::protocol

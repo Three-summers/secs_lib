@@ -6,7 +6,7 @@
  * `examples/secs1_serial_server.cpp` 的文件头说明。
  */
 
-#include "secs1_serial_link_posix.hpp"
+#include "secs/secs1/posix_serial_link.hpp"
 
 #include "secs/core/common.hpp"
 #include "secs/protocol/session.hpp"
@@ -189,10 +189,17 @@ static std::vector<core::byte> make_payload(std::size_t n) {
     return out;
 }
 
-asio::awaitable<int> run(const Options &opt, secs::examples::UniqueFd fd) {
+asio::awaitable<int> run(const Options &opt) {
     const auto ex = co_await asio::this_coro::executor;
 
-    secs::examples::PosixSerialLink link(ex, std::move(fd));
+    auto [open_ec, link] =
+        secs::secs1::PosixSerialLink::open(ex, opt.tty_path, opt.baud);
+    if (open_ec) {
+        std::cerr << "[主机端] 打开/配置 tty 失败: " << open_ec.message()
+                  << "\n";
+        co_return 1;
+    }
+
     secs::secs1::StateMachine sm(link, opt.device_id);
 
     secs::protocol::SessionOptions sess_opt{};
@@ -256,20 +263,12 @@ int main(int argc, char **argv) {
     std::cout << "[主机端] payload_bytes: " << opt->payload_bytes << "\n";
     std::cout << "[主机端] timeout_ms: " << opt->timeout_ms << "\n\n";
 
-    auto [open_ec, fd] =
-        secs::examples::open_tty_raw(opt->tty_path, opt->baud);
-    if (open_ec) {
-        std::cerr << "[主机端] 打开/配置 tty 失败: " << open_ec.message()
-                  << "\n";
-        return 1;
-    }
-
     asio::io_context ioc;
     int rc = 1;
     asio::co_spawn(
         ioc,
-        [&, fd = std::move(fd)]() mutable -> asio::awaitable<void> {
-            rc = co_await run(*opt, std::move(fd));
+        [&]() -> asio::awaitable<void> {
+            rc = co_await run(*opt);
             ioc.stop();
             co_return;
         },

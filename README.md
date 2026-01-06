@@ -464,7 +464,10 @@ SECS-I 这一层以“字节流链路”抽象开始：
 说明：
 
 - 本仓库内置 `secs::secs1::MemoryLink` 用于单元测试/仿真
-- 若你要对接真实串口，需要你基于 `asio::serial_port` 实现一个 `Link`
+- 若你在 POSIX 平台对接真实串口/虚拟串口（pty），可直接使用内置工具类：
+  - `secs::secs1::PosixSerialLink`：`include/secs/secs1/posix_serial_link.hpp`
+  - 便捷打开：`secs::secs1::PosixSerialLink::open(ex, path, baud)`
+- 若你在非 POSIX 平台，仍需要自行实现一个 `Link`（可参考 `Link` 接口与上述实现）。
 
 对应测试：`tests/test_secs1_framing.cpp`
 
@@ -522,6 +525,12 @@ SECS-I 这一层以“字节流链路”抽象开始：
 - 框架调用 handler
 - handler 返回 `response body`（仅 body，不需要你拼 header）
 - `protocol::Session` 自动发送 `secondary (function+1, W=0, system_bytes 同请求)`
+
+当报文种类很多、你不想为每个 SxFy 单独注册 handler 时：
+
+- 你可以注册一个 default handler：`router().set_default(...)`
+- 框架在未找到精确 (stream,function) handler 时会回退到 default handler
+- default handler 若返回非 OK（error_code!=0），框架将不回包（便于“只处理部分报文”）
 
 #### TypedHandler：把“Item ↔ 强类型消息”固化
 
@@ -1868,6 +1877,10 @@ items_equal 的选择（提升易用性）：
   - 入口：hsms::Session::async_run_active                     (src/hsms/session.cpp)
   - 关注：Connection::async_connect 的返回 ec                  (src/hsms/connection.cpp)
   - 关注：T5 退避是否生效、stop_requested_ 是否被置位
+
+启用调试日志（spdlog）：
+  - C++：`#include <secs/core/log.hpp>` 然后 `secs::core::set_log_level(secs::core::LogLevel::debug)`
+  - C：`secs_log_set_level(SECS_LOG_DEBUG)`
 
 症状 B：能连上但一直不 selected（主动端）
   - 入口：hsms::Session::async_open_active(Connection&&)       (src/hsms/session.cpp)

@@ -265,6 +265,17 @@ void test_router_set_find_erase_clear() {
     Router r;
     TEST_EXPECT(!r.find(1, 1).has_value());
 
+    r.set_default(
+        [](const DataMessage &)
+            -> asio::awaitable<secs::protocol::HandlerResult> {
+            co_return secs::protocol::HandlerResult{std::error_code{},
+                                                    std::vector<byte>{0xFF}};
+        });
+    TEST_EXPECT(r.find(9, 9).has_value());
+
+    r.clear_default();
+    TEST_EXPECT(!r.find(9, 9).has_value());
+
     r.set(1,
           1,
           [](const DataMessage &)
@@ -284,8 +295,15 @@ void test_router_set_find_erase_clear() {
               co_return secs::protocol::HandlerResult{std::error_code{},
                                                       std::vector<byte>{}};
           });
+    r.set_default(
+        [](const DataMessage &)
+            -> asio::awaitable<secs::protocol::HandlerResult> {
+            co_return secs::protocol::HandlerResult{std::error_code{},
+                                                    std::vector<byte>{0xEE}};
+        });
     r.clear();
     TEST_EXPECT(!r.find(2, 3).has_value());
+    TEST_EXPECT(!r.find(9, 9).has_value());
 }
 
 // ---------------------------
@@ -827,6 +845,146 @@ void test_hsms_protocol_echo_1000() {
     TEST_EXPECT_EQ(handled.load(), 1000U);
 }
 
+void test_hsms_protocol_both_sides_can_initiate_primary() {
+    asio::io_context ioc;
+    const std::uint16_t session_id = 0x1003;
+
+    secs::core::Event server_opened{};
+    secs::core::Event client_opened{};
+
+    secs::hsms::Session server(ioc.get_executor(),
+                               secs::hsms::SessionOptions{
+                                   .session_id = session_id,
+                                   .t3 = 200ms,
+                                   .t5 = 10ms,
+                                   .t6 = 50ms,
+                                   .t7 = 50ms,
+                                   .t8 = 0ms,
+                                   .linktest_interval = 0ms,
+                                   .auto_reconnect = false,
+                               });
+
+    secs::hsms::Session client(ioc.get_executor(),
+                               secs::hsms::SessionOptions{
+                                   .session_id = session_id,
+                                   .t3 = 200ms,
+                                   .t5 = 10ms,
+                                   .t6 = 50ms,
+                                   .t7 = 50ms,
+                                   .t8 = 0ms,
+                                   .linktest_interval = 0ms,
+                                   .auto_reconnect = false,
+                               });
+
+    SessionOptions proto_opts{};
+    proto_opts.t3 = 200ms;
+    proto_opts.poll_interval = 1ms;
+
+    Session proto_server(server, session_id, proto_opts);
+    Session proto_client(client, session_id, proto_opts);
+
+    std::atomic<std::size_t> server_handled{0};
+    proto_server.router().set(
+        1,
+        1,
+        [&](const DataMessage &msg)
+            -> asio::awaitable<secs::protocol::HandlerResult> {
+            ++server_handled;
+            co_return secs::protocol::HandlerResult{std::error_code{},
+                                                    msg.body};
+        });
+
+    std::atomic<std::size_t> client_handled{0};
+    proto_client.router().set(
+        2,
+        1,
+        [&](const DataMessage &msg)
+            -> asio::awaitable<secs::protocol::HandlerResult> {
+            ++client_handled;
+            std::vector<byte> out = msg.body;
+            out.push_back(static_cast<byte>(0x42));
+            co_return secs::protocol::HandlerResult{std::error_code{},
+                                                    std::move(out)};
+        });
+
+    auto duplex = make_memory_duplex(ioc.get_executor());
+    Connection server_conn(std::move(duplex.server_stream));
+    Connection client_conn(std::move(duplex.client_stream));
+
+    asio::co_spawn(
+        ioc,
+        [&, server_conn = std::move(server_conn)]() mutable
+        -> asio::awaitable<void> {
+            auto ec =
+                co_await server.async_open_passive(std::move(server_conn));
+            TEST_EXPECT_OK(ec);
+            server_opened.set();
+        },
+        asio::detached);
+
+    asio::co_spawn(
+        ioc,
+        [&, client_conn = std::move(client_conn)]() mutable
+        -> asio::awaitable<void> {
+            auto ec = co_await client.async_open_active(std::move(client_conn));
+            TEST_EXPECT_OK(ec);
+            client_opened.set();
+        },
+        asio::detached);
+
+    std::atomic<bool> done{false};
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            TEST_EXPECT_OK(co_await server_opened.async_wait(200ms));
+            TEST_EXPECT_OK(co_await client_opened.async_wait(200ms));
+
+            asio::co_spawn(ioc, proto_server.async_run(), asio::detached);
+            asio::co_spawn(ioc, proto_client.async_run(), asio::detached);
+
+            // client -> server
+            {
+                const std::vector<byte> payload = {0x10, 0x20, 0x30};
+                auto [ec, rsp] = co_await proto_client.async_request(
+                    1, 1, bytes_view{payload.data(), payload.size()});
+                TEST_EXPECT_OK(ec);
+                TEST_EXPECT_EQ(rsp.stream, 1);
+                TEST_EXPECT_EQ(rsp.function, 2);
+                TEST_EXPECT(!rsp.w_bit);
+                TEST_EXPECT_EQ(rsp.body.size(), payload.size());
+                TEST_EXPECT(std::equal(
+                    rsp.body.begin(), rsp.body.end(), payload.begin()));
+            }
+
+            // server -> client（验证被动端也可主动发送 data primary）
+            {
+                const std::vector<byte> payload = {0xAB, 0xCD};
+                auto [ec, rsp] = co_await proto_server.async_request(
+                    2, 1, bytes_view{payload.data(), payload.size()});
+                TEST_EXPECT_OK(ec);
+                TEST_EXPECT_EQ(rsp.stream, 2);
+                TEST_EXPECT_EQ(rsp.function, 2);
+                TEST_EXPECT(!rsp.w_bit);
+                TEST_EXPECT_EQ(rsp.body.size(), payload.size() + 1U);
+                TEST_EXPECT(std::equal(
+                    rsp.body.begin(), rsp.body.end() - 1, payload.begin()));
+                TEST_EXPECT_EQ(rsp.body.back(), static_cast<byte>(0x42));
+            }
+
+            proto_server.stop();
+            proto_client.stop();
+            client.stop();
+            server.stop();
+            done = true;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(done);
+    TEST_EXPECT_EQ(server_handled.load(), 1U);
+    TEST_EXPECT_EQ(client_handled.load(), 1U);
+}
+
 void test_hsms_protocol_t3_timeout() {
     asio::io_context ioc;
     const std::uint16_t session_id = 0x1002;
@@ -1099,6 +1257,77 @@ void test_secs1_protocol_reverse_bit_respects_options() {
     expect_frames_reverse_bit(equip_link.writes(), true);
 }
 
+void test_secs1_protocol_equipment_can_initiate_primary() {
+    asio::io_context ioc;
+
+    auto [a, b] = MemoryLink::create(ioc.get_executor());
+
+    Timeouts timeouts{};
+    timeouts.t1_intercharacter = 50ms;
+    timeouts.t2_protocol = 100ms;
+    timeouts.t3_reply = 200ms;
+    timeouts.t4_interblock = 100ms;
+
+    constexpr std::uint16_t device_id = 0x0001;
+    StateMachine host_sm(a, device_id, timeouts);
+    StateMachine equip_sm(b, device_id, timeouts);
+
+    SessionOptions host_opts{};
+    host_opts.t3 = 200ms;
+    host_opts.poll_interval = 1ms;
+    host_opts.secs1_reverse_bit = false; // Host -> Equipment
+
+    SessionOptions equip_opts{};
+    equip_opts.t3 = 200ms;
+    equip_opts.poll_interval = 1ms;
+    equip_opts.secs1_reverse_bit = true; // Equipment -> Host
+
+    Session proto_host(host_sm, device_id, host_opts);
+    Session proto_equip(equip_sm, device_id, equip_opts);
+
+    std::atomic<std::size_t> handled{0};
+    proto_host.router().set(
+        2,
+        1,
+        [&](const DataMessage &msg)
+            -> asio::awaitable<secs::protocol::HandlerResult> {
+            ++handled;
+            std::vector<byte> out = msg.body;
+            out.push_back(static_cast<byte>(0xE1));
+            co_return secs::protocol::HandlerResult{std::error_code{},
+                                                    std::move(out)};
+        });
+
+    asio::co_spawn(ioc, proto_host.async_run(), asio::detached);
+
+    std::atomic<bool> done{false};
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            const std::vector<byte> payload = {0x01, 0x02, 0x03};
+            auto [ec, rsp] = co_await proto_equip.async_request(
+                2, 1, bytes_view{payload.data(), payload.size()}, 200ms);
+
+            TEST_EXPECT_OK(ec);
+            TEST_EXPECT_EQ(rsp.stream, 2);
+            TEST_EXPECT_EQ(rsp.function, 2);
+            TEST_EXPECT(!rsp.w_bit);
+            TEST_EXPECT_EQ(rsp.body.size(), payload.size() + 1U);
+            TEST_EXPECT(std::equal(
+                rsp.body.begin(), rsp.body.end() - 1, payload.begin()));
+            TEST_EXPECT_EQ(rsp.body.back(), static_cast<byte>(0xE1));
+
+            proto_host.stop();
+            proto_equip.stop();
+            done = true;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(done);
+    TEST_EXPECT_EQ(handled.load(), 1U);
+}
+
 void test_session_invalid_arguments() {
     asio::io_context ioc;
     const std::uint16_t session_id = 0x2001;
@@ -1147,9 +1376,11 @@ int main() {
     test_hsms_protocol_disconnect_cancels_pending();
     test_hsms_protocol_run_without_poll_interval();
     test_hsms_protocol_echo_1000();
+    test_hsms_protocol_both_sides_can_initiate_primary();
     test_hsms_protocol_t3_timeout();
     test_secs1_protocol_echo_100();
     test_secs1_protocol_reverse_bit_respects_options();
+    test_secs1_protocol_equipment_can_initiate_primary();
     test_session_invalid_arguments();
     return secs::tests::run_and_report();
 }

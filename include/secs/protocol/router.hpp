@@ -40,6 +40,7 @@ using Handler =
  *
  * 说明：
  * - key 采用 (stream,function) 二元组；不支持通配符，保持实现简单可控。
+ * - 支持一个可选的 default handler：当未找到精确匹配时回退到 default。
  * - handler 为协程函数，返回 response body；错误通过 std::error_code 返回。
  */
 class Router final {
@@ -47,7 +48,9 @@ public:
     Router() = default;
 
     void set(std::uint8_t stream, std::uint8_t function, Handler handler);
+    void set_default(Handler handler);
     void erase(std::uint8_t stream, std::uint8_t function) noexcept;
+    void clear_default() noexcept;
     void clear() noexcept;
 
     [[nodiscard]] std::optional<Handler> find(std::uint8_t stream,
@@ -64,6 +67,7 @@ private:
 
     mutable std::mutex mu_{};
     std::unordered_map<Key, Handler> handlers_{};
+    std::optional<Handler> default_handler_{};
 };
 
 } // namespace secs::protocol

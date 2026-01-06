@@ -67,6 +67,21 @@ char *secs_error_message(secs_error_t err);
 /* 版本信息（静态字符串，勿释放）。 */
 const char *secs_version_string(void);
 
+/* ----------------------------- 日志 ----------------------------- */
+
+/* 日志级别（映射到库内部 spdlog 的全局级别）。 */
+typedef enum secs_log_level {
+    SECS_LOG_TRACE = 0,
+    SECS_LOG_DEBUG = 1,
+    SECS_LOG_INFO = 2,
+    SECS_LOG_WARN = 3,
+    SECS_LOG_ERROR = 4,
+    SECS_LOG_CRITICAL = 5,
+    SECS_LOG_OFF = 6
+} secs_log_level_t;
+
+secs_error_t secs_log_set_level(secs_log_level_t level);
+
 /* ----------------------------- 上下文（io 线程） -----------------------------
  */
 
@@ -461,6 +476,15 @@ secs_error_t secs_protocol_session_set_handler(secs_protocol_session_t *sess,
                                                uint8_t function,
                                                secs_protocol_handler_fn cb,
                                                void *user_data);
+
+/* 设置 default handler：当未找到精确 (stream,function) handler 时回退到 default。 */
+secs_error_t
+secs_protocol_session_set_default_handler(secs_protocol_session_t *sess,
+                                          secs_protocol_handler_fn cb,
+                                          void *user_data);
+
+secs_error_t
+secs_protocol_session_clear_default_handler(secs_protocol_session_t *sess);
 
 secs_error_t secs_protocol_session_erase_handler(secs_protocol_session_t *sess,
                                                  uint8_t stream,

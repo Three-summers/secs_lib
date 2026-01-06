@@ -1170,6 +1170,41 @@ static secs_error_t server_handler(void *user_data,
     }
 }
 
+static secs_error_t client_echo_handler(void *user_data,
+                                       const secs_data_message_view_t *request,
+                                       uint8_t **out_body,
+                                       size_t *out_body_n) {
+    (void)user_data;
+    if (!request || !out_body || !out_body_n) {
+        secs_error_t err;
+        err.value = (int)SECS_C_API_INVALID_ARGUMENT;
+        err.category = "secs.c_api";
+        return err;
+    }
+
+    const size_t n = request->body_n + 1u;
+    *out_body_n = n;
+    *out_body = (uint8_t *)secs_malloc(n);
+    if (!*out_body) {
+        secs_error_t oom;
+        oom.value = (int)SECS_C_API_OUT_OF_MEMORY;
+        oom.category = "secs.c_api";
+        return oom;
+    }
+
+    if (request->body_n > 0 && request->body) {
+        memcpy(*out_body, request->body, request->body_n);
+    }
+    (*out_body)[n - 1u] = 0x99u;
+
+    {
+        secs_error_t ok;
+        ok.value = 0;
+        ok.category = "secs.c_api";
+        return ok;
+    }
+}
+
 struct hsms_wrong_thread_ud {
     secs_hsms_session_t *server_hsms;
 };
@@ -1739,6 +1774,69 @@ static void test_hsms_protocol_loopback(void) {
         }
 
         secs_data_message_free(&reply);
+    }
+
+    /* 反向验证：server 也可以主动发起 data primary（双方均可主动发送） */
+    {
+        expect_ok("secs_protocol_session_set_handler(client_echo)",
+                  secs_protocol_session_set_handler(
+                      client_proto, 2, 1, client_echo_handler, NULL));
+
+        const uint8_t req_body[2] = {0xABu, 0xCDu};
+        secs_data_message_t reply;
+        memset(&reply, 0, sizeof(reply));
+
+        expect_ok("secs_protocol_session_request(server->client)",
+                  secs_protocol_session_request(server_proto,
+                                                2,
+                                                1,
+                                                req_body,
+                                                sizeof(req_body),
+                                                1000,
+                                                &reply));
+
+        if (reply.stream != 2u || reply.function != 2u || reply.w_bit != 0) {
+            fprintf(stderr, "FAIL: server->client reply header mismatch\n");
+            ++g_failures;
+        }
+        if (reply.body_n != 3u || !reply.body || reply.body[0] != 0xABu ||
+            reply.body[1] != 0xCDu || reply.body[2] != 0x99u) {
+            fprintf(stderr, "FAIL: server->client reply body mismatch\n");
+            ++g_failures;
+        }
+
+        secs_data_message_free(&reply);
+        expect_ok("secs_protocol_session_erase_handler(client_echo)",
+                  secs_protocol_session_erase_handler(client_proto, 2, 1));
+    }
+
+    /* default handler：未注册的 (stream,function) 也可被统一处理 */
+    {
+        expect_ok("secs_protocol_session_set_default_handler(server_default)",
+                  secs_protocol_session_set_default_handler(
+                      server_proto, client_echo_handler, NULL));
+
+        const uint8_t req_body[1] = {0x55u};
+        secs_data_message_t reply;
+        memset(&reply, 0, sizeof(reply));
+
+        expect_ok("secs_protocol_session_request(default handler)",
+                  secs_protocol_session_request(
+                      client_proto, 20, 1, req_body, sizeof(req_body), 1000, &reply));
+
+        if (reply.stream != 20u || reply.function != 2u || reply.w_bit != 0) {
+            fprintf(stderr, "FAIL: default handler reply header mismatch\n");
+            ++g_failures;
+        }
+        if (reply.body_n != 2u || !reply.body || reply.body[0] != 0x55u ||
+            reply.body[1] != 0x99u) {
+            fprintf(stderr, "FAIL: default handler reply body mismatch\n");
+            ++g_failures;
+        }
+
+        secs_data_message_free(&reply);
+        expect_ok("secs_protocol_session_clear_default_handler(server_default)",
+                  secs_protocol_session_clear_default_handler(server_proto));
     }
 
     /* 通过 protocol handler 在 io 线程内误用 HSMS 阻塞式 API：必须返回 WRONG_THREAD */

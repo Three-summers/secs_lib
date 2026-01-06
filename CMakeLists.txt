@@ -42,6 +42,7 @@ add_library(secs_core
   src/core/buffer.cpp
   src/core/event.cpp
   src/core/error.cpp
+  src/core/log.cpp
 )
 add_library(secs::core ALIAS secs_core)
 set_target_properties(secs_core PROPERTIES EXPORT_NAME core)
@@ -202,6 +203,19 @@ secs_link_standalone_asio(secs_core)
 add_library(secs::asio ALIAS secs_asio)
 set_target_properties(secs_asio PROPERTIES EXPORT_NAME asio)
 target_compile_features(secs_asio INTERFACE cxx_std_20)
+
+# spdlog（vendored，header-only）：仅用于库内部日志，不暴露到 public headers。
+set(_secs_spdlog_include_dir "${PROJECT_SOURCE_DIR}/third_party/spdlog/include")
+set(_secs_spdlog_defs
+  SPDLOG_NO_EXCEPTIONS
+  SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_DEBUG
+)
+foreach(secs_target IN ITEMS secs_core secs_secs1 secs_hsms secs_protocol secs_c_api)
+  target_include_directories(${secs_target} PRIVATE ${_secs_spdlog_include_dir})
+  target_compile_definitions(${secs_target} PRIVATE ${_secs_spdlog_defs})
+endforeach()
+unset(_secs_spdlog_include_dir)
+unset(_secs_spdlog_defs)
 
 include(CodeCoverage)
 

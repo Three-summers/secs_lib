@@ -11,6 +11,7 @@
 #include <asio/use_awaitable.hpp>
 
 #include <algorithm>
+#include <spdlog/spdlog.h>
 #include <vector>
 
 namespace secs::hsms {
@@ -77,6 +78,7 @@ void Session::set_selected_() noexcept {
     connection_.enable_data_writes();
     const auto gen = selected_generation_.fetch_add(1U) + 1U;
     selected_event_.set();
+    SPDLOG_DEBUG("hsms selected: generation={}", gen);
 
     if (options_.linktest_interval != core::duration{}) {
         asio::co_spawn(
@@ -105,9 +107,11 @@ void Session::set_not_selected_() noexcept {
     inbound_event_.reset();
 
     cancel_pending_data_(core::make_error_code(core::errc::cancelled));
+    SPDLOG_DEBUG("hsms not-selected");
 }
 
 void Session::on_disconnected_(std::error_code reason) noexcept {
+    SPDLOG_DEBUG("hsms disconnected: ec={}({})", reason.value(), reason.message());
     state_ = SessionState::disconnected;
     connection_.disable_data_writes(reason);
 
@@ -131,6 +135,7 @@ void Session::stop() noexcept {
     stop_requested_ = true;
     connection_.cancel_and_close();
 
+    SPDLOG_DEBUG("hsms stop requested");
     on_disconnected_(core::make_error_code(core::errc::cancelled));
 }
 
@@ -460,6 +465,10 @@ Session::async_open_active(const asio::ip::tcp::endpoint &endpoint) {
         co_return core::make_error_code(core::errc::cancelled);
     }
 
+    SPDLOG_DEBUG("hsms open_active: port={} session_id={}",
+                 endpoint.port(),
+                 options_.session_id);
+
     Connection conn(executor_, ConnectionOptions{.t8 = options_.t8});
     auto ec = co_await conn.async_connect(endpoint);
     if (ec) {
@@ -475,6 +484,8 @@ Session::async_open_active(Connection &&connection) {
     if (stop_requested_) {
         co_return core::make_error_code(core::errc::cancelled);
     }
+
+    SPDLOG_DEBUG("hsms open_active(connection): session_id={}", options_.session_id);
 
     if (reader_running_) {
         // 若旧连接的 reader_loop_ 仍在跑，先关闭旧连接并等待其退出，避免两个
@@ -505,6 +516,7 @@ Session::async_open_active(Connection &&connection) {
     }
 
     set_selected_();
+    SPDLOG_DEBUG("hsms open_active selected");
     co_return std::error_code{};
 }
 
@@ -513,6 +525,8 @@ Session::async_open_passive(asio::ip::tcp::socket socket) {
     if (stop_requested_) {
         co_return core::make_error_code(core::errc::cancelled);
     }
+
+    SPDLOG_DEBUG("hsms open_passive(socket): session_id={}", options_.session_id);
 
     Connection conn(std::move(socket), ConnectionOptions{.t8 = options_.t8});
     co_return co_await async_open_passive(std::move(conn));
@@ -523,6 +537,8 @@ Session::async_open_passive(Connection &&connection) {
     if (stop_requested_) {
         co_return core::make_error_code(core::errc::cancelled);
     }
+
+    SPDLOG_DEBUG("hsms open_passive(connection): session_id={}", options_.session_id);
 
     if (reader_running_) {
         // 同主动端：确保不会有“两个 reader_loop_ 同时存在”。
@@ -541,6 +557,7 @@ Session::async_open_passive(Connection &&connection) {
         co_return ec;
     }
 
+    SPDLOG_DEBUG("hsms open_passive selected");
     co_return std::error_code{};
 }
 
@@ -577,6 +594,20 @@ asio::awaitable<std::error_code> Session::async_send(const Message &msg) {
     if (msg.is_data() && state_ != SessionState::selected) {
         co_return core::make_error_code(core::errc::invalid_argument);
     }
+
+    if (msg.is_data()) {
+        SPDLOG_DEBUG("hsms send data: S{}F{} W={} sb={} body_n={}",
+                     static_cast<int>(msg.stream()),
+                     static_cast<int>(msg.function()),
+                     msg.w_bit() ? 1 : 0,
+                     msg.header.system_bytes,
+                     msg.body.size());
+    } else {
+        SPDLOG_DEBUG("hsms send control: stype={} sb={}",
+                     static_cast<int>(msg.header.s_type),
+                     msg.header.system_bytes);
+    }
+
     co_return co_await connection_.async_write_message(msg);
 }
 
