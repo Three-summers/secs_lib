@@ -7,6 +7,7 @@
 #include <limits>
 #include <new>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 
@@ -302,115 +303,135 @@ std::error_code encoded_size_impl(const Item &item,
     std::size_t payload_size = 0;
     std::uint32_t length_value = 0;
 
-    const auto &storage = item.storage();
-
-    if (const auto *v = std::get_if<List>(&storage)) {
-        if (v->size() > kMaxLength) {
-            return make_error_code(errc::length_overflow);
-        }
-        length_value = static_cast<std::uint32_t>(v->size());
-        for (const auto &child : *v) {
-            std::size_t child_size = 0;
-            auto ec = encoded_size_impl(child, child_size);
-            if (ec) {
-                return ec;
+    auto ec = std::visit(
+        [&](const auto &v) -> std::error_code {
+            using T = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<T, List>) {
+                if (v.size() > kMaxLength) {
+                    return make_error_code(errc::length_overflow);
+                }
+                length_value = static_cast<std::uint32_t>(v.size());
+                for (const auto &child : v) {
+                    std::size_t child_size = 0;
+                    auto child_ec = encoded_size_impl(child, child_size);
+                    if (child_ec) {
+                        return child_ec;
+                    }
+                    std::size_t next = 0;
+                    if (!checked_add(payload_size, child_size, next)) {
+                        return make_error_code(errc::length_overflow);
+                    }
+                    payload_size = next;
+                }
+                return {};
+            } else if constexpr (std::is_same_v<T, ASCII>) {
+                if (v.value.size() > kMaxLength) {
+                    return make_error_code(errc::length_overflow);
+                }
+                payload_size = v.value.size();
+                length_value = static_cast<std::uint32_t>(payload_size);
+                return {};
+            } else if constexpr (std::is_same_v<T, Binary>) {
+                if (v.value.size() > kMaxLength) {
+                    return make_error_code(errc::length_overflow);
+                }
+                payload_size = v.value.size();
+                length_value = static_cast<std::uint32_t>(payload_size);
+                return {};
+            } else if constexpr (std::is_same_v<T, Boolean>) {
+                if (v.values.size() > kMaxLength) {
+                    return make_error_code(errc::length_overflow);
+                }
+                payload_size = v.values.size();
+                length_value = static_cast<std::uint32_t>(payload_size);
+                return {};
+            } else if constexpr (std::is_same_v<T, I1>) {
+                auto len_ec = numeric_payload_length(
+                    v.values.size(), sizeof(std::int8_t), length_value);
+                if (len_ec) {
+                    return len_ec;
+                }
+                payload_size = length_value;
+                return {};
+            } else if constexpr (std::is_same_v<T, I2>) {
+                auto len_ec = numeric_payload_length(
+                    v.values.size(), sizeof(std::int16_t), length_value);
+                if (len_ec) {
+                    return len_ec;
+                }
+                payload_size = length_value;
+                return {};
+            } else if constexpr (std::is_same_v<T, I4>) {
+                auto len_ec = numeric_payload_length(
+                    v.values.size(), sizeof(std::int32_t), length_value);
+                if (len_ec) {
+                    return len_ec;
+                }
+                payload_size = length_value;
+                return {};
+            } else if constexpr (std::is_same_v<T, I8>) {
+                auto len_ec = numeric_payload_length(
+                    v.values.size(), sizeof(std::int64_t), length_value);
+                if (len_ec) {
+                    return len_ec;
+                }
+                payload_size = length_value;
+                return {};
+            } else if constexpr (std::is_same_v<T, U1>) {
+                auto len_ec = numeric_payload_length(
+                    v.values.size(), sizeof(std::uint8_t), length_value);
+                if (len_ec) {
+                    return len_ec;
+                }
+                payload_size = length_value;
+                return {};
+            } else if constexpr (std::is_same_v<T, U2>) {
+                auto len_ec = numeric_payload_length(
+                    v.values.size(), sizeof(std::uint16_t), length_value);
+                if (len_ec) {
+                    return len_ec;
+                }
+                payload_size = length_value;
+                return {};
+            } else if constexpr (std::is_same_v<T, U4>) {
+                auto len_ec = numeric_payload_length(
+                    v.values.size(), sizeof(std::uint32_t), length_value);
+                if (len_ec) {
+                    return len_ec;
+                }
+                payload_size = length_value;
+                return {};
+            } else if constexpr (std::is_same_v<T, U8>) {
+                auto len_ec = numeric_payload_length(
+                    v.values.size(), sizeof(std::uint64_t), length_value);
+                if (len_ec) {
+                    return len_ec;
+                }
+                payload_size = length_value;
+                return {};
+            } else if constexpr (std::is_same_v<T, F4>) {
+                auto len_ec = numeric_payload_length(
+                    v.values.size(), sizeof(float), length_value);
+                if (len_ec) {
+                    return len_ec;
+                }
+                payload_size = length_value;
+                return {};
+            } else if constexpr (std::is_same_v<T, F8>) {
+                auto len_ec = numeric_payload_length(
+                    v.values.size(), sizeof(double), length_value);
+                if (len_ec) {
+                    return len_ec;
+                }
+                payload_size = length_value;
+                return {};
+            } else {
+                return make_error_code(errc::invalid_format);
             }
-            std::size_t next = 0;
-            if (!checked_add(payload_size, child_size, next)) {
-                return make_error_code(errc::length_overflow);
-            }
-            payload_size = next;
-        }
-    } else if (const auto *v_ascii = std::get_if<ASCII>(&storage)) {
-        if (v_ascii->value.size() > kMaxLength) {
-            return make_error_code(errc::length_overflow);
-        }
-        payload_size = v_ascii->value.size();
-        length_value = static_cast<std::uint32_t>(payload_size);
-    } else if (const auto *v_bin = std::get_if<Binary>(&storage)) {
-        if (v_bin->value.size() > kMaxLength) {
-            return make_error_code(errc::length_overflow);
-        }
-        payload_size = v_bin->value.size();
-        length_value = static_cast<std::uint32_t>(payload_size);
-    } else if (const auto *v_bool = std::get_if<Boolean>(&storage)) {
-        if (v_bool->values.size() > kMaxLength) {
-            return make_error_code(errc::length_overflow);
-        }
-        payload_size = v_bool->values.size();
-        length_value = static_cast<std::uint32_t>(payload_size);
-    } else if (const auto *v = std::get_if<I1>(&storage)) {
-        auto ec = numeric_payload_length(
-            v->values.size(), sizeof(std::int8_t), length_value);
-        if (ec) {
-            return ec;
-        }
-        payload_size = length_value;
-    } else if (const auto *v = std::get_if<I2>(&storage)) {
-        auto ec = numeric_payload_length(
-            v->values.size(), sizeof(std::int16_t), length_value);
-        if (ec) {
-            return ec;
-        }
-        payload_size = length_value;
-    } else if (const auto *v = std::get_if<I4>(&storage)) {
-        auto ec = numeric_payload_length(
-            v->values.size(), sizeof(std::int32_t), length_value);
-        if (ec) {
-            return ec;
-        }
-        payload_size = length_value;
-    } else if (const auto *v = std::get_if<I8>(&storage)) {
-        auto ec = numeric_payload_length(
-            v->values.size(), sizeof(std::int64_t), length_value);
-        if (ec) {
-            return ec;
-        }
-        payload_size = length_value;
-    } else if (const auto *v = std::get_if<U1>(&storage)) {
-        auto ec = numeric_payload_length(
-            v->values.size(), sizeof(std::uint8_t), length_value);
-        if (ec) {
-            return ec;
-        }
-        payload_size = length_value;
-    } else if (const auto *v = std::get_if<U2>(&storage)) {
-        auto ec = numeric_payload_length(
-            v->values.size(), sizeof(std::uint16_t), length_value);
-        if (ec) {
-            return ec;
-        }
-        payload_size = length_value;
-    } else if (const auto *v = std::get_if<U4>(&storage)) {
-        auto ec = numeric_payload_length(
-            v->values.size(), sizeof(std::uint32_t), length_value);
-        if (ec) {
-            return ec;
-        }
-        payload_size = length_value;
-    } else if (const auto *v = std::get_if<U8>(&storage)) {
-        auto ec = numeric_payload_length(
-            v->values.size(), sizeof(std::uint64_t), length_value);
-        if (ec) {
-            return ec;
-        }
-        payload_size = length_value;
-    } else if (const auto *v = std::get_if<F4>(&storage)) {
-        auto ec = numeric_payload_length(
-            v->values.size(), sizeof(float), length_value);
-        if (ec) {
-            return ec;
-        }
-        payload_size = length_value;
-    } else if (const auto *v = std::get_if<F8>(&storage)) {
-        auto ec = numeric_payload_length(
-            v->values.size(), sizeof(double), length_value);
-        if (ec) {
-            return ec;
-        }
-        payload_size = length_value;
-    } else {
-        return make_error_code(errc::invalid_format);
+        },
+        item.storage());
+    if (ec) {
+        return ec;
     }
 
     const auto header =
@@ -550,92 +571,73 @@ std::error_code encode_item(const Item &item, SpanWriter &w) noexcept {
     const auto code = item_code(item);
 
     std::uint32_t length_value = 0;
-    const auto &storage = item.storage();
-    if (const auto *v = std::get_if<List>(&storage)) {
-        if (v->size() > kMaxLength) {
-            return make_error_code(errc::length_overflow);
-        }
-        length_value = static_cast<std::uint32_t>(v->size());
-    } else if (const auto *v = std::get_if<ASCII>(&storage)) {
-        if (v->value.size() > kMaxLength) {
-            return make_error_code(errc::length_overflow);
-        }
-        length_value = static_cast<std::uint32_t>(v->value.size());
-    } else if (const auto *v = std::get_if<Binary>(&storage)) {
-        if (v->value.size() > kMaxLength) {
-            return make_error_code(errc::length_overflow);
-        }
-        length_value = static_cast<std::uint32_t>(v->value.size());
-    } else if (const auto *v = std::get_if<Boolean>(&storage)) {
-        if (v->values.size() > kMaxLength) {
-            return make_error_code(errc::length_overflow);
-        }
-        length_value = static_cast<std::uint32_t>(v->values.size());
-    } else if (const auto *v = std::get_if<I1>(&storage)) {
-        auto ec = numeric_payload_length(
-            v->values.size(), sizeof(std::int8_t), length_value);
-        if (ec) {
-            return ec;
-        }
-    } else if (const auto *v = std::get_if<I2>(&storage)) {
-        auto ec = numeric_payload_length(
-            v->values.size(), sizeof(std::int16_t), length_value);
-        if (ec) {
-            return ec;
-        }
-    } else if (const auto *v = std::get_if<I4>(&storage)) {
-        auto ec = numeric_payload_length(
-            v->values.size(), sizeof(std::int32_t), length_value);
-        if (ec) {
-            return ec;
-        }
-    } else if (const auto *v = std::get_if<I8>(&storage)) {
-        auto ec = numeric_payload_length(
-            v->values.size(), sizeof(std::int64_t), length_value);
-        if (ec) {
-            return ec;
-        }
-    } else if (const auto *v = std::get_if<U1>(&storage)) {
-        auto ec = numeric_payload_length(
-            v->values.size(), sizeof(std::uint8_t), length_value);
-        if (ec) {
-            return ec;
-        }
-    } else if (const auto *v = std::get_if<U2>(&storage)) {
-        auto ec = numeric_payload_length(
-            v->values.size(), sizeof(std::uint16_t), length_value);
-        if (ec) {
-            return ec;
-        }
-    } else if (const auto *v = std::get_if<U4>(&storage)) {
-        auto ec = numeric_payload_length(
-            v->values.size(), sizeof(std::uint32_t), length_value);
-        if (ec) {
-            return ec;
-        }
-    } else if (const auto *v = std::get_if<U8>(&storage)) {
-        auto ec = numeric_payload_length(
-            v->values.size(), sizeof(std::uint64_t), length_value);
-        if (ec) {
-            return ec;
-        }
-    } else if (const auto *v = std::get_if<F4>(&storage)) {
-        auto ec = numeric_payload_length(
-            v->values.size(), sizeof(float), length_value);
-        if (ec) {
-            return ec;
-        }
-    } else if (const auto *v = std::get_if<F8>(&storage)) {
-        auto ec = numeric_payload_length(
-            v->values.size(), sizeof(double), length_value);
-        if (ec) {
-            return ec;
-        }
-    } else {
-        return make_error_code(errc::invalid_format);
+    auto ec = std::visit(
+        [&](const auto &v) -> std::error_code {
+            using T = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<T, List>) {
+                if (v.size() > kMaxLength) {
+                    return make_error_code(errc::length_overflow);
+                }
+                length_value = static_cast<std::uint32_t>(v.size());
+                return {};
+            } else if constexpr (std::is_same_v<T, ASCII>) {
+                if (v.value.size() > kMaxLength) {
+                    return make_error_code(errc::length_overflow);
+                }
+                length_value = static_cast<std::uint32_t>(v.value.size());
+                return {};
+            } else if constexpr (std::is_same_v<T, Binary>) {
+                if (v.value.size() > kMaxLength) {
+                    return make_error_code(errc::length_overflow);
+                }
+                length_value = static_cast<std::uint32_t>(v.value.size());
+                return {};
+            } else if constexpr (std::is_same_v<T, Boolean>) {
+                if (v.values.size() > kMaxLength) {
+                    return make_error_code(errc::length_overflow);
+                }
+                length_value = static_cast<std::uint32_t>(v.values.size());
+                return {};
+            } else if constexpr (std::is_same_v<T, I1>) {
+                return numeric_payload_length(
+                    v.values.size(), sizeof(std::int8_t), length_value);
+            } else if constexpr (std::is_same_v<T, I2>) {
+                return numeric_payload_length(
+                    v.values.size(), sizeof(std::int16_t), length_value);
+            } else if constexpr (std::is_same_v<T, I4>) {
+                return numeric_payload_length(
+                    v.values.size(), sizeof(std::int32_t), length_value);
+            } else if constexpr (std::is_same_v<T, I8>) {
+                return numeric_payload_length(
+                    v.values.size(), sizeof(std::int64_t), length_value);
+            } else if constexpr (std::is_same_v<T, U1>) {
+                return numeric_payload_length(
+                    v.values.size(), sizeof(std::uint8_t), length_value);
+            } else if constexpr (std::is_same_v<T, U2>) {
+                return numeric_payload_length(
+                    v.values.size(), sizeof(std::uint16_t), length_value);
+            } else if constexpr (std::is_same_v<T, U4>) {
+                return numeric_payload_length(
+                    v.values.size(), sizeof(std::uint32_t), length_value);
+            } else if constexpr (std::is_same_v<T, U8>) {
+                return numeric_payload_length(
+                    v.values.size(), sizeof(std::uint64_t), length_value);
+            } else if constexpr (std::is_same_v<T, F4>) {
+                return numeric_payload_length(
+                    v.values.size(), sizeof(float), length_value);
+            } else if constexpr (std::is_same_v<T, F8>) {
+                return numeric_payload_length(
+                    v.values.size(), sizeof(double), length_value);
+            } else {
+                return make_error_code(errc::invalid_format);
+            }
+        },
+        item.storage());
+    if (ec) {
+        return ec;
     }
 
-    auto ec = encode_header_and_length(code, length_value, w);
+    ec = encode_header_and_length(code, length_value, w);
     if (ec) {
         return ec;
     }
@@ -947,8 +949,16 @@ std::error_code encode(const Item &item, std::vector<byte> &out) noexcept {
     // 先一次性扩容到目标大小：
     // - encode_to 会写入固定 span，避免反复 push_back 带来的 realloc/拷贝
     // - 失败时回滚 out 的 size，保证调用方看到的 out 仍是“原子追加”的结果
-    out.reserve(offset + size);
-    out.resize(offset + size);
+    try {
+        out.reserve(offset + size);
+        out.resize(offset + size);
+    } catch (const std::bad_alloc &) {
+        return make_error_code(errc::out_of_memory);
+    } catch (const std::length_error &) {
+        return make_error_code(errc::length_overflow);
+    } catch (...) {
+        return make_error_code(errc::invalid_header);
+    }
     mutable_bytes_view dest{out.data() + offset, size};
 
     std::size_t written = 0;

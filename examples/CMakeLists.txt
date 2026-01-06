@@ -7,6 +7,12 @@ add_executable(secs2_simple secs2_simple.cpp)
 target_link_libraries(secs2_simple PRIVATE secs::ii secs::core)
 list(APPEND _secs_example_targets secs2_simple)
 
+# C API（C ABI）SECS-II 编解码示例（源文件为 C，但链接需使用 C++ 链接器）
+add_executable(c_api_secs2_simple c_api_secs2_simple.c)
+target_link_libraries(c_api_secs2_simple PRIVATE secs::c_api)
+set_target_properties(c_api_secs2_simple PROPERTIES LINKER_LANGUAGE CXX)
+list(APPEND _secs_example_targets c_api_secs2_simple)
+
 # HSMS 服务器示例
 add_executable(hsms_server hsms_server.cpp)
 target_link_libraries(hsms_server PRIVATE secs::hsms secs::ii secs::core)
@@ -26,6 +32,17 @@ list(APPEND _secs_example_targets typed_handler_example)
 add_executable(secs1_loopback secs1_loopback.cpp)
 target_link_libraries(secs1_loopback PRIVATE secs::protocol secs::core)
 list(APPEND _secs_example_targets secs1_loopback)
+
+# HSMS（pipe）示例：通过 stdin/stdout 承载 HSMS 帧（仅在 UNIX 可用，依赖 asio::posix）
+if(UNIX)
+  add_executable(hsms_pipe_server hsms_pipe_server.cpp)
+  target_link_libraries(hsms_pipe_server PRIVATE secs::hsms secs::ii secs::core)
+  list(APPEND _secs_example_targets hsms_pipe_server)
+
+  add_executable(hsms_pipe_client hsms_pipe_client.cpp)
+  target_link_libraries(hsms_pipe_client PRIVATE secs::hsms secs::ii secs::core)
+  list(APPEND _secs_example_targets hsms_pipe_client)
+endif()
 
 # SECS-I（tty/pty）串口示例：仅在 UNIX 可用（依赖 termios / posix fd）
 if(UNIX)

@@ -11,8 +11,11 @@ cmake --build build --target examples
 
 # 运行
 ./build/examples/secs2_simple
+./build/examples/c_api_secs2_simple
 ./build/examples/hsms_server [port]
 ./build/examples/hsms_client [host] [port]
+./build/examples/hsms_pipe_server [device_id]
+./build/examples/hsms_pipe_client [device_id]
 ./build/examples/secs1_loopback
 ./build/examples/secs1_serial_server <tty_path>
 ./build/examples/secs1_serial_client <tty_path>
@@ -68,6 +71,17 @@ cmake --build build --target examples
 [客户端] 响应内容: "OK"
 ```
 
+## HSMS（pipe）客户端/服务器示例（受限环境推荐）
+
+当运行环境禁用 `socket()`（例如部分沙箱/容器），`hsms_server/hsms_client` 的真实 TCP 示例将无法启动。
+此时可使用 `hsms_pipe_server/hsms_pipe_client`：它们通过 **stdin/stdout** 传输 HSMS 帧（二进制流），日志仅输出到 stderr。
+
+推荐直接运行联调测试（会启动两个示例程序并用管道交叉连接，验证一次请求-响应）：
+
+```bash
+ctest --test-dir build -R hsms_pipe_examples --output-on-failure
+```
+
 ## secs2_simple.cpp - SECS-II 编解码基础
 
 演示如何使用 SECS-II 编解码 API：
@@ -101,6 +115,14 @@ int main() {
   return 0;
 }
 ```
+
+## c_api_secs2_simple.c - C API（C ABI）SECS-II 编解码
+
+演示如何在 **C 语言** 中通过 `#include <secs/c_api.h>`：
+
+- 构造 `List`（append 子元素）
+- `secs_ii_encode` 编码得到 on-wire bytes（用 `secs_free` 释放）
+- `secs_ii_decode_one` 解码并访问 ASCII/U2 等字段
 
 ## 更多示例
 
