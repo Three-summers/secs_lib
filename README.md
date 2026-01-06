@@ -148,12 +148,33 @@ secs_lib/
 
 - C++20 编译器：GCC ≥11 / Clang ≥14 / MSVC ≥19.30
 - CMake ≥3.20
+- spdlog（仅库内部使用，不出现在 public headers）：
+  - 如果你环境里已有 spdlog 头文件（例如包管理器安装），会自动使用
+  - 也支持 `-DSECS_SPDLOG_ROOT=/path/to/spdlog/include` 指定外部 spdlog
+  - 若以上都不存在：
+    - 顶层构建默认会自动下载（`SECS_FETCH_SPDLOG` 默认为 ON）
+    - 作为子项目被 `add_subdirectory()` 引入时默认不自动下载（`SECS_FETCH_SPDLOG` 默认为 OFF）
 - standalone Asio：
   - 优先使用 `third_party/asio/`（如果你拉了 submodule / 放了 vendored 代码）
   - 也支持 `-DSECS_ASIO_ROOT=/path/to/asio/include` 指定外部 Asio
   - 若以上都不存在：
     - 顶层构建默认会自动下载（`SECS_FETCH_ASIO` 默认为 ON）
     - 作为子项目被 `add_subdirectory()` 引入时默认不自动下载（`SECS_FETCH_ASIO` 默认为 OFF）
+
+### spdlog 获取策略与常见报错
+
+本仓库把 spdlog 当作 header-only 依赖使用（仅用于 `.cpp` 内部日志），解析优先级如下：
+
+1. vendored：`third_party/spdlog/include/`
+2. 外部指定：`-DSECS_SPDLOG_ROOT=/path/to/spdlog/include`
+3. 系统路径：`/usr/include` 等默认 include 路径（若存在 `spdlog/spdlog.h`）
+4. 自动拉取：`-DSECS_FETCH_SPDLOG=ON`（需要网络；使用 CMake `FetchContent`）
+
+如果你遇到配置错误：`spdlog not found`，按你的环境选择其一即可：
+
+- 有网络：`cmake -S . -B build -DSECS_FETCH_SPDLOG=ON`
+- 无网络/内网：准备好 spdlog include 目录后 `-DSECS_SPDLOG_ROOT=...`
+- 子项目场景如果也想自动下载，可在主工程里设置：`set(SECS_FETCH_SPDLOG ON CACHE BOOL "" FORCE)` 再 `add_subdirectory(secs_lib)`
 
 ### Asio 获取策略与常见报错
 

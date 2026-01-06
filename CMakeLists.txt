@@ -204,18 +204,11 @@ add_library(secs::asio ALIAS secs_asio)
 set_target_properties(secs_asio PROPERTIES EXPORT_NAME asio)
 target_compile_features(secs_asio INTERFACE cxx_std_20)
 
-# spdlog（vendored，header-only）：仅用于库内部日志，不暴露到 public headers。
-set(_secs_spdlog_include_dir "${PROJECT_SOURCE_DIR}/third_party/spdlog/include")
-set(_secs_spdlog_defs
-  SPDLOG_NO_EXCEPTIONS
-  SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_DEBUG
-)
+# spdlog（header-only）：仅用于库内部日志，不暴露到 public headers。
+include("${PROJECT_SOURCE_DIR}/cmake/SpdlogHeaderOnly.cmake")
 foreach(secs_target IN ITEMS secs_core secs_secs1 secs_hsms secs_protocol secs_c_api)
-  target_include_directories(${secs_target} PRIVATE ${_secs_spdlog_include_dir})
-  target_compile_definitions(${secs_target} PRIVATE ${_secs_spdlog_defs})
+  secs_link_spdlog(${secs_target})
 endforeach()
-unset(_secs_spdlog_include_dir)
-unset(_secs_spdlog_defs)
 
 include(CodeCoverage)
 
