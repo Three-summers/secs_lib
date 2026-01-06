@@ -441,6 +441,9 @@ static void test_invalid_argument_fast_fail(void) {
             secs_protocol_session_create_from_hsms(NULL, NULL, 0, NULL, &ps));
         expect_err("secs_protocol_session_set_handler(NULL)",
                    secs_protocol_session_set_handler(NULL, 1, 1, NULL, NULL));
+        expect_err(
+            "secs_protocol_session_set_sml_default_handler(NULL)",
+            secs_protocol_session_set_sml_default_handler(NULL, NULL));
         expect_err("secs_protocol_session_send(NULL)",
                    secs_protocol_session_send(NULL, 1, 1, NULL, 0));
         expect_err("secs_protocol_session_request(NULL)",
@@ -1855,6 +1858,103 @@ static void test_hsms_protocol_loopback(void) {
 
         secs_data_message_free(&reply);
         expect_ok("secs_protocol_session_clear_default_handler(server_default)",
+                  secs_protocol_session_clear_default_handler(server_proto));
+    }
+
+    /* SML default handler：用规则/模板批量定义回包，避免 C 侧写大量分发代码 */
+    {
+        secs_sml_runtime_t *rt = NULL;
+        expect_ok("secs_sml_runtime_create(proto sml)", secs_sml_runtime_create(&rt));
+
+        const char *sml = "s20f1: S20F1 W <L>.\n"
+                          "s20f2: S20F2 <L <A \"OK\">>.\n"
+                          "s21f1: S21F1 W <L>.\n"
+                          "s21f2: S21F2 <L <A \"HELLO\">>.\n"
+                          "if (s20f1) s20f2.\n"
+                          "if (s21f1) s21f2.\n";
+        expect_ok("secs_sml_runtime_load(proto sml)",
+                  secs_sml_runtime_load(rt, sml, strlen(sml)));
+
+        uint8_t *exp20 = NULL;
+        size_t exp20_n = 0;
+        expect_ok("secs_sml_runtime_get_message_body_by_name(s20f2)",
+                  secs_sml_runtime_get_message_body_by_name(
+                      rt, "s20f2", &exp20, &exp20_n, NULL, NULL, NULL));
+
+        uint8_t *exp21 = NULL;
+        size_t exp21_n = 0;
+        expect_ok("secs_sml_runtime_get_message_body_by_name(s21f2)",
+                  secs_sml_runtime_get_message_body_by_name(
+                      rt, "s21f2", &exp21, &exp21_n, NULL, NULL, NULL));
+
+        expect_ok("secs_protocol_session_set_sml_default_handler",
+                  secs_protocol_session_set_sml_default_handler(server_proto, rt));
+
+        /* set_sml_default_handler 内部应拷贝 runtime，C 侧可立即销毁 rt */
+        secs_sml_runtime_destroy(rt);
+        rt = NULL;
+
+        secs_ii_item_t *req_item = NULL;
+        expect_ok("secs_ii_item_create_list(sml req)",
+                  secs_ii_item_create_list(&req_item));
+        uint8_t *req_body = NULL;
+        size_t req_body_n = 0;
+        expect_ok("secs_ii_encode(sml req)",
+                  secs_ii_encode(req_item, &req_body, &req_body_n));
+        secs_ii_item_destroy(req_item);
+
+        /* S20F1 -> S20F2 */
+        {
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            expect_ok("secs_protocol_session_request(sml s20f1)",
+                      secs_protocol_session_request(
+                          client_proto, 20, 1, req_body, req_body_n, 1000, &reply));
+            if (reply.stream != 20u || reply.function != 2u || reply.w_bit != 0) {
+                fprintf(stderr, "FAIL: sml s20f1 reply header mismatch\n");
+                ++g_failures;
+            }
+            if (reply.body_n != exp20_n || (exp20_n != 0u && !reply.body) ||
+                (exp20_n != 0u && memcmp(reply.body, exp20, exp20_n) != 0)) {
+                fprintf(stderr, "FAIL: sml s20f1 reply body mismatch\n");
+                ++g_failures;
+            }
+            secs_data_message_free(&reply);
+        }
+
+        /* S21F1 -> S21F2 */
+        {
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            expect_ok("secs_protocol_session_request(sml s21f1)",
+                      secs_protocol_session_request(
+                          client_proto, 21, 1, req_body, req_body_n, 1000, &reply));
+            if (reply.stream != 21u || reply.function != 2u || reply.w_bit != 0) {
+                fprintf(stderr, "FAIL: sml s21f1 reply header mismatch\n");
+                ++g_failures;
+            }
+            if (reply.body_n != exp21_n || (exp21_n != 0u && !reply.body) ||
+                (exp21_n != 0u && memcmp(reply.body, exp21, exp21_n) != 0)) {
+                fprintf(stderr, "FAIL: sml s21f1 reply body mismatch\n");
+                ++g_failures;
+            }
+            secs_data_message_free(&reply);
+        }
+
+        /* 未命中规则：应不回包，客户端超时返回错误 */
+        {
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            expect_err("secs_protocol_session_request(sml no match)",
+                       secs_protocol_session_request(
+                           client_proto, 22, 1, req_body, req_body_n, 200, &reply));
+            secs_data_message_free(&reply);
+        }
+
+        secs_free(req_body);
+        secs_free(exp20);
+        secs_free(exp21);
+        expect_ok("secs_protocol_session_clear_default_handler(sml)",
                   secs_protocol_session_clear_default_handler(server_proto));
     }
 

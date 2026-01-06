@@ -1,7 +1,5 @@
 #pragma once
 
-#include "secs/core/error.hpp"
-
 #include <cstddef>
 #include <cstdint>
 #include <deque>

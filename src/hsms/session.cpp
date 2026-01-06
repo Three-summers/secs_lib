@@ -81,12 +81,17 @@ void Session::set_selected_() noexcept {
     SPDLOG_DEBUG("hsms selected: generation={}", gen);
 
     if (options_.linktest_interval != core::duration{}) {
-        asio::co_spawn(
-            executor_,
-            [this, gen]() -> asio::awaitable<void> {
-                co_await linktest_loop_(gen);
-            }, // GCOVR_EXCL_LINE：co_spawn 内联分支不计入覆盖率
-            asio::detached);
+        try {
+            asio::co_spawn(
+                executor_,
+                [this, gen]() -> asio::awaitable<void> {
+                    co_await linktest_loop_(gen);
+                }, // GCOVR_EXCL_LINE：co_spawn 内联分支不计入覆盖率
+                asio::detached);
+        } catch (...) {
+            // co_spawn 可能因资源不足抛异常；在 noexcept 路径中必须吞掉，
+            // 否则会触发 std::terminate。失败时仅意味着自动 LINKTEST 不可用。
+        }
     }
 }
 
@@ -347,7 +352,7 @@ Session::async_wait_reader_stopped(std::optional<core::duration> timeout) {
     co_return co_await reader_stopped_event_.async_wait(timeout);
 }
 
-bool Session::fulfill_pending_(const Message &msg) noexcept {
+bool Session::fulfill_pending_(Message &msg) noexcept {
     const auto it = pending_.find(msg.header.system_bytes);
     if (it == pending_.end()) {
         return false;
@@ -359,7 +364,7 @@ bool Session::fulfill_pending_(const Message &msg) noexcept {
         return false;
     }
 
-    pending->response = msg;
+    pending->response = std::move(msg);
     pending->ec = std::error_code{};
     pending->ready.set();
     return true;

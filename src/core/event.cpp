@@ -18,7 +18,12 @@ namespace secs::core {
  */
 void Event::cancel_waiters_() noexcept {
     for (const auto &timer : waiters_) {
-        timer->cancel();
+        try {
+            timer->cancel();
+        } catch (...) {
+            // cancel() 可能抛出 asio::system_error；在 noexcept 路径中必须吞掉，
+            // 避免异常触发 std::terminate。
+        }
     }
 }
 

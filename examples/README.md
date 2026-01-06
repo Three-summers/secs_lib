@@ -135,6 +135,10 @@ ctest --test-dir build -R hsms_pipe_examples --output-on-failure
 说明：
 - 这组示例用的是协议层 `secs_protocol_session_*`，库会在 handler 返回成功时自动回 secondary；
 - handler 的 `out_body` 需要用 `secs_malloc()` 分配；示例通过 `secs_ii_encode()` 生成（内部使用 `secs_malloc()`）。
+- 如果你需要定义大量“按规则自动回包”的行为，推荐使用 SML（模板 + 条件规则）：
+  - 先用 `secs_sml_runtime_create/load` 加载 SML；
+  - 再调用 `secs_protocol_session_set_sml_default_handler()` 把 SML runtime 挂为 default handler；
+  - 后续新增/修改回包只需改 SML 文本（无需写大量 C 分发/回包 glue）。
 
 ## C API：协议层回环示例（memory duplex，受限环境推荐）
 

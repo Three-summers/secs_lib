@@ -75,39 +75,58 @@ namespace {
 } // namespace
 
 std::error_code Runtime::load(std::string_view source) noexcept {
-    auto result = parse_sml(source);
-    if (result.ec) {
-        return result.ec;
-    }
+    try {
+        auto result = parse_sml(source);
+        if (result.ec) {
+            return result.ec;
+        }
 
-    load(std::move(result.document));
-    return {};
+        load(std::move(result.document));
+        if (!loaded_) {
+            return secs::core::make_error_code(secs::core::errc::out_of_memory);
+        }
+        return {};
+    } catch (const std::bad_alloc &) {
+        return secs::core::make_error_code(secs::core::errc::out_of_memory);
+    } catch (...) {
+        return secs::core::make_error_code(secs::core::errc::invalid_argument);
+    }
 }
 
 void Runtime::load(Document doc) noexcept {
-    document_ = std::move(doc);
-    build_index();
-    loaded_ = true;
+    try {
+        document_ = std::move(doc);
+        loaded_ = build_index();
+    } catch (...) {
+        loaded_ = false;
+    }
 }
 
-void Runtime::build_index() noexcept {
+bool Runtime::build_index() noexcept {
     name_index_.clear();
     sf_index_.clear();
+    try {
+        for (std::size_t i = 0; i < document_.messages.size(); ++i) {
+            const auto &msg = document_.messages[i];
 
-    for (std::size_t i = 0; i < document_.messages.size(); ++i) {
-        const auto &msg = document_.messages[i];
+            // 按名称索引
+            if (!msg.name.empty()) {
+                name_index_[msg.name] = i;
+            }
 
-        // 按名称索引
-        if (!msg.name.empty()) {
-            name_index_[msg.name] = i;
+            // 按 Stream/Function 索引（仅匿名消息）
+            if (msg.name.empty()) {
+                std::uint16_t key =
+                    (static_cast<std::uint16_t>(msg.stream) << 8) |
+                    static_cast<std::uint16_t>(msg.function);
+                sf_index_[key] = i;
+            }
         }
-
-        // 按 Stream/Function 索引（仅匿名消息）
-        if (msg.name.empty()) {
-            std::uint16_t key = (static_cast<std::uint16_t>(msg.stream) << 8) |
-                                static_cast<std::uint16_t>(msg.function);
-            sf_index_[key] = i;
-        }
+        return true;
+    } catch (...) {
+        name_index_.clear();
+        sf_index_.clear();
+        return false;
     }
 }
 
@@ -143,12 +162,16 @@ std::optional<std::string>
 Runtime::match_response(std::uint8_t stream,
                         std::uint8_t function,
                         const ii::Item &item) const noexcept {
-    for (const auto &rule : document_.conditions) {
-        if (match_condition(rule.condition, stream, function, item)) {
-            return rule.response_name;
+    try {
+        for (const auto &rule : document_.conditions) {
+            if (match_condition(rule.condition, stream, function, item)) {
+                return rule.response_name;
+            }
         }
+        return std::nullopt;
+    } catch (...) {
+        return std::nullopt;
     }
-    return std::nullopt;
 }
 
 bool Runtime::match_condition(const Condition &cond,

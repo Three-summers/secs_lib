@@ -150,7 +150,7 @@ private:
     asio::awaitable<std::pair<std::error_code, Message>>
     async_data_transaction_(const Message &req, core::duration timeout);
 
-    [[nodiscard]] bool fulfill_pending_(const Message &msg) noexcept;
+    [[nodiscard]] bool fulfill_pending_(Message &msg) noexcept;
     void cancel_pending_data_(std::error_code reason) noexcept;
 
     asio::any_io_executor executor_;

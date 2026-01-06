@@ -15,14 +15,16 @@
 #error "secs::secs1::PosixSerialLink 仅支持 POSIX（需要 ASIO_HAS_POSIX_STREAM_DESCRIPTOR）"
 #endif
 
-#include "secs/core/event.hpp"
+#include "secs/core/error.hpp"
 #include "secs/secs1/link.hpp"
 
 #include <asio/as_tuple.hpp>
 #include <asio/co_spawn.hpp>
-#include <asio/detached.hpp>
+#include <asio/deferred.hpp>
+#include <asio/experimental/parallel_group.hpp>
 #include <asio/posix/stream_descriptor.hpp>
 #include <asio/read.hpp>
+#include <asio/steady_timer.hpp>
 #include <asio/use_awaitable.hpp>
 #include <asio/write.hpp>
 
@@ -239,43 +241,68 @@ public:
         using secs::core::make_error_code;
 
         secs::core::byte b = 0;
-        std::error_code read_ec{};
-        std::size_t read_n = 0;
-        secs::core::Event done{};
-
-        asio::co_spawn(
-            sd_.get_executor(),
-            [&]() -> asio::awaitable<void> {
-                auto [ec, n] = co_await asio::async_read(
-                    sd_,
-                    asio::buffer(&b, 1),
-                    asio::as_tuple(asio::use_awaitable));
-                read_ec = ec;
-                read_n = n;
-                done.set();
-            },
-            asio::detached);
-
-        const auto wait_ec = co_await done.async_wait(timeout);
-        if (wait_ec == make_error_code(errc::timeout)) {
-            sd_.cancel();
-            (void)co_await done.async_wait(std::chrono::seconds(1));
-            co_return std::pair{wait_ec, secs::core::byte{0}};
-        }
-        if (wait_ec) {
-            sd_.cancel();
-            (void)co_await done.async_wait(std::chrono::seconds(1));
-            co_return std::pair{wait_ec, secs::core::byte{0}};
+        if (!timeout.has_value()) {
+            auto [ec, n] = co_await asio::async_read(
+                sd_,
+                asio::buffer(&b, 1),
+                asio::as_tuple(asio::use_awaitable));
+            if (ec) {
+                co_return std::pair{ec, secs::core::byte{0}};
+            }
+            if (n != 1) {
+                co_return std::pair{make_error_code(errc::invalid_argument),
+                                    secs::core::byte{0}};
+            }
+            co_return std::pair{std::error_code{}, b};
         }
 
-        if (read_ec) {
-            co_return std::pair{read_ec, secs::core::byte{0}};
-        }
-        if (read_n != 1) {
+        // 采用“并行等待 read 与 timer”的方式实现超时，避免 detached 协程捕获栈引用
+        // 引发的生命周期问题（UAF 风险）。
+        auto ex = sd_.get_executor();
+        asio::steady_timer timer(ex);
+        timer.expires_after(*timeout);
+
+        auto read_task = asio::co_spawn(
+            ex,
+            asio::async_read(sd_,
+                             asio::buffer(&b, 1),
+                             asio::as_tuple(asio::use_awaitable)),
+            asio::deferred);
+
+        auto timer_task =
+            asio::co_spawn(ex,
+                           timer.async_wait(asio::as_tuple(asio::use_awaitable)),
+                           asio::deferred);
+
+        auto [order, read_ex, read_result, timer_ex, timer_result] =
+            co_await asio::experimental::make_parallel_group(
+                std::move(read_task), std::move(timer_task))
+                .async_wait(asio::experimental::wait_for_one(),
+                            asio::as_tuple(asio::use_awaitable));
+
+        (void)timer_result;
+
+        if (read_ex || timer_ex) {
             co_return std::pair{make_error_code(errc::invalid_argument),
                                 secs::core::byte{0}};
         }
-        co_return std::pair{std::error_code{}, b};
+
+        if (order[0] == 0) {
+            auto [ec, n] = read_result;
+            if (ec) {
+                co_return std::pair{ec, secs::core::byte{0}};
+            }
+            if (n != 1) {
+                co_return std::pair{make_error_code(errc::invalid_argument),
+                                    secs::core::byte{0}};
+            }
+            co_return std::pair{std::error_code{}, b};
+        }
+
+        // timer 先到：按超时处理；同时 cancel descriptor 以加速底层 read 退出。
+        std::error_code ignored;
+        sd_.cancel(ignored);
+        co_return std::pair{make_error_code(errc::timeout), secs::core::byte{0}};
     }
 
 private:

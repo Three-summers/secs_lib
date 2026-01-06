@@ -18,7 +18,14 @@ namespace secs::secs1 {
 
 Timer::Timer(asio::any_io_executor ex) : timer_(ex) {}
 
-void Timer::cancel() noexcept { timer_.cancel(); }
+void Timer::cancel() noexcept {
+    try {
+        timer_.cancel();
+    } catch (...) {
+        // cancel() 可能抛出 asio::system_error；在 noexcept 路径中吞掉，
+        // 避免异常触发 std::terminate。
+    }
+}
 
 asio::awaitable<std::error_code> Timer::async_sleep(secs::core::duration d) {
     // 与 hsms::Timer 一致：把 asio::steady_timer 的结果映射到 std::error_code。

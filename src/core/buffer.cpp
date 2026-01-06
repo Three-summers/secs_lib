@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <new>
 
 namespace secs::core {
 namespace {
@@ -223,7 +224,11 @@ std::error_code FixedBuffer::grow(std::size_t min_capacity) noexcept {
     }
 
     const auto readable = size();
-    auto new_heap = std::make_unique<byte[]>(new_capacity);
+    auto new_heap =
+        std::unique_ptr<byte[]>(new (std::nothrow) byte[new_capacity]);
+    if (!new_heap) {
+        return make_error_code(errc::out_of_memory);
+    }
     if (readable != 0) {
         std::memcpy(new_heap.get(), data_const() + read_pos_, readable);
     }

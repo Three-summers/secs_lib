@@ -19,6 +19,7 @@ enum class errc : int {
     cancelled = 2,
     buffer_overflow = 3,
     invalid_argument = 4,
+    out_of_memory = 5,
 };
 
 const std::error_category &error_category() noexcept;

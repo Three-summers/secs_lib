@@ -1959,6 +1959,85 @@ secs_protocol_session_clear_default_handler(secs_protocol_session_t *sess) {
     });
 }
 
+secs_error_t
+secs_protocol_session_set_sml_default_handler(secs_protocol_session_t *sess,
+                                              const secs_sml_runtime_t *rt) {
+    return guard_error([&]() -> secs_error_t {
+        if (!sess || !sess->state || !sess->state->sess || !rt) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        if (!rt->rt.loaded()) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+
+        // 拷贝 runtime：避免 C 侧销毁 rt 导致 handler UAF。
+        auto runtime =
+            std::make_shared<secs::sml::Runtime>(rt->rt); // 可能分配/失败
+
+        auto make_handler =
+            [runtime](const secs::protocol::DataMessage &msg)
+            -> asio::awaitable<secs::protocol::HandlerResult> {
+            try {
+                // protocol::Session 的 auto-reply 仅在 W=1 时发送 secondary，因此这里
+                // 对 W=0 直接短路，避免不必要的解码开销。
+                if (!msg.w_bit) {
+                    co_return secs::protocol::HandlerResult{std::error_code{}, {}};
+                }
+                if (msg.function == 0xFFu) {
+                    co_return secs::protocol::HandlerResult{
+                        make_error_code(errc::invalid_argument), {}};
+                }
+
+                secs::ii::Item decoded{secs::ii::List{}};
+                std::size_t consumed = 0;
+                const auto dec_ec = secs::ii::decode_one(
+                    bytes_view{msg.body.data(), msg.body.size()}, decoded, consumed);
+                if (dec_ec) {
+                    co_return secs::protocol::HandlerResult{dec_ec, {}};
+                }
+
+                auto matched = runtime->match_response(msg.stream, msg.function, decoded);
+                if (!matched.has_value()) {
+                    co_return secs::protocol::HandlerResult{
+                        make_error_code(errc::invalid_argument), {}};
+                }
+
+                const auto *rsp = runtime->get_message(*matched);
+                if (!rsp) {
+                    co_return secs::protocol::HandlerResult{
+                        make_error_code(errc::invalid_argument), {}};
+                }
+
+                const auto expected_function =
+                    static_cast<std::uint8_t>(msg.function + 1u);
+                if (rsp->stream != msg.stream || rsp->function != expected_function ||
+                    rsp->w_bit) {
+                    co_return secs::protocol::HandlerResult{
+                        make_error_code(errc::invalid_argument), {}};
+                }
+
+                std::vector<byte> out;
+                const auto enc_ec = secs::ii::encode(rsp->item, out);
+                if (enc_ec) {
+                    co_return secs::protocol::HandlerResult{enc_ec, {}};
+                }
+
+                co_return secs::protocol::HandlerResult{std::error_code{},
+                                                        std::move(out)};
+            } catch (const std::bad_alloc &) {
+                co_return secs::protocol::HandlerResult{
+                    make_error_code(errc::out_of_memory), {}};
+            } catch (...) {
+                co_return secs::protocol::HandlerResult{
+                    make_error_code(errc::invalid_argument), {}};
+            }
+        };
+
+        sess->state->sess->router().set_default(std::move(make_handler));
+        return ok();
+    });
+}
+
 secs_error_t secs_protocol_session_erase_handler(secs_protocol_session_t *sess,
                                                  uint8_t stream,
                                                  uint8_t function) {

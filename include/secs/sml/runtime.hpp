@@ -1,11 +1,13 @@
 #pragma once
 
+#include "secs/core/error.hpp"
 #include "secs/sml/ast.hpp"
 #include "secs/sml/lexer.hpp"
 #include "secs/sml/parser.hpp"
 
 #include <chrono>
 #include <functional>
+#include <new>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -103,7 +105,7 @@ private:
         }
     };
 
-    void build_index() noexcept;
+    [[nodiscard]] bool build_index() noexcept;
     [[nodiscard]] bool match_condition(const Condition &cond,
                                        std::uint8_t stream,
                                        std::uint8_t function,
@@ -127,19 +129,31 @@ private:
  * @brief 便捷函数：解析 SML 源文本
  */
 [[nodiscard]] inline ParseResult parse_sml(std::string_view source) noexcept {
-    Lexer lexer(source);
-    auto lex_result = lexer.tokenize();
-    if (lex_result.ec) {
+    try {
+        Lexer lexer(source);
+        auto lex_result = lexer.tokenize();
+        if (lex_result.ec) {
+            ParseResult result;
+            result.ec = lex_result.ec;
+            result.error_line = lex_result.error_line;
+            result.error_column = lex_result.error_column;
+            result.error_message = std::move(lex_result.error_message);
+            return result;
+        }
+
+        Parser parser(std::move(lex_result.tokens));
+        return parser.parse();
+    } catch (const std::bad_alloc &) {
         ParseResult result;
-        result.ec = lex_result.ec;
-        result.error_line = lex_result.error_line;
-        result.error_column = lex_result.error_column;
-        result.error_message = std::move(lex_result.error_message);
+        result.ec = secs::core::make_error_code(secs::core::errc::out_of_memory);
+        result.error_message = "out of memory";
+        return result;
+    } catch (...) {
+        ParseResult result;
+        result.ec = secs::core::make_error_code(secs::core::errc::invalid_argument);
+        result.error_message = "unexpected exception";
         return result;
     }
-
-    Parser parser(std::move(lex_result.tokens));
-    return parser.parse();
 }
 
 } // namespace secs::sml

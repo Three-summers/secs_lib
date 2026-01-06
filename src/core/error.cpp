@@ -32,6 +32,8 @@ public:
             return "buffer overflow";
         case errc::invalid_argument:
             return "invalid argument";
+        case errc::out_of_memory:
+            return "out of memory";
         default:
             return "unknown secs.core error";
         }

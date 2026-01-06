@@ -499,6 +499,27 @@ secs_protocol_session_set_default_handler(secs_protocol_session_t *sess,
 secs_error_t
 secs_protocol_session_clear_default_handler(secs_protocol_session_t *sess);
 
+/*
+ * 使用 SML runtime 设置 default handler（自动条件回包）。
+ *
+ * 行为：
+ * - 仅对入站 primary 且 request.w_bit==1 的消息尝试匹配；
+ * - 若 SML 条件规则命中，库会把匹配到的响应消息模板编码为 SECS-II body，并作为
+ *   secondary（SxF(y+1), W=0）回给对端；
+ * - 若未命中/模板不存在/模板的 (S,F,W) 与期望不一致/解码失败：视为“未处理”，不回包。
+ *
+ * 说明：
+ * - 由于 protocol::Session 的 auto-reply 会固定使用 (request.stream,
+ *   request.function+1)，因此这里要求 SML 响应模板的 (S,F,W) 必须等于
+ *   (request.stream, request.function+1, 0)。
+ * - 函数内部会拷贝 `rt` 的内容，因此调用后 `rt` 可以被销毁。
+ * - 该函数等价于设置一个 default handler；如需清除可调用
+ *   secs_protocol_session_clear_default_handler()。
+ */
+secs_error_t
+secs_protocol_session_set_sml_default_handler(secs_protocol_session_t *sess,
+                                              const secs_sml_runtime_t *rt);
+
 secs_error_t secs_protocol_session_erase_handler(secs_protocol_session_t *sess,
                                                  uint8_t stream,
                                                  uint8_t function);

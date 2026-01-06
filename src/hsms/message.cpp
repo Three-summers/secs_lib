@@ -2,6 +2,8 @@
 
 #include <array>
 #include <cstring>
+#include <new>
+#include <stdexcept>
 
 namespace secs::hsms {
 namespace {
@@ -179,7 +181,15 @@ std::error_code encode_frame(const Message &msg,
 
     const auto payload_len = static_cast<std::uint32_t>(header_size +
                                                         msg.body.size());
-    out.resize(static_cast<std::size_t>(kLengthFieldSize) + payload_len);
+    try {
+        out.resize(static_cast<std::size_t>(kLengthFieldSize) + payload_len);
+    } catch (const std::bad_alloc &) {
+        return core::make_error_code(core::errc::out_of_memory);
+    } catch (const std::length_error &) {
+        return core::make_error_code(core::errc::buffer_overflow);
+    } catch (...) {
+        return core::make_error_code(core::errc::invalid_argument);
+    }
 
     write_u32_be(out.data(), payload_len);
 
@@ -221,8 +231,17 @@ std::error_code decode_payload(core::bytes_view payload,
     }
 
     out.header = h;
-    out.body.assign(payload.begin() + static_cast<std::ptrdiff_t>(kHeaderSize),
-                    payload.end());
+    try {
+        out.body.assign(
+            payload.begin() + static_cast<std::ptrdiff_t>(kHeaderSize),
+            payload.end());
+    } catch (const std::bad_alloc &) {
+        return core::make_error_code(core::errc::out_of_memory);
+    } catch (const std::length_error &) {
+        return core::make_error_code(core::errc::buffer_overflow);
+    } catch (...) {
+        return core::make_error_code(core::errc::invalid_argument);
+    }
     return {};
 }
 
