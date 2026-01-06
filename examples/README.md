@@ -12,6 +12,8 @@ cmake --build build --target examples
 # 运行
 ./build/examples/secs2_simple
 ./build/examples/c_api_secs2_simple
+./build/examples/typed_handler_example
+./build/examples/protocol_custom_reply_example
 ./build/examples/hsms_server [port]
 ./build/examples/hsms_client [host] [port]
 ./build/examples/hsms_pipe_server [device_id]
@@ -19,6 +21,17 @@ cmake --build build --target examples
 ./build/examples/secs1_loopback
 ./build/examples/secs1_serial_server <tty_path>
 ./build/examples/secs1_serial_client <tty_path>
+
+# C API：HSMS（TCP）
+./build/examples/c_api_hsms_server [ip] [port]
+./build/examples/c_api_hsms_client [ip] [port]
+
+# C API：协议层（Protocol Session）+ HSMS（TCP）
+./build/examples/c_api_protocol_server [ip] [port]
+./build/examples/c_api_protocol_client [ip] [port]
+
+# C API：协议层回环（memory duplex，无 socket 环境也可运行，仅 UNIX）
+./build/examples/c_api_protocol_loopback
 ```
 
 ## HSMS 客户端/服务器示例
@@ -82,6 +95,55 @@ cmake --build build --target examples
 ctest --test-dir build -R hsms_pipe_examples --output-on-failure
 ```
 
+## C API：HSMS（TCP）客户端/服务器示例
+
+文件：
+- `c_api_hsms_server.c`：监听并接受连接，接收 1 条 data message；若 W=1 则回包
+- `c_api_hsms_client.c`：连接并 SELECT，发送 1 次 request 并等待回应
+
+运行（需要允许 socket 的环境）：
+
+```bash
+# 终端 1：启动 server
+./build/examples/c_api_hsms_server 127.0.0.1 5000
+
+# 终端 2：启动 client
+./build/examples/c_api_hsms_client 127.0.0.1 5000
+```
+
+说明：
+- server 使用 `secs_hsms_session_open_passive_ip()` 监听并 accept 1 个连接；
+- client 使用 `secs_hsms_session_open_active_ip()` 连接并完成 SELECT；
+- 示例里通过 `secs_log_set_level(SECS_LOG_DEBUG)` 打开库内部 debug 日志。
+
+## C API：协议层（Protocol Session）示例（default handler + 双向 primary）
+
+文件：
+- `c_api_protocol_server.c`：default handler 统一处理未注册的 (S,F)，并在收到 client 的请求后反向向 client 发起 request
+- `c_api_protocol_client.c`：注册 handler 回包，验证 server 也能主动发送 primary
+
+运行（需要允许 socket 的环境）：
+
+```bash
+# 终端 1：启动 server
+./build/examples/c_api_protocol_server 127.0.0.1 5001
+
+# 终端 2：启动 client
+./build/examples/c_api_protocol_client 127.0.0.1 5001
+```
+
+说明：
+- 这组示例用的是协议层 `secs_protocol_session_*`，库会在 handler 返回成功时自动回 secondary；
+- handler 的 `out_body` 需要用 `secs_malloc()` 分配；示例通过 `secs_ii_encode()` 生成（内部使用 `secs_malloc()`）。
+
+## C API：协议层回环示例（memory duplex，受限环境推荐）
+
+当运行环境禁用 `socket()` 时，上面的 TCP 示例无法启动，可直接运行这个回环示例验证“端到端链路 + 双向 primary”：
+
+```bash
+./build/examples/c_api_protocol_loopback
+```
+
 ## secs2_simple.cpp - SECS-II 编解码基础
 
 演示如何使用 SECS-II 编解码 API：
@@ -123,6 +185,13 @@ int main() {
 - 构造 `List`（append 子元素）
 - `secs_ii_encode` 编码得到 on-wire bytes（用 `secs_free` 释放）
 - `secs_ii_decode_one` 解码并访问 ASCII/U2 等字段
+
+## protocol_custom_reply_example.cpp - 协议层自定义回包（类似 tvoc 的 switch 风格）
+
+演示如何在协议层用 **default handler** 做集中分发（例如 `switch(stream/function)`），并使用 SECS-II 编码构造返回 body：
+
+- 未注册的 (S,F) 会回退到 default handler（避免大量 `set_handler(SxFy)` 造成“样板代码膨胀”）
+- handler 返回 OK 时，库会自动发送 secondary（若请求为 W=1）
 
 ## 更多示例
 

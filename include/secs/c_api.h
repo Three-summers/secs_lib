@@ -358,6 +358,19 @@ secs_hsms_session_create_v2(secs_context_t *ctx,
 secs_error_t secs_hsms_session_open_active_ip(secs_hsms_session_t *sess,
                                               const char *ip,
                                               uint16_t port);
+
+/*
+ * 打开被动端（阻塞式）：
+ * - 监听 `ip:port` 并接受 1 个连接；
+ * - 完成 SELECT 流程后返回（成功进入 selected）。
+ *
+ * 约定：
+ * - `ip` 需为数字 IP（避免 DNS 依赖），可用 "0.0.0.0"/"::" 监听所有地址；
+ * - 不得在库内部 io 线程调用，否则返回 WRONG_THREAD。
+ */
+secs_error_t secs_hsms_session_open_passive_ip(secs_hsms_session_t *sess,
+                                               const char *ip,
+                                               uint16_t port);
 secs_error_t
 secs_hsms_session_open_active_connection(secs_hsms_session_t *sess,
                                          secs_hsms_connection_t **io_conn);

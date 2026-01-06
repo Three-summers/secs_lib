@@ -13,6 +13,41 @@ target_link_libraries(c_api_secs2_simple PRIVATE secs::c_api)
 set_target_properties(c_api_secs2_simple PROPERTIES LINKER_LANGUAGE CXX)
 list(APPEND _secs_example_targets c_api_secs2_simple)
 
+# C API（C ABI）HSMS（TCP）示例（源文件为 C，但链接需使用 C++ 链接器）
+add_executable(c_api_hsms_server c_api_hsms_server.c)
+target_link_libraries(c_api_hsms_server PRIVATE secs::c_api)
+set_target_properties(c_api_hsms_server PROPERTIES LINKER_LANGUAGE CXX)
+target_compile_features(c_api_hsms_server PRIVATE c_std_11)
+list(APPEND _secs_example_targets c_api_hsms_server)
+
+add_executable(c_api_hsms_client c_api_hsms_client.c)
+target_link_libraries(c_api_hsms_client PRIVATE secs::c_api)
+set_target_properties(c_api_hsms_client PROPERTIES LINKER_LANGUAGE CXX)
+target_compile_features(c_api_hsms_client PRIVATE c_std_11)
+list(APPEND _secs_example_targets c_api_hsms_client)
+
+# C API（C ABI）协议层示例：protocol session + HSMS（TCP）
+add_executable(c_api_protocol_server c_api_protocol_server.c)
+target_link_libraries(c_api_protocol_server PRIVATE secs::c_api)
+set_target_properties(c_api_protocol_server PROPERTIES LINKER_LANGUAGE CXX)
+target_compile_features(c_api_protocol_server PRIVATE c_std_11)
+list(APPEND _secs_example_targets c_api_protocol_server)
+
+add_executable(c_api_protocol_client c_api_protocol_client.c)
+target_link_libraries(c_api_protocol_client PRIVATE secs::c_api)
+set_target_properties(c_api_protocol_client PROPERTIES LINKER_LANGUAGE CXX)
+target_compile_features(c_api_protocol_client PRIVATE c_std_11)
+list(APPEND _secs_example_targets c_api_protocol_client)
+
+# C API（C ABI）协议层回环示例：memory duplex + pthread（仅 UNIX）
+if(UNIX)
+  add_executable(c_api_protocol_loopback c_api_protocol_loopback.c)
+  target_link_libraries(c_api_protocol_loopback PRIVATE secs::c_api)
+  set_target_properties(c_api_protocol_loopback PROPERTIES LINKER_LANGUAGE CXX)
+  target_compile_features(c_api_protocol_loopback PRIVATE c_std_11)
+  list(APPEND _secs_example_targets c_api_protocol_loopback)
+endif()
+
 # HSMS 服务器示例
 add_executable(hsms_server hsms_server.cpp)
 target_link_libraries(hsms_server PRIVATE secs::hsms secs::ii secs::core)
@@ -27,6 +62,11 @@ list(APPEND _secs_example_targets hsms_client)
 add_executable(typed_handler_example typed_handler_example.cpp)
 target_link_libraries(typed_handler_example PRIVATE secs::protocol secs::ii secs::core)
 list(APPEND _secs_example_targets typed_handler_example)
+
+# 协议层自定义回包示例（default handler + SECS-II 编码）
+add_executable(protocol_custom_reply_example protocol_custom_reply_example.cpp)
+target_link_libraries(protocol_custom_reply_example PRIVATE secs::protocol secs::ii secs::core)
+list(APPEND _secs_example_targets protocol_custom_reply_example)
 
 # SECS-I（MemoryLink）回环示例
 add_executable(secs1_loopback secs1_loopback.cpp)

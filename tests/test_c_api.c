@@ -1692,6 +1692,25 @@ static void test_hsms_protocol_loopback(void) {
         expect_err("secs_hsms_session_open_active_ip(not_an_ip)", err);
     }
 
+    /* open_passive_ip：参数校验 + 非法 IP 解析（不触发 listen/accept） */
+    {
+        secs_error_t err =
+            secs_hsms_session_open_passive_ip(NULL, "127.0.0.1", 1);
+        expect_err("secs_hsms_session_open_passive_ip(NULL sess)", err);
+        if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+            failf("secs_hsms_session_open_passive_ip(NULL sess)", err);
+        }
+
+        err = secs_hsms_session_open_passive_ip(client_hsms, NULL, 1);
+        expect_err("secs_hsms_session_open_passive_ip(NULL ip)", err);
+        if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+            failf("secs_hsms_session_open_passive_ip(NULL ip)", err);
+        }
+
+        err = secs_hsms_session_open_passive_ip(client_hsms, "not_an_ip", 1);
+        expect_err("secs_hsms_session_open_passive_ip(not_an_ip)", err);
+    }
+
     secs_protocol_session_options_t proto_opt;
     memset(&proto_opt, 0, sizeof(proto_opt));
     proto_opt.t3_ms = 1000;

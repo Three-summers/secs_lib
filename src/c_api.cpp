@@ -13,6 +13,7 @@
 #include "secs/secs1/block.hpp"
 #include "secs/sml/runtime.hpp"
 
+#include <asio/as_tuple.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/executor_work_guard.hpp>
@@ -1398,6 +1399,57 @@ secs_error_t secs_hsms_session_open_active_ip(secs_hsms_session_t *sess,
             sess->ctx,
             [s = sess->sess, ep]() -> asio::awaitable<std::error_code> {
                 co_return co_await s->async_open_active(ep);
+            });
+    });
+}
+
+secs_error_t secs_hsms_session_open_passive_ip(secs_hsms_session_t *sess,
+                                               const char *ip,
+                                               uint16_t port) {
+    return guard_error([&]() -> secs_error_t {
+        if (!sess || !sess->ctx || !sess->sess || !ip)
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+
+        std::error_code parse_ec{};
+        auto addr = asio::ip::make_address(ip, parse_ec);
+        if (parse_ec)
+            return from_error_code(parse_ec);
+
+        asio::ip::tcp::endpoint ep{addr, port};
+        return run_blocking_ec(
+            sess->ctx,
+            [s = sess->sess, ep]() -> asio::awaitable<std::error_code> {
+                asio::ip::tcp::acceptor acceptor{s->executor()};
+                std::error_code ec{};
+
+                acceptor.open(ep.protocol(), ec);
+                if (ec) {
+                    co_return ec;
+                }
+
+                acceptor.set_option(asio::ip::tcp::acceptor::reuse_address(true),
+                                    ec);
+                if (ec) {
+                    co_return ec;
+                }
+
+                acceptor.bind(ep, ec);
+                if (ec) {
+                    co_return ec;
+                }
+
+                acceptor.listen(asio::socket_base::max_listen_connections, ec);
+                if (ec) {
+                    co_return ec;
+                }
+
+                auto [acc_ec, socket] = co_await acceptor.async_accept(
+                    asio::as_tuple(asio::use_awaitable));
+                if (acc_ec) {
+                    co_return acc_ec;
+                }
+
+                co_return co_await s->async_open_passive(std::move(socket));
             });
     });
 }
