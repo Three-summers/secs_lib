@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <new>
 
 namespace secs::protocol {
 namespace {
@@ -49,58 +50,80 @@ std::uint32_t SystemBytes::next_candidate_() noexcept {
 }
 
 std::error_code SystemBytes::allocate(std::uint32_t &out) noexcept {
-    std::lock_guard lk(mu_);
+    try {
+        std::lock_guard lk(mu_);
 
-    if (!free_.empty()) {
-        const auto sb = free_.front();
-        free_.pop_front();
-        in_use_.insert(sb);
-        out = sb;
-        return std::error_code{};
-    }
-
-    const auto max_usable = static_cast<std::size_t>(max_);
-    if (in_use_.size() >= max_usable) {
-        return secs::core::make_error_code(secs::core::errc::buffer_overflow);
-    }
-
-    // 正常情况下 in_use 很小，这里最多尝试 in_use.size()+2 次即可找到空闲值。
-    const std::size_t attempts =
-        std::min<std::size_t>(in_use_.size() + 2U, max_usable);
-    for (std::size_t i = 0; i < attempts; ++i) {
-        const auto candidate = next_candidate_();
-        if (in_use_.insert(candidate).second) {
-            out = candidate;
+        if (!free_.empty()) {
+            const auto sb = free_.front();
+            free_.pop_front();
+            in_use_.insert(sb);
+            out = sb;
             return std::error_code{};
         }
-    }
 
-    return secs::core::make_error_code(secs::core::errc::buffer_overflow);
+        const auto max_usable = static_cast<std::size_t>(max_);
+        if (in_use_.size() >= max_usable) {
+            return secs::core::make_error_code(secs::core::errc::buffer_overflow);
+        }
+
+        // 正常情况下 in_use 很小，这里最多尝试 in_use.size()+2 次即可找到空闲值。
+        const std::size_t attempts =
+            std::min<std::size_t>(in_use_.size() + 2U, max_usable);
+        for (std::size_t i = 0; i < attempts; ++i) {
+            const auto candidate = next_candidate_();
+            if (in_use_.insert(candidate).second) {
+                out = candidate;
+                return std::error_code{};
+            }
+        }
+
+        return secs::core::make_error_code(secs::core::errc::buffer_overflow);
+    } catch (const std::bad_alloc &) {
+        return secs::core::make_error_code(secs::core::errc::out_of_memory);
+    } catch (...) {
+        return secs::core::make_error_code(secs::core::errc::invalid_argument);
+    }
 }
 
 void SystemBytes::release(std::uint32_t system_bytes) noexcept {
     if (!is_valid_system_bytes(system_bytes) || system_bytes > max_) {
         return;
     }
-
-    std::lock_guard lk(mu_);
-    if (in_use_.erase(system_bytes) == 0U) {
-        return;
+    try {
+        std::lock_guard lk(mu_);
+        if (in_use_.erase(system_bytes) == 0U) {
+            return;
+        }
+        try {
+            free_.push_back(system_bytes);
+        } catch (...) {
+            // 释放队列追加失败（例如 OOM）：允许丢弃该 system_bytes，避免 noexcept
+            // 路径触发 std::terminate。
+        }
+    } catch (...) {
+        // 兜底：mutex/容器操作异常时吞掉，避免 noexcept 路径触发 std::terminate。
     }
-    free_.push_back(system_bytes);
 }
 
 bool SystemBytes::is_in_use(std::uint32_t system_bytes) const noexcept {
     if (!is_valid_system_bytes(system_bytes) || system_bytes > max_) {
         return false;
     }
-    std::lock_guard lk(mu_);
-    return in_use_.find(system_bytes) != in_use_.end();
+    try {
+        std::lock_guard lk(mu_);
+        return in_use_.find(system_bytes) != in_use_.end();
+    } catch (...) {
+        return false;
+    }
 }
 
 std::size_t SystemBytes::in_use_count() const noexcept {
-    std::lock_guard lk(mu_);
-    return in_use_.size();
+    try {
+        std::lock_guard lk(mu_);
+        return in_use_.size();
+    } catch (...) {
+        return 0;
+    }
 }
 
 } // namespace secs::protocol
