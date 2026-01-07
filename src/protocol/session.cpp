@@ -10,6 +10,8 @@
 #include <asio/detached.hpp>
 
 #include <chrono>
+#include <sstream>
+#include <string_view>
 #include <spdlog/spdlog.h>
 
 namespace secs::protocol {
@@ -41,6 +43,77 @@ namespace {
 
 using secs::core::errc;
 using secs::core::make_error_code;
+
+enum class DumpDirection : std::uint8_t {
+    tx = 0,
+    rx = 1,
+};
+
+enum class DumpBackend : std::uint8_t {
+    hsms = 0,
+    secs1 = 1,
+};
+
+[[nodiscard]] const char *dump_dir_name_(DumpDirection d) noexcept {
+    return (d == DumpDirection::tx) ? "TX" : "RX";
+}
+
+[[nodiscard]] const char *dump_backend_name_(DumpBackend b) noexcept {
+    return (b == DumpBackend::hsms) ? "HSMS" : "SECS-I";
+}
+
+void emit_dump_(const SessionOptions::DumpOptions &opt,
+                std::string_view text) noexcept {
+    if (!opt.enable) {
+        return;
+    }
+    if (opt.sink) {
+        opt.sink(opt.sink_user, text.data(), text.size());
+        return;
+    }
+    // 默认输出：走库内 spdlog（INFO 级别），便于运行时直接看到 dump。
+    try {
+        SPDLOG_INFO("{}", text);
+    } catch (...) {
+        // dump 仅用于调试，不应影响业务协程的可用性。
+    }
+}
+
+[[nodiscard]] std::string dump_banner_(DumpDirection dir, DumpBackend backend) {
+    std::ostringstream oss;
+    oss << "====================\n";
+    oss << "protocol dump: " << dump_dir_name_(dir) << ' '
+        << dump_backend_name_(backend) << '\n';
+    oss << "====================\n";
+    return oss.str();
+}
+
+[[nodiscard]] std::string dump_hsms_(DumpDirection dir,
+                                    const secs::hsms::Message &msg,
+                                    const SessionOptions::DumpOptions &opt) {
+    std::vector<secs::core::byte> frame;
+    const auto enc = secs::hsms::encode_frame(msg, frame);
+    if (enc) {
+        std::ostringstream oss;
+        oss << dump_banner_(dir, DumpBackend::hsms);
+        oss << "HSMS encode_frame failed: " << enc.message() << "\n";
+        return oss.str();
+    }
+
+    auto out = dump_banner_(dir, DumpBackend::hsms);
+    out += secs::utils::dump_hsms_frame(
+        secs::core::bytes_view{frame.data(), frame.size()}, opt.hsms);
+    return out;
+}
+
+[[nodiscard]] std::string dump_secs1_(DumpDirection dir,
+                                     const secs::secs1::Header &header,
+                                     secs::core::bytes_view body,
+                                     const SessionOptions::DumpOptions &opt) {
+    auto out = dump_banner_(dir, DumpBackend::secs1);
+    out += secs::utils::dump_secs1_message(header, body, opt.secs1);
+    return out;
+}
 
 [[nodiscard]] bool is_valid_stream(std::uint8_t stream) noexcept {
     return stream <= 0x7FU;
@@ -333,6 +406,9 @@ Session::async_send_message_(const DataMessage &msg) {
             msg.w_bit,
             msg.system_bytes,
             secs::core::bytes_view{msg.body.data(), msg.body.size()});
+        if (options_.dump.enable && options_.dump.dump_tx) {
+            emit_dump_(options_.dump, dump_hsms_(DumpDirection::tx, wire, options_.dump));
+        }
         co_return co_await hsms_->async_send(wire);
     }
 
@@ -350,6 +426,13 @@ Session::async_send_message_(const DataMessage &msg) {
     h.block_number = 1;
     h.system_bytes = msg.system_bytes;
 
+    if (options_.dump.enable && options_.dump.dump_tx) {
+        emit_dump_(options_.dump,
+                   dump_secs1_(DumpDirection::tx,
+                              h,
+                              secs::core::bytes_view{msg.body.data(), msg.body.size()},
+                              options_.dump));
+    }
     co_return co_await secs1_->async_send(
         h, secs::core::bytes_view{msg.body.data(), msg.body.size()});
 }
@@ -371,6 +454,11 @@ Session::async_receive_message_(std::optional<secs::core::duration> timeout) {
             co_return std::pair{ec, DataMessage{}};
         }
 
+        if (options_.dump.enable && options_.dump.dump_rx) {
+            emit_dump_(options_.dump,
+                       dump_hsms_(DumpDirection::rx, msg, options_.dump));
+        }
+
         DataMessage out{};
         out.stream = msg.stream();
         out.function = msg.function();
@@ -388,6 +476,14 @@ Session::async_receive_message_(std::optional<secs::core::duration> timeout) {
     auto [ec, msg] = co_await secs1_->async_receive(timeout);
     if (ec) {
         co_return std::pair{ec, DataMessage{}};
+    }
+
+    if (options_.dump.enable && options_.dump.dump_rx) {
+        emit_dump_(options_.dump,
+                   dump_secs1_(DumpDirection::rx,
+                              msg.header,
+                              secs::core::bytes_view{msg.body.data(), msg.body.size()},
+                              options_.dump));
     }
 
     DataMessage out{};

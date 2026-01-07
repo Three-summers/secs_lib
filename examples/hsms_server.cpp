@@ -9,6 +9,7 @@
 #include <secs/hsms/session.hpp>
 #include <secs/ii/codec.hpp>
 #include <secs/ii/item.hpp>
+#include <secs/protocol/session.hpp>
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
@@ -16,6 +17,8 @@
 #include <asio/ip/tcp.hpp>
 #include <asio/signal_set.hpp>
 
+#include <cstddef>
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -23,72 +26,65 @@
 using namespace secs;
 using namespace std::chrono_literals;
 
-asio::awaitable<void> handle_session(hsms::Session &session) {
+namespace {
+
+void dump_to_stdout(void *,
+                    const char *data,
+                    std::size_t size) noexcept {
+    if (!data || size == 0) {
+        return;
+    }
+    (void)std::fwrite(data, 1, size, stdout);
+    (void)std::fflush(stdout);
+}
+
+} // namespace
+
+asio::awaitable<void> handle_session(hsms::Session &,
+                                     protocol::Session &proto) {
     std::cout << "[服务器] 会话已建立，等待数据消息...\n";
 
-    while (session.is_selected()) {
-        auto [ec, msg] = co_await session.async_receive_data(5s);
+    // default handler：打印消息，并在 W=1 时自动回 "OK"
+    proto.router().set_default(
+        [](const protocol::DataMessage &msg)
+            -> asio::awaitable<protocol::HandlerResult> {
+            std::cout << "[服务器] 收到消息: S" << static_cast<int>(msg.stream)
+                      << "F" << static_cast<int>(msg.function)
+                      << " (W=" << (msg.w_bit ? 1 : 0) << ")\n";
 
-        if (ec) {
-            if (ec == core::make_error_code(core::errc::timeout)) {
-                continue; // 超时后继续等待
-            }
-            std::cout << "[服务器] 接收错误: " << ec.message() << "\n";
-            break;
-        }
+            // 解码 SECS-II 数据（仅演示：失败不影响回包）
+            if (!msg.body.empty()) {
+                ii::Item decoded{ii::Item::ascii("")};
+                std::size_t consumed = 0;
+                auto dec_ec = ii::decode_one(
+                    core::bytes_view{msg.body.data(), msg.body.size()},
+                    decoded,
+                    consumed);
 
-        std::cout << "[服务器] 收到消息: S" << static_cast<int>(msg.stream())
-                  << "F" << static_cast<int>(msg.function())
-                  << " (W=" << msg.w_bit() << ")\n";
-
-        // 解码 SECS-II 数据
-        if (!msg.body.empty()) {
-            ii::Item decoded{ii::Item::ascii("")};
-            std::size_t consumed = 0;
-            auto dec_ec = ii::decode_one(
-                core::bytes_view{msg.body.data(), msg.body.size()},
-                decoded,
-                consumed);
-
-            if (!dec_ec) {
-                if (auto *ascii = decoded.get_if<ii::ASCII>()) {
-                    std::cout << "[服务器] 数据内容 (ASCII): \"" << ascii->value
-                              << "\"\n";
-                } else if (auto *list = decoded.get_if<ii::List>()) {
-                    std::cout << "[服务器] 数据内容 (List): " << list->size()
-                              << " 项\n";
-                } else {
-                    std::cout << "[服务器] 数据内容: " << msg.body.size()
-                              << " 字节\n";
+                if (!dec_ec) {
+                    if (auto *ascii = decoded.get_if<ii::ASCII>()) {
+                        std::cout << "[服务器] 数据内容 (ASCII): \"" << ascii->value
+                                  << "\"\n";
+                    } else if (auto *list = decoded.get_if<ii::List>()) {
+                        std::cout << "[服务器] 数据内容 (List): " << list->size()
+                                  << " 项\n";
+                    } else {
+                        std::cout << "[服务器] 数据内容: " << msg.body.size()
+                                  << " 字节\n";
+                    }
                 }
             }
-        }
 
-        // 如果需要回复（W 位=1），发送一个简单响应
-        if (msg.w_bit()) {
             // 构造响应：S{n}F{n+1}
             ii::Item reply_item = ii::Item::ascii("OK");
             std::vector<core::byte> reply_body;
             ii::encode(reply_item, reply_body);
 
-            auto reply = hsms::make_data_message(
-                msg.header.session_id,
-                msg.stream(),
-                static_cast<std::uint8_t>(msg.function() + 1),
-                false, // 响应消息 W=0
-                msg.header.system_bytes,
-                core::bytes_view{reply_body.data(), reply_body.size()});
+            co_return protocol::HandlerResult{std::error_code{},
+                                              std::move(reply_body)};
+        });
 
-            ec = co_await session.async_send(reply);
-            if (ec) {
-                std::cout << "[服务器] 发送响应失败: " << ec.message() << "\n";
-            } else {
-                std::cout << "[服务器] 已发送响应: S"
-                          << static_cast<int>(msg.stream()) << "F"
-                          << static_cast<int>(msg.function() + 1) << "\n";
-            }
-        }
-    }
+    co_await proto.async_run();
 
     std::cout << "[服务器] 会话结束\n";
 }
@@ -119,6 +115,7 @@ asio::awaitable<void> server_loop(asio::ip::tcp::acceptor &acceptor,
         asio::co_spawn(
             acceptor.get_executor(),
             [session,
+             session_id = opt.session_id,
              s = std::move(socket)]() mutable -> asio::awaitable<void> {
                 auto ec = co_await session->async_open_passive(std::move(s));
                 if (ec) {
@@ -126,7 +123,24 @@ asio::awaitable<void> server_loop(asio::ip::tcp::acceptor &acceptor,
                               << "\n";
                     co_return;
                 }
-                co_await handle_session(*session);
+                secs::protocol::SessionOptions proto_opt{};
+                proto_opt.t3 = 45s;
+                proto_opt.poll_interval = 20ms;
+                proto_opt.dump.enable = true;
+                proto_opt.dump.dump_tx = true;
+                proto_opt.dump.dump_rx = true;
+                proto_opt.dump.sink = dump_to_stdout;
+                proto_opt.dump.sink_user = nullptr;
+                proto_opt.dump.hsms.include_hex = false;
+                proto_opt.dump.hsms.enable_secs2_decode = true;
+                proto_opt.dump.hsms.item.max_payload_bytes = 256;
+
+                secs::protocol::Session proto(*session,
+                                              session_id,
+                                              proto_opt);
+
+                co_await handle_session(*session, proto);
+                proto.stop();
                 session->stop();
             },
             asio::detached);

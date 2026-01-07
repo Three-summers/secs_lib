@@ -9,6 +9,7 @@
 #include <secs/hsms/session.hpp>
 #include <secs/ii/codec.hpp>
 #include <secs/ii/item.hpp>
+#include <secs/protocol/session.hpp>
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
@@ -16,6 +17,8 @@
 #include <asio/ip/tcp.hpp>
 #include <asio/signal_set.hpp>
 
+#include <cstddef>
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -24,7 +27,22 @@
 using namespace secs;
 using namespace std::chrono_literals;
 
+namespace {
+
+void dump_to_stdout(void *,
+                    const char *data,
+                    std::size_t size) noexcept {
+    if (!data || size == 0) {
+        return;
+    }
+    (void)std::fwrite(data, 1, size, stdout);
+    (void)std::fflush(stdout);
+}
+
+} // namespace
+
 asio::awaitable<void> client_session(hsms::Session &session,
+                                     protocol::Session &proto,
                                      const asio::ip::tcp::endpoint &endpoint) {
 
     std::cout << "[客户端] 连接到 " << endpoint << "...\n";
@@ -54,7 +72,7 @@ asio::awaitable<void> client_session(hsms::Session &session,
         std::vector<core::byte> body;
         ii::encode(request_item, body);
 
-        auto [req_ec, reply] = co_await session.async_request_data(
+        auto [req_ec, reply] = co_await proto.async_request(
             1, // Stream（流号）
             1, // Function（功能号）
             core::bytes_view{body.data(), body.size()});
@@ -96,7 +114,7 @@ asio::awaitable<void> client_session(hsms::Session &session,
         std::vector<core::byte> body;
         ii::encode(command, body);
 
-        auto [req_ec, reply] = co_await session.async_request_data(
+        auto [req_ec, reply] = co_await proto.async_request(
             2,  // Stream（流号）
             41, // Function（功能号）
             core::bytes_view{body.data(), body.size()});
@@ -122,15 +140,10 @@ asio::awaitable<void> client_session(hsms::Session &session,
         std::vector<core::byte> body;
         ii::encode(event, body);
 
-        auto msg =
-            hsms::make_data_message(0x0001, // Session ID（会话 ID）
-                                    6,      // Stream（流号）
-                                    11,     // Function（功能号）
-                                    false,  // W=0（单向）
-                                    session.allocate_system_bytes(),
-                                    core::bytes_view{body.data(), body.size()});
-
-        ec = co_await session.async_send(msg);
+        ec = co_await proto.async_send(
+            6,  // Stream（流号）
+            11, // Function（功能号）
+            core::bytes_view{body.data(), body.size()});
         if (ec) {
             std::cout << "[客户端] S6F11 发送失败: " << ec.message() << "\n";
         } else {
@@ -140,13 +153,8 @@ asio::awaitable<void> client_session(hsms::Session &session,
 
     std::cout << "\n[客户端] 示例完成，按 Ctrl+C 退出\n";
 
-    // 保持连接，等待用户中断
-    while (session.is_selected()) {
-        auto [recv_ec, msg] = co_await session.async_receive_data(1s);
-        if (recv_ec && recv_ec != core::make_error_code(core::errc::timeout)) {
-            break;
-        }
-    }
+    // 保持连接：等待内部 reader_loop_ 退出（Ctrl+C 会触发 stop() 并唤醒）。
+    (void)co_await session.async_wait_reader_stopped(std::nullopt);
 }
 
 int main(int argc, char *argv[]) {
@@ -176,6 +184,22 @@ int main(int argc, char *argv[]) {
 
         auto session = std::make_shared<hsms::Session>(ioc.get_executor(), opt);
 
+        // protocol 层 Session：开启运行时报文 dump（调试用途）
+        secs::protocol::SessionOptions proto_opt{};
+        proto_opt.t3 = opt.t3;
+        proto_opt.poll_interval = 20ms;
+        proto_opt.dump.enable = true;
+        proto_opt.dump.dump_tx = true;
+        proto_opt.dump.dump_rx = true;
+        proto_opt.dump.sink = dump_to_stdout;
+        proto_opt.dump.sink_user = nullptr;
+        proto_opt.dump.hsms.include_hex = false;
+        proto_opt.dump.hsms.enable_secs2_decode = true;
+        proto_opt.dump.hsms.item.max_payload_bytes = 256;
+
+        auto proto = std::make_shared<secs::protocol::Session>(
+            *session, opt.session_id, proto_opt);
+
         // 解析目标地址
         asio::ip::tcp::resolver resolver(ioc);
         auto endpoints = resolver.resolve(host, std::to_string(port));
@@ -185,6 +209,7 @@ int main(int argc, char *argv[]) {
         asio::signal_set signals(ioc, SIGINT, SIGTERM);
         signals.async_wait([&](const std::error_code &, int) {
             std::cout << "\n[客户端] 收到退出信号\n";
+            proto->stop();
             session->stop();
             ioc.stop();
         });
@@ -193,7 +218,8 @@ int main(int argc, char *argv[]) {
         asio::co_spawn(
             ioc,
             [&]() -> asio::awaitable<void> {
-                co_await client_session(*session, endpoint);
+                co_await client_session(*session, *proto, endpoint);
+                proto->stop();
                 session->stop();
             },
             asio::detached);

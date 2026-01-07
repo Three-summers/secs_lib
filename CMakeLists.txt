@@ -171,6 +171,9 @@ target_include_directories(secs_utils
 
 target_link_libraries(secs_utils PUBLIC secs_core secs_ii secs_hsms secs_secs1)
 
+# protocol::Session 运行时 dump 依赖 utils（仅用于调试输出，不影响核心收发逻辑）。
+target_link_libraries(secs_protocol PUBLIC secs_utils)
+
 add_library(secs_c_api
   src/c_api.cpp
 )

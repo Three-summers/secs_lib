@@ -41,6 +41,18 @@ struct Secs1DumpOptions final {
                                                  Secs1DumpOptions options = {});
 
 /**
+ * @brief 输出一条“已重组完成”的 SECS-I 消息（header + body）。
+ *
+ * 说明：
+ * - 该函数不包含 ENQ/EOT/ACK/NAK 等链路控制字节；
+ * - 若需要查看单个 block frame（含 Length/Checksum），请用 dump_secs1_block_frame；
+ * - 若需要在收包过程中逐帧重组并在完成时 dump，可使用 Secs1MessageReassembler。
+ */
+[[nodiscard]] std::string dump_secs1_message(const secs::secs1::Header &header,
+                                             secs::core::bytes_view body,
+                                             Secs1DumpOptions options = {});
+
+/**
  * @brief SECS-I 多 block 消息重组器（并可选解码 SECS-II）。
  *
  * 用法：

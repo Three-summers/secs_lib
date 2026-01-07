@@ -133,6 +133,40 @@ std::string dump_secs1_block_frame(secs::core::bytes_view frame,
     return oss.str();
 }
 
+std::string dump_secs1_message(const secs::secs1::Header &header,
+                               secs::core::bytes_view body,
+                               Secs1DumpOptions options) {
+    std::ostringstream oss;
+    const bool enable_color = options.enable_color;
+    const auto *reset = ansi_(enable_color, Ansi::reset);
+    const auto *header_color = ansi_(enable_color, Ansi::header);
+    const auto *label = ansi_(enable_color, Ansi::label);
+    const auto *key = ansi_(enable_color, Ansi::key);
+    const auto *value = ansi_(enable_color, Ansi::value);
+
+    oss << header_color << "SECS-I message:" << reset << '\n';
+    oss << "  " << key << "device_id" << reset << "=" << value
+        << fmt_hex_u16_(header.device_id) << reset << ' ' << key << "reverse_bit"
+        << reset << "=" << value << (header.reverse_bit ? 1 : 0) << reset << '\n';
+    oss << "  " << value << "S" << static_cast<int>(header.stream) << "F"
+        << static_cast<int>(header.function) << reset << ' ' << key << "W"
+        << reset << "=" << value << (header.wait_bit ? 1 : 0) << reset << '\n';
+    oss << "  " << key << "blocks_end_bit" << reset << "=" << value
+        << (header.end_bit ? 1 : 0) << reset << '\n';
+    oss << "  " << key << "system_bytes" << reset << "=" << value
+        << fmt_hex_u32_(header.system_bytes) << reset << '\n';
+    oss << "  " << key << "body" << reset << "=" << value << body.size() << reset
+        << " bytes\n";
+
+    if (options.include_hex) {
+        oss << label << "RAW(SECS-I message body):" << reset << '\n';
+        oss << hex_dump(body, options.hex);
+    }
+
+    maybe_append_secs2_(oss, body, options);
+    return oss.str();
+}
+
 Secs1MessageReassembler::Secs1MessageReassembler(
     std::optional<std::uint16_t> expected_device_id)
     : reassembler_(expected_device_id) {}

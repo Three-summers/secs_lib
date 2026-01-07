@@ -4,10 +4,13 @@
 #include "secs/core/event.hpp"
 #include "secs/protocol/router.hpp"
 #include "secs/protocol/system_bytes.hpp"
+#include "secs/utils/hsms_dump.hpp"
+#include "secs/utils/secs1_dump.hpp"
 
 #include <asio/any_io_executor.hpp>
 #include <asio/awaitable.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -37,6 +40,40 @@ struct SessionOptions final {
     // - false：Host -> Equipment（R=0）
     // - true：Equipment -> Host（R=1）
     bool secs1_reverse_bit{false};
+
+    /**
+     * @brief 运行时报文 dump（调试用途）。
+     *
+     * 说明：
+     * - 默认关闭，避免产生额外开销与日志噪声；
+     * - 开启后会在 protocol 层对每条“发送/接收”的 DataMessage 进行解析并输出；
+     * - HSMS 后端输出基于 `secs::utils::dump_hsms_frame`（会额外 encode 一次，仅用于 dump）；
+     * - SECS-I 后端输出基于 `secs::utils::dump_secs1_message`（消息级别，不含 ENQ/EOT/ACK/NAK）。
+     */
+    struct DumpOptions final {
+        // 总开关
+        bool enable{false};
+
+        // 方向开关
+        bool dump_tx{true};
+        bool dump_rx{true};
+
+        // 输出 sink：
+        // - 若为 nullptr：使用库内 spdlog 输出（INFO 级别）；
+        // - 若非空：回调接收完整字符串（可能包含多行与 ANSI 颜色码）。
+        using SinkFn =
+            void (*)(void *user, const char *data, std::size_t size) noexcept;
+        SinkFn sink{nullptr};
+        void *sink_user{nullptr};
+
+        // HSMS dump 选项（backend=HSMS 时生效）
+        secs::utils::HsmsDumpOptions hsms{};
+
+        // SECS-I dump 选项（backend=SECS-I 时生效）
+        secs::utils::Secs1DumpOptions secs1{};
+    };
+
+    DumpOptions dump{};
 };
 
 /**

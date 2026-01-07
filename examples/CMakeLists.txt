@@ -50,12 +50,12 @@ endif()
 
 # HSMS 服务器示例
 add_executable(hsms_server hsms_server.cpp)
-target_link_libraries(hsms_server PRIVATE secs::hsms secs::ii secs::core)
+target_link_libraries(hsms_server PRIVATE secs::protocol secs::hsms secs::ii secs::core)
 list(APPEND _secs_example_targets hsms_server)
 
 # HSMS 客户端示例
 add_executable(hsms_client hsms_client.cpp)
-target_link_libraries(hsms_client PRIVATE secs::hsms secs::ii secs::core)
+target_link_libraries(hsms_client PRIVATE secs::protocol secs::hsms secs::ii secs::core)
 list(APPEND _secs_example_targets hsms_client)
 
 # HSMS 16进制报文示例

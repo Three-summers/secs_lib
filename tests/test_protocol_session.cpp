@@ -30,6 +30,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <string>
 #include <string_view>
 #include <system_error>
 #include <utility>
@@ -56,6 +57,20 @@ using secs::secs1::StateMachine;
 using secs::secs1::Timeouts;
 
 using namespace std::chrono_literals;
+
+static void append_to_string_sink(void *user,
+                                  const char *data,
+                                  std::size_t size) noexcept {
+    auto *out = static_cast<std::string *>(user);
+    if (!out || !data || size == 0) {
+        return;
+    }
+    try {
+        out->append(data, size);
+    } catch (...) {
+        // 仅用于测试捕获 dump，不应因内存问题影响测试流程。
+    }
+}
 
 // ---------------------------
 //  HSMS 内存 Stream（复用 tests/test_hsms_transport.cpp 的模式）
@@ -1365,6 +1380,182 @@ void test_session_invalid_arguments() {
     ioc.run();
 }
 
+void test_protocol_runtime_dump_hsms_and_secs1() {
+    // 1) HSMS：跑一次 request/response，并验证 dump sink 收到输出
+    {
+        asio::io_context ioc;
+        const std::uint16_t session_id = 0x2222;
+
+        secs::core::Event server_opened{};
+        secs::core::Event client_opened{};
+
+        secs::hsms::Session server(ioc.get_executor(),
+                                   secs::hsms::SessionOptions{
+                                       .session_id = session_id,
+                                       .t3 = 200ms,
+                                       .t5 = 10ms,
+                                       .t6 = 50ms,
+                                       .t7 = 50ms,
+                                       .t8 = 0ms,
+                                       .linktest_interval = 0ms,
+                                       .auto_reconnect = false,
+                                   });
+
+        secs::hsms::Session client(ioc.get_executor(),
+                                   secs::hsms::SessionOptions{
+                                       .session_id = session_id,
+                                       .t3 = 200ms,
+                                       .t5 = 10ms,
+                                       .t6 = 50ms,
+                                       .t7 = 50ms,
+                                       .t8 = 0ms,
+                                       .linktest_interval = 0ms,
+                                       .auto_reconnect = false,
+                                   });
+
+        std::string captured;
+        captured.reserve(1u << 20);
+
+        SessionOptions proto_opts{};
+        proto_opts.t3 = 200ms;
+        proto_opts.poll_interval = 1ms;
+        proto_opts.dump.enable = true;
+        proto_opts.dump.dump_tx = true;
+        proto_opts.dump.dump_rx = true;
+        proto_opts.dump.sink = append_to_string_sink;
+        proto_opts.dump.sink_user = &captured;
+        proto_opts.dump.hsms.include_hex = false;
+        proto_opts.dump.hsms.enable_secs2_decode = false;
+
+        Session proto_server(server, session_id, proto_opts);
+        Session proto_client(client, session_id, proto_opts);
+
+        proto_server.router().set(
+            1,
+            1,
+            [](const DataMessage &msg) -> asio::awaitable<secs::protocol::HandlerResult> {
+                co_return secs::protocol::HandlerResult{std::error_code{},
+                                                        msg.body};
+            });
+
+        auto duplex = make_memory_duplex(ioc.get_executor());
+        Connection server_conn(std::move(duplex.server_stream));
+        Connection client_conn(std::move(duplex.client_stream));
+
+        asio::co_spawn(
+            ioc,
+            [&, server_conn = std::move(server_conn)]() mutable
+            -> asio::awaitable<void> {
+                TEST_EXPECT_OK(
+                    co_await server.async_open_passive(std::move(server_conn)));
+                server_opened.set();
+            },
+            asio::detached);
+
+        asio::co_spawn(
+            ioc,
+            [&, client_conn = std::move(client_conn)]() mutable
+            -> asio::awaitable<void> {
+                TEST_EXPECT_OK(
+                    co_await client.async_open_active(std::move(client_conn)));
+                client_opened.set();
+            },
+            asio::detached);
+
+        asio::co_spawn(
+            ioc,
+            [&]() -> asio::awaitable<void> {
+                TEST_EXPECT_OK(co_await server_opened.async_wait(200ms));
+                TEST_EXPECT_OK(co_await client_opened.async_wait(200ms));
+
+                asio::co_spawn(ioc, proto_server.async_run(), asio::detached);
+                asio::co_spawn(ioc, proto_client.async_run(), asio::detached);
+
+                auto [ec, rsp] =
+                    co_await proto_client.async_request(1, 1, as_bytes("hi"));
+                TEST_EXPECT_OK(ec);
+                TEST_EXPECT_EQ(rsp.stream, 1);
+                TEST_EXPECT_EQ(rsp.function, 2);
+
+                proto_server.stop();
+                proto_client.stop();
+                server.stop();
+                client.stop();
+                ioc.stop();
+            },
+            asio::detached);
+
+        ioc.run();
+
+        TEST_EXPECT(captured.find("HSMS:") != std::string::npos);
+        TEST_EXPECT(captured.find("S1F1") != std::string::npos);
+        TEST_EXPECT(captured.find("S1F2") != std::string::npos);
+    }
+
+    // 2) SECS-I：跑一次 request/response，并验证 dump sink 收到输出
+    {
+        asio::io_context ioc;
+        const auto ex = ioc.get_executor();
+        constexpr std::uint16_t device_id = 1;
+
+        auto [host_link, eq_link] = MemoryLink::create(ex);
+        StateMachine host_sm(host_link, device_id);
+        StateMachine eq_sm(eq_link, device_id);
+
+        std::string captured;
+        captured.reserve(1u << 20);
+
+        SessionOptions host_opt{};
+        host_opt.t3 = 200ms;
+        host_opt.poll_interval = 1ms;
+        host_opt.secs1_reverse_bit = false;
+        host_opt.dump.enable = true;
+        host_opt.dump.dump_tx = true;
+        host_opt.dump.dump_rx = true;
+        host_opt.dump.sink = append_to_string_sink;
+        host_opt.dump.sink_user = &captured;
+        host_opt.dump.secs1.include_hex = false;
+        host_opt.dump.secs1.enable_secs2_decode = false;
+
+        SessionOptions eq_opt = host_opt;
+        eq_opt.secs1_reverse_bit = true;
+
+        Session proto_host(host_sm, device_id, host_opt);
+        Session proto_equip(eq_sm, device_id, eq_opt);
+
+        proto_equip.router().set(
+            1,
+            13,
+            [](const DataMessage &msg) -> asio::awaitable<secs::protocol::HandlerResult> {
+                co_return secs::protocol::HandlerResult{std::error_code{},
+                                                        msg.body};
+            });
+
+        asio::co_spawn(ex, proto_equip.async_run(), asio::detached);
+
+        asio::co_spawn(
+            ex,
+            [&]() -> asio::awaitable<void> {
+                auto [ec, rsp] = co_await proto_host.async_request(
+                    1, 13, as_bytes("hello"), 200ms);
+                TEST_EXPECT_OK(ec);
+                TEST_EXPECT_EQ(rsp.stream, 1);
+                TEST_EXPECT_EQ(rsp.function, 14);
+
+                proto_host.stop();
+                proto_equip.stop();
+                ioc.stop();
+            },
+            asio::detached);
+
+        ioc.run();
+
+        TEST_EXPECT(captured.find("SECS-I message:") != std::string::npos);
+        TEST_EXPECT(captured.find("S1F13") != std::string::npos);
+        TEST_EXPECT(captured.find("S1F14") != std::string::npos);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -1381,6 +1572,7 @@ int main() {
     test_secs1_protocol_echo_100();
     test_secs1_protocol_reverse_bit_respects_options();
     test_secs1_protocol_equipment_can_initiate_primary();
+    test_protocol_runtime_dump_hsms_and_secs1();
     test_session_invalid_arguments();
     return secs::tests::run_and_report();
 }
