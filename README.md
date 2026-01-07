@@ -3,7 +3,7 @@
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![CMake](https://img.shields.io/badge/CMake-3.20+-green.svg)](https://cmake.org/)
 
-> 文档更新：2026-01-04（Codex）
+> 文档更新：2026-01-07（Codex）
 
 基于 C++20 与 standalone Asio 协程的 SECS-I / SECS-II / HSMS (HSMS-SS) 协议栈实现，面向半导体设备通信场景。
 
@@ -49,6 +49,14 @@
   - 新增字段：`SessionOptions::secs1_reverse_bit`（Host=0 / Equipment=1）
   - 文件：`include/secs/protocol/session.hpp`、`src/protocol/session.cpp`
   - 覆盖测试：`tests/test_protocol_session.cpp`（搜索 `reverse_bit`）
+- `secs::protocol::Session` 新增运行时报文 dump（TX/RX 可选，便于联调时动态解析与打印）
+  - 新增字段：`SessionOptions::dump`（`enable/dump_tx/dump_rx/sink/hsms/secs1`）
+  - 文件：`include/secs/protocol/session.hpp`、`src/protocol/session.cpp`
+  - 覆盖测试：`tests/test_protocol_session.cpp`（搜索 `runtime_dump`）
+- `secs::utils` 新增：`dump_secs1_message(header, body, ...)`（SECS-I 消息级 dump）
+  - 文件：`include/secs/utils/secs1_dump.hpp`、`src/utils/secs1_dump.cpp`
+- 示例更新：`hsms_client/hsms_server` 改为通过 `protocol::Session` 收发，并默认开启 dump 输出到 stdout
+  - 文件：`examples/hsms_client.cpp`、`examples/hsms_server.cpp`
 - 覆盖率统计口径调整：`coverage` 目标不再统计 `c_dump/`（参考实现不计入库覆盖率）
   - 文件：`cmake/Modules/CodeCoverage.cmake`
 - 开发体验：新增根目录 `.clangd`，强制 clangd 使用 `build/` 编译数据库
@@ -454,7 +462,7 @@ cmake -S . -B build -DSECS_ENABLE_WERROR=ON
 
 - API 与注释：`include/secs/hsms/session.hpp`、`include/secs/hsms/message.hpp`
 - 核心实现：`src/hsms/session.cpp`、`src/hsms/connection.cpp`
-- 可运行示例：`examples/hsms_client.cpp`
+- 可运行示例（示例内部叠加了 `protocol::Session` 与运行时报文 dump）：`examples/hsms_client.cpp`
 - 单元测试：`tests/test_hsms_transport.cpp`（含超时/断连/控制事务覆盖）
 
 #### Active（客户端）典型流程
@@ -471,9 +479,9 @@ cmake -S . -B build -DSECS_ENABLE_WERROR=ON
 1. `asio::ip::tcp::acceptor` 接受 socket
 2. 为每个连接创建 `hsms::Session`
 3. `co_await session.async_open_passive(std::move(socket))` 等待对端 `SELECT`
-4. 在 `session.is_selected()` 为 true 期间循环 `async_receive_data()`
+4. 在 `session.is_selected()` 为 true 期间循环 `async_receive_data()`（或在其上叠加 `protocol::Session::async_run()` + Router）
 
-对应可运行示例：`examples/hsms_server.cpp`
+对应可运行示例（基于 `protocol::Session::async_run()` + default handler）：`examples/hsms_server.cpp`
 
 ---
 
@@ -519,6 +527,15 @@ SECS-I 这一层以“字节流链路”抽象开始：
   - Host -> Equipment：`false`（R=0）
   - Equipment -> Host：`true`（R=1）
 - 参考：`include/secs/secs1/block.hpp`、`include/secs/protocol/session.hpp`
+
+#### 运行时调试：动态解析并打印收发报文
+
+`protocol::SessionOptions::dump` 提供运行时可配置的报文 dump（调试用途）：
+
+- 支持 TX/RX 分别开关
+- 支持默认输出到 spdlog（INFO）或自定义 sink 回调（例如输出到 stdout / 文件 / ring buffer）
+- HSMS 后端会输出 HSMS 头字段；可选进一步把 body 解码为 SECS-II Item（用于快速确认 payload）
+- SECS-I 后端会输出“消息级 dump”（不含 ENQ/EOT/ACK/NAK），同样支持可选 SECS-II 解码
 
 #### 最小代码片段：注册一个 handler，并发起一次 `async_request`
 

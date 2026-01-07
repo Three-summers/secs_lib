@@ -1,6 +1,6 @@
 # Protocol 模块详细实现原理
 
-> 文档生成日期：2026-01-06
+> 文档生成日期：2026-01-07
 > 基于源码版本：当前 main 分支
 
 ## 1. 模块概述
@@ -365,6 +365,7 @@
 │      duration t3{45s};             // 回复超时                      │
 │      duration poll_interval{10ms}; // 接收循环轮询间隔             │
 │      bool secs1_reverse_bit{false};// SECS-I R-bit 方向位          │
+│      DumpOptions dump{};         // 运行时报文 dump（调试用途）     │
 │  };                                                                 │
 │                                                                     │
 │  T3 超时（回复超时）：                                              │
@@ -388,8 +389,56 @@
 │  │  仅对 SECS-I 后端有效。                                     │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
+│  dump（运行时报文 dump）：                                          │
+│  ┌────────────────────────────────────────────────────────────┐    │
+│  │  - enable：总开关（默认 false）                              │    │
+│  │  - dump_tx/dump_rx：分别控制发送/接收方向                    │    │
+│  │  - sink：可选输出回调；为空则默认走 spdlog(INFO)             │    │
+│  │  - hsms/secs1：各自 dump 细节（含可选 SECS-II 解码）         │    │
+│  └────────────────────────────────────────────────────────────┘    │
+│                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+### 5.2.1 DumpOptions（运行时报文 dump）
+
+`DumpOptions` 的目标是把“抓包/日志/联调期常见的报文分析”内置到协议层会话中，做到：
+
+- **运行时可开关**：默认关闭，避免对生产路径产生额外开销
+- **可选输出位置**：默认走 spdlog；也可通过 `sink` 将 dump 写入 stdout/文件/环形缓冲区
+- **统一后端表现**：HSMS 与 SECS-I 通过同一配置项输出解析结果
+
+结构概览（字段以源码为准）：
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    SessionOptions::DumpOptions                      │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  struct DumpOptions {                                               │
+│      bool enable{false};        // 总开关                           │
+│      bool dump_tx{true};        // 发送方向                         │
+│      bool dump_rx{true};        // 接收方向                         │
+│                                                                     │
+│      // 输出 sink：若为空则默认 spdlog(INFO)                        │
+│      using SinkFn = void (*)(void *user,                            │
+│                              const char *data,                      │
+│                              size_t size) noexcept;                 │
+│      SinkFn sink{nullptr};                                          │
+│      void *sink_user{nullptr};                                      │
+│                                                                     │
+│      // 后端细节：复用 secs::utils 的 dump 选项                      │
+│      utils::HsmsDumpOptions hsms{};                                  │
+│      utils::Secs1DumpOptions secs1{};                                │
+│  };                                                                 │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+注意点：
+
+- HSMS 后端 dump 内部会 **额外 encode 一次 HSMS frame**，仅用于把字段解析输出（不影响真实收发路径）
+- SECS-I 后端 dump 输出为“消息级”（header+body），不包含 ENQ/EOT/ACK/NAK 控制字节
 
 ### 5.3 发送流程（async_send）
 

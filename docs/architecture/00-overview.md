@@ -117,6 +117,7 @@
 | 05 | protocol | [05-protocol-module.md](05-protocol-module.md) | 统一会话抽象、消息路由、SystemBytes |
 | 06 | sml | [06-sml-module.md](06-sml-module.md) | SML 语法、词法/语法分析、运行时 |
 | 07 | c_api | [07-c-api-module.md](07-c-api-module.md) | C 语言绑定、不透明句柄、阻塞式桥接 |
+| 08 | utils | [08-utils-module.md](08-utils-module.md) | 调试工具：hex/Item dump/HSMS/SECS-I 报文解析 |
 
 ---
 
