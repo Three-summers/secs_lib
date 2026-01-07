@@ -116,6 +116,7 @@
 | 04 | secs1 | [04-secs1-module.md](04-secs1-module.md) | 串口通信、握手协议、Block 分片 |
 | 05 | protocol | [05-protocol-module.md](05-protocol-module.md) | 统一会话抽象、消息路由、SystemBytes |
 | 06 | sml | [06-sml-module.md](06-sml-module.md) | SML 语法、词法/语法分析、运行时 |
+| 07 | c_api | [07-c-api-module.md](07-c-api-module.md) | C 语言绑定、不透明句柄、阻塞式桥接 |
 
 ---
 
@@ -330,7 +331,8 @@ auto body = ii::encode(msg->item);
 | secs1 | 5 | 4 | ~1,500 |
 | protocol | 3 | 3 | ~900 |
 | sml | 5 | 3 | ~1,600 |
-| **总计** | **25** | **16** | **~7,350** |
+| c_api | 1 | 1 | ~2,660 |
+| **总计** | **26** | **17** | **~10,010** |
 
 ---
 
