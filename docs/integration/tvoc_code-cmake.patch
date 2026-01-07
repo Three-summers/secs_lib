@@ -1,0 +1,139 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+new file mode 100644
+index 0000000..d2a1974
+--- /dev/null
++++ b/CMakeLists.txt
+@@ -0,0 +1,113 @@
++cmake_minimum_required(VERSION 3.20)
++
++project(tvoc_code
++  VERSION 0.1.0
++  LANGUAGES C CXX
++)
++
++# tvoc_code 原工程为纯 C（Makefile: arm-linux-gnueabihf-gcc），但后续若要接入 C++ 库（如 secs_lib），
++# 最终链接阶段需要使用 C++ 链接器，因此这里同时启用 CXX 语言。
++set(CMAKE_C_STANDARD 11)
++set(CMAKE_C_STANDARD_REQUIRED ON)
++# 原 Makefile 未显式指定 -std=...，GCC 默认使用 gnu 方言（会启用大量 POSIX/GNU 扩展）。
++# tvoc_code 代码里使用了 timer_create/usleep/getpagesize 等接口，若使用严格 C11（__STRICT_ANSI__）
++# 会导致接口/结构体声明被隐藏，从而编译失败。因此这里保持 GNU 扩展开启（等价于 -std=gnu11）。
++set(CMAKE_C_EXTENSIONS ON)
++
++# 默认不强制 C++ 标准；当启用外部 C++ 依赖时再由对方 target 传播（例如 secs_lib 要求 C++20）。
++
++option(TVOC_USE_SECS_LIB "Link with secs_lib (C ABI target: secs::c_api)" OFF)
++set(TVOC_SECS_LIB_ROOT "" CACHE PATH "Path to secs_lib source root (contains CMakeLists.txt)")
++
++# 复刻原 Makefile 的 SRC_DIRS（仅收集每个目录下的 *.c，不做递归）
++set(TVOC_SRC_DIRS
++  src/Algorithm_App/Common_Algorithm_APP
++  src/Algorithm_App/Filtering_Algorithm_APP
++  src/Algorithm_App/Statis_Data_App
++  src/BSP_App/Linux_BSP
++  src/BSP_App/Linux_BSP/AXI_bsp/AXI_Intr_APP
++  src/BSP_App/Linux_BSP/AXI_bsp/AXI_Param_APP
++  src/BSP_App/Linux_BSP/ddr_bsp
++  src/BSP_App/Linux_BSP/emmc_bsp
++  src/BSP_App/Linux_BSP/gpio_bsp
++  src/BSP_App/Linux_BSP/Timer_bsp
++  src/BSP_App/Linux_BSP/serial_bsp
++  src/BSP_App/FPGA_BSP
++  src/BSP_App/FPGA_BSP/ps_out_ctrl
++  src/BSP_App/FPGA_BSP/raw_data
++  src/BSP_App/FPGA_BSP/signal_gen
++  src/Watchdog_App
++  src/Secs_App
++  src/Log_App
++  src/Conf_App
++  src/HMI_App
++  src/TVOC_App
++  src/TVOC_App/TVOC_conf
++  src/TVOC_App/Driver_IP_APP
++  src/TVOC_App/Driver_IP_APP/AD76xx_driver_API
++  src/TVOC_App/Driver_IP_APP/aq7pid_app
++  src/TVOC_App/Driver_IP_APP/ps_out_ctrl_ex
++  src/TVOC_App/Driver_IP_APP/PWM_driver_API
++  src/TVOC_App/ADC_deal_app
++  src/TVOC_App/SingalCtrl_app
++  src/TVOC_App/TVOC_Timer_app
++  src/TVOC_App/Valve_Ctrl_app
++  src/TVOC_App/TVOC_Secs_App
++  src/TVOC_App/TVOC_hmi_app
++  src/TVOC_App/tvoc_func_app
++)
++
++set(TVOC_SOURCES
++  main.c
++)
++
++foreach(dir IN LISTS TVOC_SRC_DIRS)
++  file(GLOB _dir_src CONFIGURE_DEPENDS "${dir}/*.c")
++  list(APPEND TVOC_SOURCES ${_dir_src})
++endforeach()
++list(REMOVE_DUPLICATES TVOC_SOURCES)
++
++add_executable(run ${TVOC_SOURCES})
++
++target_include_directories(run PRIVATE
++  ${CMAKE_CURRENT_LIST_DIR}
++)
++
++if(MSVC)
++  target_compile_options(run PRIVATE /W4)
++else()
++  target_compile_options(run PRIVATE -Wall -Wextra -Wpedantic)
++endif()
++
++# 原 Makefile: LDLIBS = -lrt -lpthread -lm
++find_package(Threads REQUIRED)
++target_link_libraries(run PRIVATE Threads::Threads m)
++if(UNIX AND NOT APPLE)
++  target_link_libraries(run PRIVATE rt)
++endif()
++
++if(TVOC_USE_SECS_LIB)
++  if(TVOC_SECS_LIB_ROOT STREQUAL "")
++    message(FATAL_ERROR "TVOC_USE_SECS_LIB=ON but TVOC_SECS_LIB_ROOT is empty. Set -DTVOC_SECS_LIB_ROOT=/path/to/secs_lib")
++  endif()
++  if(NOT EXISTS "${TVOC_SECS_LIB_ROOT}/CMakeLists.txt")
++    message(FATAL_ERROR "TVOC_SECS_LIB_ROOT does not look like a CMake project: ${TVOC_SECS_LIB_ROOT}")
++  endif()
++
++  # 关闭 secs_lib 的测试/示例，避免把依赖链拉进产品构建。
++  set(SECS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
++  set(SECS_ENABLE_INTEGRATION_TESTS OFF CACHE BOOL "" FORCE)
++  set(SECS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
++  set(SECS_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
++  set(SECS_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
++
++  add_subdirectory("${TVOC_SECS_LIB_ROOT}" "${CMAKE_CURRENT_BINARY_DIR}/_deps/secs_lib")
++  target_link_libraries(run PRIVATE secs::c_api)
++
++  # 关键点：纯 C 可执行程序若链接到 C++ 实现库，链接阶段必须使用 C++ 链接器。
++  set_property(TARGET run PROPERTY LINKER_LANGUAGE CXX)
++endif()
++
++set_target_properties(run PROPERTIES
++  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin"
++)
+
+diff --git a/toolchains/arm-linux-gnueabihf.cmake b/toolchains/arm-linux-gnueabihf.cmake
+new file mode 100644
+index 0000000..73e6d19
+--- /dev/null
++++ b/toolchains/arm-linux-gnueabihf.cmake
+@@ -0,0 +1,13 @@
++set(CMAKE_SYSTEM_NAME Linux)
++set(CMAKE_SYSTEM_PROCESSOR arm)
++
++set(CMAKE_C_COMPILER arm-linux-gnueabihf-gcc)
++set(CMAKE_CXX_COMPILER arm-linux-gnueabihf-g++)
++
++# 如有 sysroot/SDK，请按实际环境补齐以下设置（示例）：
++# set(CMAKE_SYSROOT /path/to/sysroot)
++# set(CMAKE_FIND_ROOT_PATH /path/to/sysroot)
++# set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
++# set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
++# set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
++# set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)

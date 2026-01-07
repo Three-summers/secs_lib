@@ -15,6 +15,17 @@
 
 这样做的好处是：`secs_lib` 的依赖（Asio/Threads/spdlog 头文件等）和库之间的依赖关系由 CMake 自动处理，你不需要在 Makefile 里手工维护一长串 `*.a` 的链接顺序。
 
+### 0.1 一键应用本仓库准备好的 CMake 补丁
+
+本仓库已生成一个可直接应用到 `tvoc_code` 根目录的补丁文件：`docs/integration/tvoc_code-cmake.patch`。
+
+在 `tvoc_code` 目录执行（会新增 `CMakeLists.txt` 与 `toolchains/arm-linux-gnueabihf.cmake`，不改业务源码）：
+
+```bash
+cd /home/say/code_bak/tvoc_code
+git apply /home/say/github_project/secs_lib/docs/integration/tvoc_code-cmake.patch
+```
+
 ---
 
 ## 1. secs_lib 侧需要怎么“配置”（给 C 工程用）
@@ -237,4 +248,3 @@ set_property(TARGET run PROPERTY LINKER_LANGUAGE CXX)
    - 增加 `-lsecs_c_api ...`（静态库场景推荐用 `--start-group/--end-group` 包住，避免顺序问题）
 
 > 说明：静态库依赖顺序维护成本很高，因此仍然推荐尽快迁移到 CMake 的“方案 A/B”。
-
