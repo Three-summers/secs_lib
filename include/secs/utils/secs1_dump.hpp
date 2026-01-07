@@ -21,6 +21,9 @@ struct Secs1DumpOptions final {
     bool include_hex{true};
     HexDumpOptions hex{};
 
+    // 是否输出 ANSI 颜色控制码（终端更易读；写入日志/文件时建议关闭）。
+    bool enable_color{false};
+
     // 是否在“完整消息”级别尝试解码 SECS-II Item（开关）。
     // - 单 block 且 end_bit=1：可直接解码；
     // - 多 block：建议使用 Secs1MessageReassembler 组包后再解码。
@@ -93,4 +96,3 @@ private:
 };
 
 } // namespace secs::utils
-

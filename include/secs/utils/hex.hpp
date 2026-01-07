@@ -31,6 +31,9 @@ struct HexDumpOptions final {
 
     // 是否输出 ASCII 侧栏（仅展示可打印字符，其余用 '.'）。
     bool show_ascii{false};
+
+    // 是否输出 ANSI 颜色控制码（终端更易读；写入日志/文件时建议关闭）。
+    bool enable_color{false};
 };
 
 /**
@@ -53,4 +56,3 @@ std::error_code parse_hex(std::string_view text,
                           std::vector<secs::core::byte> &out) noexcept;
 
 } // namespace secs::utils
-

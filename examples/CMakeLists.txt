@@ -68,6 +68,11 @@ add_executable(hsms_frame_builder_visual hsms_frame_builder_visual.cpp)
 target_link_libraries(hsms_frame_builder_visual PRIVATE secs::hsms secs::ii secs::core)
 list(APPEND _secs_example_targets hsms_frame_builder_visual)
 
+# 二进制报文 dump 工具示例（secs::utils）
+add_executable(utils_dump_example utils_dump_example.cpp)
+target_link_libraries(utils_dump_example PRIVATE secs::utils)
+list(APPEND _secs_example_targets utils_dump_example)
+
 # HSMS（TCP）SML 对端：主动/被动都加载同一份 SML，并按规则自动回包
 add_executable(hsms_sml_peer hsms_sml_peer.cpp)
 target_link_libraries(hsms_sml_peer PRIVATE secs::protocol secs::sml secs::hsms secs::ii secs::core)

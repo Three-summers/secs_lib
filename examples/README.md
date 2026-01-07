@@ -14,6 +14,7 @@ cmake --build build --target examples
 ./build/examples/c_api_secs2_simple
 	./build/examples/typed_handler_example
 	./build/examples/protocol_custom_reply_example
+	./build/examples/utils_dump_example
 	./build/examples/hsms_server [port]
 	./build/examples/hsms_client [host] [port]
 	./build/examples/hsms_sml_peer --help

@@ -21,6 +21,9 @@ struct HsmsDumpOptions final {
     // hexdump 选项（include_hex=true 时生效）。
     HexDumpOptions hex{};
 
+    // 是否输出 ANSI 颜色控制码（终端更易读；写入日志/文件时建议关闭）。
+    bool enable_color{false};
+
     // 是否尝试将 data message 的 body 解码为 SECS-II Item。
     // 这是一个“开关”：关闭时只展示 body 长度与原始 bytes（如果 include_hex 开启）。
     bool enable_secs2_decode{false};
@@ -49,4 +52,3 @@ struct HsmsDumpOptions final {
                                             HsmsDumpOptions options = {});
 
 } // namespace secs::utils
-

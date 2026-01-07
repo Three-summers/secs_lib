@@ -34,6 +34,9 @@ struct ItemDumpOptions final {
 
     // 每层缩进空格数（multiline=true 时生效）。
     std::size_t indent_spaces{2};
+
+    // 是否输出 ANSI 颜色控制码（终端更易读；写入日志/文件时建议关闭）。
+    bool enable_color{false};
 };
 
 /**
@@ -43,4 +46,3 @@ struct ItemDumpOptions final {
                                     ItemDumpOptions options = {});
 
 } // namespace secs::utils
-

@@ -8,6 +8,18 @@
 namespace secs::utils {
 namespace {
 
+struct Ansi final {
+    static constexpr const char *reset = "\033[0m";
+    static constexpr const char *dim = "\033[2m";
+    static constexpr const char *bytes = "\033[1;33m";
+    static constexpr const char *ascii = "\033[1;32m";
+    static constexpr const char *error = "\033[1;31m";
+};
+
+[[nodiscard]] const char *ansi_(bool enable, const char *code) noexcept {
+    return enable ? code : "";
+}
+
 [[nodiscard]] bool is_hex_digit_(unsigned char c) noexcept {
     return std::isxdigit(c) != 0;
 }
@@ -66,6 +78,12 @@ namespace {
 
 std::string hex_dump(secs::core::bytes_view bytes, HexDumpOptions options) {
     std::ostringstream oss;
+    const bool enable_color = options.enable_color;
+    const auto *reset = ansi_(enable_color, Ansi::reset);
+    const auto *dim = ansi_(enable_color, Ansi::dim);
+    const auto *bytes_color = ansi_(enable_color, Ansi::bytes);
+    const auto *ascii_color = ansi_(enable_color, Ansi::ascii);
+    const auto *error = ansi_(enable_color, Ansi::error);
 
     const std::size_t total = bytes.size();
     const std::size_t max_bytes =
@@ -78,10 +96,13 @@ std::string hex_dump(secs::core::bytes_view bytes, HexDumpOptions options) {
         const std::size_t line_n = std::min(per_line, max_bytes - offset);
 
         if (options.show_offset) {
+            oss << dim;
             oss << std::setw(4) << std::setfill('0') << std::hex << offset
                 << ": ";
+            oss << reset;
         }
 
+        oss << bytes_color;
         for (std::size_t i = 0; i < line_n; ++i) {
             const auto b = bytes[offset + i];
             oss << std::setw(2) << std::setfill('0') << std::hex
@@ -90,6 +111,7 @@ std::string hex_dump(secs::core::bytes_view bytes, HexDumpOptions options) {
                 oss << ' ';
             }
         }
+        oss << reset;
 
         if (options.show_ascii) {
             // 对齐：补齐未输出的字节位，保证 ASCII 列对齐。
@@ -101,16 +123,19 @@ std::string hex_dump(secs::core::bytes_view bytes, HexDumpOptions options) {
                 oss << ' ';
             }
             oss << "  ";
+            oss << ascii_color;
             for (std::size_t i = 0; i < line_n; ++i) {
                 oss << to_printable_ascii_(bytes[offset + i]);
             }
+            oss << reset;
         }
 
         oss << '\n';
     }
 
     if (options.max_bytes != 0 && total > options.max_bytes) {
-        oss << "... (truncated, total=" << std::dec << total << " bytes)\n";
+        oss << error << "... (truncated, total=" << std::dec << total << " bytes)"
+            << reset << '\n';
     }
 
     return oss.str();
@@ -163,4 +188,3 @@ std::error_code parse_hex(std::string_view text,
 }
 
 } // namespace secs::utils
-
