@@ -184,6 +184,59 @@ static void test_error_message_category_mapping(void) {
     }
 }
 
+static void test_log_set_level_smoke(void) {
+    expect_ok("secs_log_set_level(trace)", secs_log_set_level(SECS_LOG_TRACE));
+    expect_ok("secs_log_set_level(debug)", secs_log_set_level(SECS_LOG_DEBUG));
+    expect_ok("secs_log_set_level(info)", secs_log_set_level(SECS_LOG_INFO));
+    expect_ok("secs_log_set_level(warn)", secs_log_set_level(SECS_LOG_WARN));
+    expect_ok("secs_log_set_level(error)", secs_log_set_level(SECS_LOG_ERROR));
+    expect_ok("secs_log_set_level(critical)",
+              secs_log_set_level(SECS_LOG_CRITICAL));
+    expect_ok("secs_log_set_level(off)", secs_log_set_level(SECS_LOG_OFF));
+
+    secs_error_t err = secs_log_set_level((secs_log_level_t)999);
+    expect_err("secs_log_set_level(invalid)", err);
+    if (err.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+        failf("secs_log_set_level(invalid)", err);
+    }
+}
+
+static void test_hsms_open_passive_ip_invalid_cases(void) {
+    secs_context_t *ctx = NULL;
+    expect_ok("secs_context_create(ctx)", secs_context_create(&ctx));
+
+    secs_hsms_session_options_t opt;
+    memset(&opt, 0, sizeof(opt));
+    opt.session_id = 0x2468;
+    opt.t3_ms = 2000;
+    opt.t5_ms = 200;
+    opt.t6_ms = 2000;
+    opt.t7_ms = 2000;
+    opt.t8_ms = 0;
+    opt.linktest_interval_ms = 0;
+    opt.auto_reconnect = 0;
+    opt.passive_accept_select = 1;
+
+    secs_hsms_session_t *server = NULL;
+    secs_hsms_session_t *client = NULL;
+    expect_ok("secs_hsms_session_create(server)", secs_hsms_session_create(ctx, &opt, &server));
+    expect_ok("secs_hsms_session_create(client)", secs_hsms_session_create(ctx, &opt, &client));
+
+    /* open_passive_ip：invalid argument / parse fast-fail 分支（不触发实际 socket）。 */
+    expect_err("secs_hsms_session_open_passive_ip(NULL)",
+               secs_hsms_session_open_passive_ip(NULL, "127.0.0.1", 1));
+    expect_err("secs_hsms_session_open_passive_ip(NULL ip)",
+               secs_hsms_session_open_passive_ip(server, NULL, 1));
+    expect_err("secs_hsms_session_open_passive_ip(bad ip)",
+               secs_hsms_session_open_passive_ip(server, "not_an_ip", 1));
+
+    (void)secs_hsms_session_stop(client);
+    (void)secs_hsms_session_stop(server);
+    secs_hsms_session_destroy(client);
+    secs_hsms_session_destroy(server);
+    secs_context_destroy(ctx);
+}
+
 static void test_invalid_argument_fast_fail(void) {
     /* 这些用例不追求业务意义，主要用于覆盖“参数校验/快速失败”分支，且必须不阻塞/不崩溃。
      */
@@ -2119,11 +2172,13 @@ static void test_hsms_protocol_loopback(void) {
 int main(void) {
     test_version_and_error_message();
     test_error_message_category_mapping();
+    test_log_set_level_smoke();
     test_invalid_argument_fast_fail();
     test_hsms_session_create_v2_smoke();
     test_ii_encode_decode_and_malicious();
     test_ii_all_types_and_views();
     test_sml_runtime_basic();
+    test_hsms_open_passive_ip_invalid_cases();
     test_hsms_protocol_loopback();
 
     if (g_failures == 0) {

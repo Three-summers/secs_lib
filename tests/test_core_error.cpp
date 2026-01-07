@@ -34,6 +34,9 @@ void test_all_error_codes() {
 
     auto invalid = make_error_code(errc::invalid_argument);
     TEST_EXPECT_EQ(invalid.message(), "invalid argument");
+
+    auto oom = make_error_code(errc::out_of_memory);
+    TEST_EXPECT_EQ(oom.message(), "out of memory");
 }
 
 void test_unknown_error_code() {

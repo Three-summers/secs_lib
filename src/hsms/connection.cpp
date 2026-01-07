@@ -13,6 +13,8 @@
 #include <asio/write.hpp>
 
 #include <array>
+#include <new>
+#include <stdexcept>
 
 namespace secs::hsms {
 namespace {
@@ -339,6 +341,21 @@ Connection::async_write_message(const Message &msg) {
         co_return core::make_error_code(core::errc::cancelled);
     }
 
+    const auto max_queue_size =
+        options_.max_queue_size == 0 ? std::size_t{1} : options_.max_queue_size;
+    auto queued = control_queue_.size() + data_queue_.size();
+    if (queued >= max_queue_size) {
+        // 控制消息优先：若队列被 data 塞满，则丢弃队列中的 data，为控制消息让路。
+        if (!msg.is_data()) {
+            cancel_queued_data_writes_(
+                core::make_error_code(core::errc::buffer_overflow));
+            queued = control_queue_.size() + data_queue_.size();
+        }
+        if (queued >= max_queue_size) {
+            co_return core::make_error_code(core::errc::buffer_overflow);
+        }
+    }
+
     auto req = std::make_shared<WriteRequest>();
     auto enc = encode_frame(msg, req->frame);
     if (enc) {
@@ -382,7 +399,18 @@ Connection::async_read_message() {
     }
 
     std::vector<core::byte> payload;
-    payload.resize(payload_len);
+    try {
+        payload.resize(payload_len);
+    } catch (const std::length_error &) {
+        co_return std::pair{core::make_error_code(core::errc::buffer_overflow),
+                            Message{}};
+    } catch (const std::bad_alloc &) {
+        co_return std::pair{core::make_error_code(core::errc::out_of_memory),
+                            Message{}};
+    } catch (...) {
+        co_return std::pair{core::make_error_code(core::errc::invalid_argument),
+                            Message{}};
+    }
     ec = co_await async_read_exactly(
         core::mutable_bytes_view{payload.data(), payload.size()}, frame_started);
     if (ec) {

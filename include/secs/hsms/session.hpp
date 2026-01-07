@@ -10,6 +10,7 @@
 #include <asio/ip/tcp.hpp>
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -50,6 +51,11 @@ struct SessionOptions final {
 
     // 被动端是否接受 SELECT（用于单测覆盖“拒绝”分支）。
     bool passive_accept_select{true};
+
+    // 挂起事务（system_bytes -> Pending）上限：
+    // - 主要用于限制并发 async_request_data/async_linktest 等事务数；
+    // - 达到上限时，事务类 API 会快速失败，避免 pending_ 无界增长。
+    std::size_t max_pending_requests{256};
 };
 
 /**

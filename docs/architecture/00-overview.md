@@ -128,7 +128,7 @@
 | C++20 | 语言标准，使用 concepts、coroutines、ranges |
 | standalone Asio | 异步 I/O 框架（无 Boost 依赖） |
 | CMake | 构建系统 |
-| GoogleTest | 单元测试框架 |
+| 自研轻量测试框架 | 单元测试（入口见 `tests/test_main.hpp`） |
 | spdlog | 日志库（可选） |
 
 ---

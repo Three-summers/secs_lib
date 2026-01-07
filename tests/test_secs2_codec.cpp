@@ -142,6 +142,14 @@ void test_error_category_and_messages() {
                    "secs-ii length mismatch");
     TEST_EXPECT_EQ(make_error_code(errc::buffer_overflow).message(),
                    "output buffer overflow");
+    TEST_EXPECT_EQ(make_error_code(errc::list_too_large).message(),
+                   "secs-ii list too large");
+    TEST_EXPECT_EQ(make_error_code(errc::payload_too_large).message(),
+                   "secs-ii payload too large");
+    TEST_EXPECT_EQ(make_error_code(errc::total_budget_exceeded).message(),
+                   "secs-ii total budget exceeded");
+    TEST_EXPECT_EQ(make_error_code(errc::out_of_memory).message(),
+                   "secs-ii out of memory");
 
     std::error_code unknown(9999, category);
     TEST_EXPECT_EQ(unknown.message(), "unknown secs.ii error");
@@ -637,6 +645,44 @@ void test_length_overflow_limits() {
     }
 }
 
+void test_decode_one_deterministic_fuzz_does_not_crash() {
+    // 轻量“确定性 fuzz”：用固定 seed 生成小输入，覆盖更多 decode_one 分支。
+    // 目标不是验证语义，而是保证：
+    // - 不崩溃、不越界；
+    // - 错误时 consumed 必须为 0；
+    // - 成功时 consumed 必须在 (0, in.size()]。
+
+    secs::ii::DecodeLimits limits{};
+    limits.max_total_items = 128;
+    limits.max_total_bytes = 1024;
+
+    std::uint32_t x = 0x12345678u;
+    const auto next_u32 = [&]() noexcept -> std::uint32_t {
+        // LCG：确定性且无需 <random>。
+        x = x * 1664525u + 1013904223u;
+        return x;
+    };
+
+    for (std::size_t i = 0; i < 5000u; ++i) {
+        const std::size_t n = static_cast<std::size_t>(next_u32() % 256u);
+        std::vector<byte> buf(n);
+        for (std::size_t j = 0; j < n; ++j) {
+            buf[j] = static_cast<byte>(next_u32() & 0xFFu);
+        }
+
+        Item out = placeholder_item();
+        std::size_t consumed = 123;
+        const auto ec = decode_one(
+            bytes_view{buf.data(), buf.size()}, out, consumed, limits);
+        if (ec) {
+            TEST_EXPECT_EQ(consumed, 0u);
+        } else {
+            TEST_EXPECT(consumed > 0u);
+            TEST_EXPECT(consumed <= buf.size());
+        }
+    }
+}
+
 } // namespace
 
 int main() {
@@ -660,5 +706,6 @@ int main() {
     test_encode_to_buffer_overflow();
     test_encode_to_buffer_overflow_paths();
     test_length_overflow_limits();
+    test_decode_one_deterministic_fuzz_does_not_crash();
     return ::secs::tests::run_and_report();
 }

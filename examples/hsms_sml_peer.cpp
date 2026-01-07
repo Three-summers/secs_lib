@@ -4,7 +4,7 @@
  *
  * 目标场景：
  * - 你有一个 Windows 测试应用（可配置 HSMS 主动/被动），而本库在 WSL 开发；
- * - 希望在 WSL 侧跑一个“对端”程序，通过加载同一份 SML（例如 docs/sample.sml）
+ * - 希望在 WSL 侧跑一个“对端”程序，通过加载同一份 SML（例如 docs/sml_sample/sample.sml）
  *   来验证双方互通是否正常；
  * - 该示例支持：
  *   - passive：监听并等待对端连接（对端为 active）
@@ -18,10 +18,10 @@
  *
  * 常用：
  *   # 1) WSL 侧作为被动端（监听），Windows 测试应用作为主动端连接
- *   ./hsms_sml_peer --mode passive --listen 0.0.0.0 --port 5000 --sml docs/sample.sml --session-id 0x0001
+ *   ./hsms_sml_peer --mode passive --listen 0.0.0.0 --port 5000 --sml docs/sml_sample/sample.sml --session-id 0x0001
  *
  *   # 2) WSL 侧作为主动端（连接），Windows 测试应用作为被动端监听
- *   ./hsms_sml_peer --mode active --connect <windows_ip> --port 5000 --sml docs/sample.sml --session-id 0x0001
+ *   ./hsms_sml_peer --mode active --connect <windows_ip> --port 5000 --sml docs/sml_sample/sample.sml --session-id 0x0001
  */
 
 #include "secs/core/log.hpp"
@@ -84,7 +84,7 @@ struct Options final {
     std::string connect_ip{"127.0.0.1"};
     std::uint16_t port{5000};
     std::uint16_t session_id{0x0001};
-    std::string sml_path{"docs/sample.sml"};
+    std::string sml_path{"docs/sml_sample/sample.sml"};
 
     bool enable_timers{false};
     std::vector<std::string> fire_messages{};
@@ -102,7 +102,7 @@ static void print_usage(const char *argv0) {
               << "  --connect <ip>              active 模式连接地址（默认 127.0.0.1）\n"
               << "  --port <port>               端口（默认 5000）\n"
               << "  --session-id <u16>          HSMS data 的 SessionID（支持 0x 前缀，默认 0x0001）\n"
-              << "  --sml <path>                SML 文件路径（默认 docs/sample.sml）\n"
+              << "  --sml <path>                SML 文件路径（默认 docs/sml_sample/sample.sml）\n"
               << "  --enable-timers             启用 SML 的 every N send 规则\n"
               << "  --fire <name_or_SxFy>        启动后发送一次指定消息（可重复）\n"
               << "  --log-level <lvl>           trace|debug|info|warn|error|critical|off（默认 info）\n"
@@ -110,10 +110,10 @@ static void print_usage(const char *argv0) {
               << "示例:\n"
               << "  # WSL 作为被动端（监听），Windows 应用作为主动端连接\n"
               << "  " << argv0
-              << " --mode passive --listen 0.0.0.0 --port 5000 --sml docs/sample.sml --session-id 0x0001\n\n"
+              << " --mode passive --listen 0.0.0.0 --port 5000 --sml docs/sml_sample/sample.sml --session-id 0x0001\n\n"
               << "  # WSL 作为主动端（连接），Windows 应用作为被动端监听\n"
               << "  " << argv0
-              << " --mode active --connect <windows_ip> --port 5000 --sml docs/sample.sml --session-id 0x0001\n";
+              << " --mode active --connect <windows_ip> --port 5000 --sml docs/sml_sample/sample.sml --session-id 0x0001\n";
 }
 
 static bool parse_u16(std::string_view s, std::uint16_t &out) {

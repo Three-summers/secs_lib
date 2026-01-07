@@ -546,6 +546,115 @@ void test_hsms_protocol_stop_cancels_pending() {
     TEST_EXPECT(done);
 }
 
+void test_hsms_protocol_max_pending_requests_limit() {
+    asio::io_context ioc;
+    const std::uint16_t session_id = 0x1018;
+
+    secs::core::Event server_opened{};
+    secs::core::Event client_opened{};
+    secs::core::Event first_done{};
+
+    secs::hsms::Session server(ioc.get_executor(),
+                               secs::hsms::SessionOptions{
+                                   .session_id = session_id,
+                                   .t3 = 200ms,
+                                   .t5 = 10ms,
+                                   .t6 = 50ms,
+                                   .t7 = 50ms,
+                                   .t8 = 0ms,
+                                   .linktest_interval = 0ms,
+                                   .auto_reconnect = false,
+                               });
+
+    secs::hsms::Session client(ioc.get_executor(),
+                               secs::hsms::SessionOptions{
+                                   .session_id = session_id,
+                                   .t3 = 200ms,
+                                   .t5 = 10ms,
+                                   .t6 = 50ms,
+                                   .t7 = 50ms,
+                                   .t8 = 0ms,
+                                   .linktest_interval = 0ms,
+                                   .auto_reconnect = false,
+                               });
+
+    SessionOptions proto_opts{};
+    proto_opts.t3 = 200ms;
+    proto_opts.poll_interval = 1ms;
+    proto_opts.max_pending_requests = 1;
+    Session proto_client(client, session_id, proto_opts);
+
+    auto duplex = make_memory_duplex(ioc.get_executor());
+    Connection server_conn(std::move(duplex.server_stream));
+    Connection client_conn(std::move(duplex.client_stream));
+
+    asio::co_spawn(
+        ioc,
+        [&, server_conn = std::move(server_conn)]() mutable
+        -> asio::awaitable<void> {
+            auto ec =
+                co_await server.async_open_passive(std::move(server_conn));
+            TEST_EXPECT_OK(ec);
+            server_opened.set();
+        },
+        asio::detached);
+
+    asio::co_spawn(
+        ioc,
+        [&, client_conn = std::move(client_conn)]() mutable
+        -> asio::awaitable<void> {
+            auto ec = co_await client.async_open_active(std::move(client_conn));
+            TEST_EXPECT_OK(ec);
+            client_opened.set();
+        },
+        asio::detached);
+
+    std::atomic<bool> done{false};
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            TEST_EXPECT_OK(co_await server_opened.async_wait(200ms));
+            TEST_EXPECT_OK(co_await client_opened.async_wait(200ms));
+
+            // 第 1 个请求会挂起（服务端不回包），占用 pending_ 的一个 slot。
+            asio::co_spawn(
+                ioc,
+                [&]() -> asio::awaitable<void> {
+                    auto [ec, rsp] = co_await proto_client.async_request(
+                        1, 1, as_bytes("will-cancel"), 200ms);
+                    (void)rsp;
+                    TEST_EXPECT_EQ(ec, make_error_code(errc::cancelled));
+                    first_done.set();
+                    co_return;
+                },
+                asio::detached);
+
+            // 让第 1 个请求进入 pending_，再发起第 2 个请求（应快速失败）。
+            asio::steady_timer yield(ioc.get_executor());
+            yield.expires_after(1ms);
+            (void)co_await yield.async_wait(asio::as_tuple(asio::use_awaitable));
+
+            auto [ec2, rsp2] = co_await proto_client.async_request(
+                1, 1, as_bytes("overflow"), 200ms);
+            (void)rsp2;
+            TEST_EXPECT_EQ(ec2, make_error_code(errc::buffer_overflow));
+
+            proto_client.stop();
+            client.stop();
+            server.stop();
+
+            TEST_EXPECT_OK(co_await first_done.async_wait(200ms));
+
+            done = true;
+            ioc.stop();
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(done);
+}
+
 void test_hsms_protocol_disconnect_cancels_pending() {
     asio::io_context ioc;
     const std::uint16_t session_id = 0x1013;
@@ -1564,6 +1673,7 @@ int main() {
     test_router_set_find_erase_clear();
     test_hsms_protocol_pending_filters();
     test_hsms_protocol_stop_cancels_pending();
+    test_hsms_protocol_max_pending_requests_limit();
     test_hsms_protocol_disconnect_cancels_pending();
     test_hsms_protocol_run_without_poll_interval();
     test_hsms_protocol_echo_1000();

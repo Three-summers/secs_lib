@@ -4,13 +4,14 @@
 #include <cstddef>
 #include <iomanip>
 #include <iostream>
+#include <string>
 #include <string_view>
 #include <vector>
 
 namespace secs::benchmarks {
 
 struct BenchmarkResult {
-    std::string_view name;
+    std::string name;
     std::size_t data_size;
     double elapsed_ms;
     double throughput_mbps;
@@ -71,7 +72,8 @@ inline void run_benchmark(std::string_view name,
         throughput_mbps = mb / seconds;
     }
 
-    results().push_back({name, data_size, avg_ms, throughput_mbps});
+    results().push_back(
+        {std::string{name}, data_size, avg_ms, throughput_mbps});
 }
 
 inline void print_results() {

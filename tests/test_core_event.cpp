@@ -139,6 +139,47 @@ void test_reset() {
     TEST_EXPECT(timed_out.load());
 }
 
+void test_max_waiters_limit() {
+    asio::io_context ioc;
+
+    // max_waiters=1：第 2 个等待者应快速失败（out_of_memory）。
+    Event ev(/*max_waiters=*/1);
+
+    // 先启动第 1 个等待者，并用 poll() 让其跑到“真正挂起”的位置。
+    std::atomic<bool> waiter1_done{false};
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            auto ec = co_await ev.async_wait(200ms);
+            TEST_EXPECT_EQ(ec, make_error_code(errc::cancelled));
+            waiter1_done = true;
+            co_return;
+        },
+        asio::detached);
+
+    // 驱动一次事件循环，确保 waiter1 已把自己加入 waiters_ 并挂起。
+    (void)ioc.poll();
+
+    std::atomic<bool> waiter2_done{false};
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            auto ec = co_await ev.async_wait(200ms);
+            TEST_EXPECT_EQ(ec, make_error_code(errc::out_of_memory));
+            waiter2_done = true;
+            co_return;
+        },
+        asio::detached);
+
+    asio::steady_timer cancel_timer(ioc);
+    cancel_timer.expires_after(1ms);
+    cancel_timer.async_wait([&](const std::error_code &) { ev.cancel(); });
+
+    ioc.run();
+    TEST_EXPECT(waiter1_done.load());
+    TEST_EXPECT(waiter2_done.load());
+}
+
 } // namespace
 
 int main() {
@@ -147,5 +188,6 @@ int main() {
     test_cancel();
     test_multi_waiters();
     test_reset();
+    test_max_waiters_limit();
     return ::secs::tests::run_and_report();
 }

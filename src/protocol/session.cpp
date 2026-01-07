@@ -194,8 +194,9 @@ asio::awaitable<void> Session::async_run() {
             continue;
         }
         if (ec) {
-            cancel_all_pending_(ec);
+            // 先置位 stop，再 cancel pending：避免并发新请求扩大窗口。
             stop_requested_ = true;
+            cancel_all_pending_(ec);
             break;
         }
         co_await handle_inbound_(std::move(msg));
@@ -248,6 +249,9 @@ Session::async_request(std::uint8_t stream,
         co_return std::pair{make_error_code(errc::invalid_argument),
                             DataMessage{}};
     }
+    if (stop_requested_) {
+        co_return std::pair{make_error_code(errc::cancelled), DataMessage{}};
+    }
 
     const auto expected_function = secondary_function(function);
     const auto t3 = timeout.value_or(options_.t3);
@@ -279,6 +283,14 @@ Session::async_request(std::uint8_t stream,
         auto pending = std::make_shared<Pending>(stream, expected_function);
         {
             std::lock_guard lk(pending_mu_);
+            const auto max_pending =
+                options_.max_pending_requests == 0 ? std::size_t{1}
+                                                   : options_.max_pending_requests;
+            if (pending_.size() >= max_pending) {
+                system_bytes_.release(sb);
+                co_return std::pair{make_error_code(errc::buffer_overflow),
+                                    DataMessage{}};
+            }
             pending_.insert_or_assign(sb, pending);
         }
 
@@ -595,9 +607,9 @@ void Session::cancel_all_pending_(std::error_code reason) noexcept {
     }
 
     for (auto &[sb, pending] : moved) {
+        (void)sb;
         pending->ec = reason;
         pending->ready.cancel();
-        system_bytes_.release(sb);
     }
 }
 

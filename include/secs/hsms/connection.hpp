@@ -11,6 +11,7 @@
 #include <asio/use_awaitable.hpp>
 
 #include <deque>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <system_error>
@@ -22,6 +23,10 @@ namespace secs::hsms {
 struct ConnectionOptions final {
     // T8：网络字符间隔超时（字节间隔超时）。0 表示不启用。
     core::duration t8{};
+
+    // 写队列容量上限（control_queue_ + data_queue_ 总和）。
+    // 用于避免上层持续发送但对端长期不读导致队列无限增长。
+    std::size_t max_queue_size{1024};
 };
 
 /**

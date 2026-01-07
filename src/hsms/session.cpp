@@ -393,6 +393,14 @@ Session::async_control_transaction_(const Message &req,
                                     SType expected_rsp,
                                     core::duration timeout) {
     // 控制事务：把请求登记到 pending_，由 reader_loop_ 收到响应后唤醒。
+    const auto max_pending =
+        options_.max_pending_requests == 0 ? std::size_t{1}
+                                           : options_.max_pending_requests;
+    if (pending_.size() >= max_pending) {
+        co_return std::pair{core::make_error_code(core::errc::buffer_overflow),
+                            Message{}};
+    }
+
     const auto sb = req.header.system_bytes;
     auto pending = std::make_shared<Pending>(expected_rsp);
     pending_.insert_or_assign(sb, pending);
@@ -433,6 +441,14 @@ asio::awaitable<std::pair<std::error_code, Message>>
 Session::async_data_transaction_(const Message &req, core::duration timeout) {
     // 数据事务（W=1）：同样用 pending_ 做请求-响应匹配；按 HSMS-SS 语义，
     // T3 超时只取消事务，不强制断线。
+    const auto max_pending =
+        options_.max_pending_requests == 0 ? std::size_t{1}
+                                           : options_.max_pending_requests;
+    if (pending_.size() >= max_pending) {
+        co_return std::pair{core::make_error_code(core::errc::buffer_overflow),
+                            Message{}};
+    }
+
     const auto sb = req.header.system_bytes;
     auto pending = std::make_shared<Pending>(SType::data);
     pending_.insert_or_assign(sb, pending);

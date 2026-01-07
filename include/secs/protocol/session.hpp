@@ -33,6 +33,10 @@ struct SessionOptions final {
     // T3：回复超时（协议层请求-响应匹配用）。
     secs::core::duration t3{std::chrono::seconds{45}};
 
+    // HSMS 后端挂起请求上限（system_bytes -> Pending）。
+    // 达到上限时，async_request(HSMS) 会快速失败，避免 pending_ 无界增长。
+    std::size_t max_pending_requests{256};
+
     // 接收循环的轮询间隔：用于 stop() 检查与避免永久阻塞。
     secs::core::duration poll_interval{std::chrono::milliseconds{10}};
 

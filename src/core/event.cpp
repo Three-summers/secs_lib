@@ -4,6 +4,8 @@
 
 #include <asio/error.hpp>
 
+#include <new>
+
 namespace secs::core {
 
 /*
@@ -54,8 +56,21 @@ Event::async_wait(std::optional<steady_clock::duration> timeout) {
     const auto local_set_gen = set_generation_;
     const auto local_cancel_gen = cancel_generation_;
 
+    const auto max_waiters =
+        max_waiters_ == 0 ? std::size_t{1} : max_waiters_;
+    if (waiters_.size() >= max_waiters) {
+        co_return make_error_code(errc::out_of_memory);
+    }
+
     auto ex = co_await asio::this_coro::executor;
-    auto timer = std::make_shared<asio::steady_timer>(ex);
+    std::shared_ptr<asio::steady_timer> timer;
+    try {
+        timer = std::make_shared<asio::steady_timer>(ex);
+    } catch (const std::bad_alloc &) {
+        co_return make_error_code(errc::out_of_memory);
+    } catch (...) {
+        co_return make_error_code(errc::invalid_argument);
+    }
 
     if (timeout.has_value()) {
         timer->expires_after(*timeout);
@@ -64,7 +79,14 @@ Event::async_wait(std::optional<steady_clock::duration> timeout) {
         timer->expires_at(asio::steady_timer::time_point::max());
     }
 
-    auto it = waiters_.insert(waiters_.end(), timer);
+    std::list<std::shared_ptr<asio::steady_timer>>::iterator it;
+    try {
+        it = waiters_.insert(waiters_.end(), timer);
+    } catch (const std::bad_alloc &) {
+        co_return make_error_code(errc::out_of_memory);
+    } catch (...) {
+        co_return make_error_code(errc::invalid_argument);
+    }
     // 这里使用 as_tuple 使其返回错误码而不是异常
     auto [ec] = co_await timer->async_wait(asio::as_tuple(asio::use_awaitable));
     waiters_.erase(it);

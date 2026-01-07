@@ -161,6 +161,17 @@ MemoryDuplex make_memory_duplex(asio::any_io_executor ex) {
     return duplex;
 }
 
+MemoryDuplex make_memory_duplex_with_write_delay(asio::any_io_executor ex,
+                                                 secs::core::duration delay) {
+    auto c2s = std::make_shared<MemoryChannel>();
+    auto s2c = std::make_shared<MemoryChannel>();
+
+    MemoryDuplex duplex;
+    duplex.client_stream = std::make_unique<MemoryStream>(ex, s2c, c2s, delay);
+    duplex.server_stream = std::make_unique<MemoryStream>(ex, c2s, s2c, delay);
+    return duplex;
+}
+
 void test_message_encode_decode_roundtrip() {
     const std::vector<byte> body = {0xAA, 0xBB, 0xCC};
     const auto msg = secs::hsms::make_data_message(
@@ -324,6 +335,83 @@ void test_connection_write_rejects_oversized_message() {
             auto ec = co_await client_conn.async_write_message(msg);
             TEST_EXPECT_EQ(ec, make_error_code(errc::buffer_overflow));
             done = true;
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(done.load());
+}
+
+void test_connection_queue_limit_prioritizes_control() {
+    asio::io_context ioc;
+    // 用 write_delay 制造“writer 正在写第 1 条消息”的窗口，确保第 2 条 data 仍在队列里，
+    // 从而覆盖 max_queue_size 与“控制消息优先”的分支。
+    auto duplex = make_memory_duplex_with_write_delay(ioc.get_executor(), 50ms);
+
+    ConnectionOptions opt{};
+    opt.t8 = 0ms;
+    opt.max_queue_size = 1;
+
+    Connection conn(std::move(duplex.client_stream), opt);
+
+    std::vector<byte> body(16, static_cast<byte>(0x11));
+    const auto data1 = secs::hsms::make_data_message(
+        0x0001, 1, 1, false, 0x11111111, bytes_view{body.data(), body.size()});
+    const auto data2 = secs::hsms::make_data_message(
+        0x0001, 1, 1, false, 0x22222222, bytes_view{body.data(), body.size()});
+    const auto control = secs::hsms::make_select_req(0xFFFF, 0x33333333);
+
+    secs::core::Event data1_done{};
+    secs::core::Event data2_done{};
+    std::error_code data1_ec{};
+    std::error_code data2_ec{};
+
+    std::atomic<bool> done{false};
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            // 第 1 条 data：会被 writer_loop_ 取走并开始写（write_delay=50ms）。
+            asio::co_spawn(
+                ioc,
+                [&]() -> asio::awaitable<void> {
+                    data1_ec = co_await conn.async_write_message(data1);
+                    data1_done.set();
+                    co_return;
+                },
+                asio::detached);
+
+            // 让第 1 条写入先启动。
+            asio::steady_timer t1(ioc);
+            t1.expires_after(1ms);
+            (void)co_await t1.async_wait(asio::as_tuple(asio::use_awaitable));
+
+            // 第 2 条 data：应留在队列中，等待 writer_loop_。
+            asio::co_spawn(
+                ioc,
+                [&]() -> asio::awaitable<void> {
+                    data2_ec = co_await conn.async_write_message(data2);
+                    data2_done.set();
+                    co_return;
+                },
+                asio::detached);
+
+            // 让第 2 条写入完成入队。
+            asio::steady_timer t2(ioc);
+            t2.expires_after(1ms);
+            (void)co_await t2.async_wait(asio::as_tuple(asio::use_awaitable));
+
+            // 队列满时发送控制消息：应清理 data 队列为控制消息让路。
+            TEST_EXPECT_OK(co_await conn.async_write_message(control));
+
+            TEST_EXPECT_OK(co_await data2_done.async_wait(200ms));
+            TEST_EXPECT_EQ(data2_ec, make_error_code(errc::buffer_overflow));
+
+            TEST_EXPECT_OK(co_await data1_done.async_wait(1s));
+            TEST_EXPECT_OK(data1_ec);
+
+            done = true;
+            ioc.stop();
             co_return;
         },
         asio::detached);
@@ -1356,6 +1444,85 @@ void test_session_pending_cancelled_on_disconnect() {
     TEST_EXPECT(done.load());
 }
 
+void test_session_pending_limit_returns_buffer_overflow() {
+    asio::io_context ioc;
+
+    SessionOptions opt;
+    opt.session_id = 0x0001;
+    opt.t3 = 1s;
+    opt.t6 = 20ms;
+    opt.t7 = 200ms;
+    opt.t8 = secs::core::duration{};
+    opt.max_pending_requests = 1;
+
+    Session server(ioc.get_executor(), opt);
+    Session client(ioc.get_executor(), opt);
+
+    auto duplex = make_memory_duplex(ioc.get_executor());
+    Connection client_conn(std::move(duplex.client_stream),
+                           ConnectionOptions{.t8 = secs::core::duration{}});
+    Connection server_conn(std::move(duplex.server_stream),
+                           ConnectionOptions{.t8 = secs::core::duration{}});
+
+    secs::core::Event req1_done{};
+    std::error_code req1_ec{};
+
+    std::atomic<bool> done{false};
+    asio::co_spawn(
+        ioc, server.async_open_passive(std::move(server_conn)), asio::detached);
+
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            TEST_EXPECT_OK(
+                co_await client.async_open_active(std::move(client_conn)));
+
+            const std::vector<byte> body = {static_cast<byte>(0x01)};
+
+            // 第 1 个请求：保持挂起，不等待其自然超时（通过 stop() 取消）。
+            asio::co_spawn(
+                ioc,
+                [&]() -> asio::awaitable<void> {
+                    auto [ec, _] = co_await client.async_request_data(
+                        1,
+                        1,
+                        bytes_view{body.data(), body.size()},
+                        /*timeout=*/1s);
+                    req1_ec = ec;
+                    req1_done.set();
+                    co_return;
+                },
+                asio::detached);
+
+            // 给第 1 个请求一个调度窗口，让其先插入 pending_。
+            asio::steady_timer t(ioc);
+            t.expires_after(1ms);
+            (void)co_await t.async_wait(asio::as_tuple(asio::use_awaitable));
+
+            // 第 2 个并发请求：应因 pending 上限而快速失败。
+            auto [ec2, _2] = co_await client.async_request_data(
+                1,
+                1,
+                bytes_view{body.data(), body.size()},
+                /*timeout=*/1s);
+            TEST_EXPECT_EQ(ec2, make_error_code(errc::buffer_overflow));
+
+            client.stop();
+            server.stop();
+
+            TEST_EXPECT_OK(co_await req1_done.async_wait(200ms));
+            TEST_EXPECT_EQ(req1_ec, make_error_code(errc::cancelled));
+
+            done = true;
+            ioc.stop();
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(done.load());
+}
+
 void test_session_deselect_drops_inbound_data_when_not_selected() {
     asio::io_context ioc;
 
@@ -2030,6 +2197,7 @@ int main() {
     RUN_TEST(test_message_encode_decode_roundtrip);
     RUN_TEST(test_encode_frame_rejects_oversized_payload);
     RUN_TEST(test_connection_write_rejects_oversized_message);
+    RUN_TEST(test_connection_queue_limit_prioritizes_control);
     RUN_TEST(test_timer_wait_and_cancel);
     RUN_TEST(test_connection_loopback_framing);
     RUN_TEST(test_connection_t8_intercharacter_timeout);
@@ -2047,6 +2215,7 @@ int main() {
     RUN_TEST(test_session_t6_timeout_on_select);
     RUN_TEST(test_session_select_timeout_late_select_rsp_is_ignored);
     RUN_TEST(test_session_pending_cancelled_on_disconnect);
+    RUN_TEST(test_session_pending_limit_returns_buffer_overflow);
     RUN_TEST(test_session_deselect_drops_inbound_data_when_not_selected);
     RUN_TEST(test_session_t3_reply_timeout);
     RUN_TEST(test_session_linktest_interval_disconnect_on_failure);

@@ -8,6 +8,7 @@
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <list>
 #include <memory>
@@ -33,6 +34,7 @@ namespace secs::core {
 class Event final {
 public:
     Event() = default;
+    explicit Event(std::size_t max_waiters) noexcept : max_waiters_(max_waiters) {}
 
     void set() noexcept;
     void reset() noexcept;
@@ -49,6 +51,7 @@ private:
     bool signaled_{false};
     std::uint64_t set_generation_{0};
     std::uint64_t cancel_generation_{0};
+    std::size_t max_waiters_{1024};
 
     // asio::steady_timer 基于单调时钟，一般用 async_wait 来异步等待
     // 可以使用 expires_after 和 expires_at 来分别设置相对和绝对等待时间

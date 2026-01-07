@@ -30,6 +30,8 @@ function(secs_add_coverage_target target_name)
     COMMAND ${GCOVR_EXECUTABLE}
       -r ${PROJECT_SOURCE_DIR}
       --merge-mode-functions=merge-use-line-min
+      --merge-lines
+      --exclude-noncode-lines
       --html --html-details
       -o ${PROJECT_BINARY_DIR}/coverage.html
       # 兼容两种路径形态：
@@ -44,6 +46,9 @@ function(secs_add_coverage_target target_name)
       --exclude '.*/c_dump/.*'
       --exclude '^third_party/.*'
       --exclude '.*/third_party/.*'
+      # FetchContent/_deps（例如 spdlog）：不计入库覆盖率口径
+      --exclude '^_deps/.*'
+      --exclude '.*/_deps/.*'
     WORKING_DIRECTORY ${PROJECT_BINARY_DIR}
     USES_TERMINAL
   )

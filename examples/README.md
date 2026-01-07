@@ -92,7 +92,7 @@ cmake --build build --target examples
 - `hsms_sml_peer.cpp`
 
 用途：
-- 主动/被动两种模式都读取同一份 SML（例如 `docs/sample.sml`）；
+- 主动/被动两种模式都读取同一份 SML（例如 `docs/sml_sample/sample.sml`）；
 - 收到 primary 且 W=1 时，按 SML 条件规则自动选择响应模板并回 secondary；
 - 可选开启 SML 的 `every N send` 规则，周期性发送消息（用于联调时自动出流量）。
 
@@ -100,10 +100,10 @@ cmake --build build --target examples
 
 ```bash
 # 被动端（监听）：适合 Windows 测试应用作为 active 连接进来
-./build/examples/hsms_sml_peer --mode passive --listen 0.0.0.0 --port 5000 --sml docs/sample.sml --session-id 0x0001
+./build/examples/hsms_sml_peer --mode passive --listen 0.0.0.0 --port 5000 --sml docs/sml_sample/sample.sml --session-id 0x0001
 
 # 主动端（连接）：适合 Windows 测试应用作为 passive 监听
-./build/examples/hsms_sml_peer --mode active --connect <windows_ip> --port 5000 --sml docs/sample.sml --session-id 0x0001
+./build/examples/hsms_sml_peer --mode active --connect <windows_ip> --port 5000 --sml docs/sml_sample/sample.sml --session-id 0x0001
 ```
 
 ## HSMS（pipe）客户端/服务器示例（受限环境推荐）

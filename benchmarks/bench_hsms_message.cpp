@@ -1,6 +1,7 @@
 #include "bench_main.hpp"
 #include "secs/hsms/message.hpp"
 
+#include <cstdlib>
 #include <vector>
 
 using namespace secs;
@@ -8,10 +9,13 @@ using namespace secs::core;
 using namespace secs::hsms;
 
 static void bench_hsms_max_payload() {
-    // 16MB 负载编解码（验证 kMaxPayloadSize）
-    constexpr std::size_t payload_size = 16 * 1024 * 1024;
+    // HSMS 的长度字段表示“payload=Header(10B)+Body”的字节数，且 payload
+    // 上限为 kMaxPayloadSize（16MB）。因此要跑“最大负载”基准，Body 只能到
+    // (kMaxPayloadSize - kHeaderSize)。
+    constexpr std::size_t payload_size = static_cast<std::size_t>(kMaxPayloadSize);
+    constexpr std::size_t body_size = payload_size - kHeaderSize;
 
-    std::vector<byte> body(payload_size, 0xAA);
+    std::vector<byte> body(body_size, 0xAA);
     Message msg = make_data_message(0x1234,     // SessionID（会话 ID）
                                     1,          // Stream 号
                                     1,          // Function 号
@@ -21,19 +25,22 @@ static void bench_hsms_max_payload() {
 
     std::vector<byte> encoded;
 
-    BENCH_RUN("HSMS: Encode 16MB payload", payload_size, 3, {
+    BENCH_RUN("HSMS: Encode max payload (16MB)", payload_size, 3, {
         encoded = encode_frame(msg);
     });
 
     // 解码基准
     std::size_t frame_size = encoded.size();
-    BENCH_RUN("HSMS: Decode 16MB payload", frame_size, 3, {
+    BENCH_RUN("HSMS: Decode max payload (16MB)", frame_size, 3, {
         Message decoded;
         std::size_t consumed = 0;
         auto ec = decode_frame(
             bytes_view{encoded.data(), encoded.size()}, decoded, consumed);
-        if (ec) {
-            std::cerr << "Decode failed: " << ec.message() << "\n";
+        if (ec || consumed != encoded.size()) {
+            std::cerr << "Decode failed: ec=" << ec.message()
+                      << " consumed=" << consumed
+                      << " expected=" << encoded.size() << "\n";
+            std::abort();
         }
     });
 }
@@ -158,8 +165,7 @@ static void bench_hsms_various_sizes() {
              : size >= 1024      ? "KB)"
                                  : "B)");
 
-        BENCH_RUN(
-            bench_name.c_str(), size, 3, { encoded = encode_frame(msg); });
+        BENCH_RUN(bench_name, size, 3, { encoded = encode_frame(msg); });
     }
 }
 
