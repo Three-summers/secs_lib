@@ -153,6 +153,24 @@ target_include_directories(secs_sml
 
 target_link_libraries(secs_sml PUBLIC secs_ii secs_core)
 
+add_library(secs_utils
+  src/utils/hex.cpp
+  src/utils/item_dump.cpp
+  src/utils/hsms_dump.cpp
+  src/utils/secs1_dump.cpp
+)
+add_library(secs::utils ALIAS secs_utils)
+set_target_properties(secs_utils PROPERTIES EXPORT_NAME utils)
+target_compile_features(secs_utils PUBLIC cxx_std_20)
+
+target_include_directories(secs_utils
+  PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+
+target_link_libraries(secs_utils PUBLIC secs_core secs_ii secs_hsms secs_secs1)
+
 add_library(secs_c_api
   src/c_api.cpp
 )
@@ -179,6 +197,7 @@ set(_secs_lib_targets
   secs_hsms
   secs_protocol
   secs_sml
+  secs_utils
   secs_c_api
 )
 
@@ -220,6 +239,7 @@ if(SECS_ENABLE_COVERAGE)
   secs_enable_coverage_compile(secs_hsms)
   secs_enable_coverage_compile(secs_protocol)
   secs_enable_coverage_compile(secs_sml)
+  secs_enable_coverage_compile(secs_utils)
   secs_enable_coverage_compile(secs_c_api)
 endif()
 
@@ -274,6 +294,7 @@ if(SECS_ENABLE_INSTALL)
       secs_hsms
       secs_protocol
       secs_sml
+      secs_utils
       secs_c_api
     EXPORT secsTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}

@@ -107,6 +107,7 @@
 | secs1 | `secs::secs1` | `secs::core` | SECS-I（SEMI E4）半双工传输状态机（分包/重组、握手、超时） |
 | protocol | `secs::protocol` | `secs::core` + `secs::hsms` + `secs::secs1` | 统一 HSMS/SECS-I 的 `send/request/run` + 路由/自动回复 |
 | sml | `secs::sml` | `secs::ii` + `secs::core` | SML 解析、条件响应匹配、定时规则访问（用于自动化脚本/仿真） |
+| utils | `secs::utils` | `secs::core` + `secs::ii` + `secs::hsms` + `secs::secs1` | 调试工具：HSMS/SECS-I 报文解析与 SECS-II Item dump |
 | c_api | `secs::c_api` | `secs::protocol` + `secs::sml` | C 语言对外接口（C ABI）：不透明句柄 + 统一错误码 + 内存释放契约 + 内置 io 线程上下文 |
 
 ### 目录结构
@@ -121,7 +122,8 @@ secs_lib/
 │   ├── hsms/                   # HSMS（Message/Connection/Session）
 │   ├── secs1/                  # SECS-I（Link/StateMachine/分包/超时）
 │   ├── protocol/               # 协议层（Session/Router/TypedHandler/SystemBytes）
-│   └── sml/                    # SML（Lexer/Parser/Runtime/AST）
+│   ├── sml/                    # SML（Lexer/Parser/Runtime/AST）
+│   └── utils/                  # 工具集（hexdump、HSMS/SECS-I 解析、SECS-II Item dump）
 ├── src/                        # 对应实现
 ├── examples/                   # 示例程序（CMake target: examples）
 ├── tests/                      # 单元测试（ctest）
