@@ -103,6 +103,12 @@ function(secs_ensure_asio_target)
 
   find_package(Threads REQUIRED)
   target_link_libraries(secs_asio INTERFACE Threads::Threads)
+
+  # Windows（尤其是 MinGW）需要显式链接 Winsock 相关库；MSVC 的 #pragma comment(lib, ...)
+  # 在 MinGW 下不会生效，否则会出现 WSAStartup/WSASend/AcceptEx 等符号未解析。
+  if(WIN32)
+    target_link_libraries(secs_asio INTERFACE ws2_32 mswsock)
+  endif()
 endfunction()
 
 function(secs_link_standalone_asio target)

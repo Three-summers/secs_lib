@@ -16,16 +16,18 @@ set(SECS_FETCH_SPDLOG_GIT_TAG "v1.13.0"
 function(secs_fetch_spdlog_include_dir out_var)
   include(FetchContent)
 
-  # 仅拉取一次，避免重复下载/配置
-  FetchContent_GetProperties(secs_spdlog_fc)
-  if(NOT secs_spdlog_fc_POPULATED)
+  # 仅声明一次，避免重复下载/配置。
+  #
+  # 注意：CMake 4.x 开始不再推荐直接调用 FetchContent_Populate()（CMP0169），
+  # 这里改用 FetchContent_MakeAvailable() 来完成下载/解压与可用性初始化。
+  if(NOT DEFINED secs_spdlog_fc_SOURCE_DIR)
     FetchContent_Declare(secs_spdlog_fc
       GIT_REPOSITORY "${SECS_FETCH_SPDLOG_GIT_REPOSITORY}"
       GIT_TAG "${SECS_FETCH_SPDLOG_GIT_TAG}"
       GIT_SHALLOW TRUE
       GIT_PROGRESS TRUE
     )
-    FetchContent_Populate(secs_spdlog_fc)
+    FetchContent_MakeAvailable(secs_spdlog_fc)
   endif()
 
   # spdlog 仓库的头文件目录为 <repo>/include
@@ -110,4 +112,3 @@ function(secs_link_spdlog target)
   secs_ensure_spdlog_target()
   target_link_libraries(${target} PRIVATE $<BUILD_INTERFACE:secs_spdlog>)
 endfunction()
-
