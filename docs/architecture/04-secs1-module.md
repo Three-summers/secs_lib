@@ -602,54 +602,31 @@
 │  1. 状态检查：                                                      │
 │     if (state_ != idle) return invalid_argument;                    │
 │                                                                     │
-│  2. 等待 ENQ：                                                      │
-│  ┌────────────────────────────────────────────────────────────┐    │
-│  │  auto [ec, b] = co_await async_read_byte(timeout);          │    │
-│  │  if (ec) return {ec, {}};                                   │    │
-│  │  if (b != ENQ) return {protocol_error, {}};                 │    │
-│  └────────────────────────────────────────────────────────────┘    │
-│                                                                     │
-│  3. 发送 EOT：                                                      │
-│     co_await link_.async_write({EOT});                              │
+│  2. 启动接收：                                                      │
+│     - 若 in_flight_ 为空：等待 ENQ（忽略噪声字节）-> 回 EOT          │
+│     - 若已有 in_flight_：直接进入收块循环（ENQ 或 Length 启动）      │
 │     state_ = wait_block;                                            │
 │                                                                     │
-│  4. 接收 Blocks（带重组）：                                         │
+│  3. （可选）块间握手：                                               │
+│     若在收块循环中读到 ENQ：发送 EOT 并继续读取下一块帧               │
+│                                                                     │
+│  4. 接收 Blocks（支持消息交错/重组）：                               │
 │  ┌────────────────────────────────────────────────────────────┐    │
-│  │  Reassembler reassembler(expected_device_id_);              │    │
-│  │                                                             │    │
-│  │  while (!reassembler.has_message()) {                       │    │
-│  │      // 4.1 读取 Block 帧                                   │    │
-│  │      vector<byte> frame;                                    │    │
-│  │      frame.push_back(co_await read_byte(T1));  // Length    │    │
-│  │      size_t length = frame[0];                              │    │
-│  │      for (i = 0; i < length + 2; ++i) {                     │    │
-│  │          frame.push_back(co_await read_byte(T1));           │    │
-│  │      }                                                      │    │
-│  │                                                             │    │
-│  │      // 4.2 解码并校验                                      │    │
-│  │      DecodedBlock block;                                    │    │
-│  │      auto ec = decode_block(frame, block);                  │    │
-│  │      if (ec) {                                              │    │
-│  │          co_await link_.async_write({NAK});  // 发送 NAK    │    │
-│  │          continue;  // 等待重传                             │    │
-│  │      }                                                      │    │
-│  │                                                             │    │
-│  │      // 4.3 重组                                            │    │
-│  │      ec = reassembler.accept(block);                        │    │
-│  │      if (ec) {                                              │    │
-│  │          co_await link_.async_write({NAK});                 │    │
-│  │          continue;                                          │    │
-│  │      }                                                      │    │
-│  │                                                             │    │
-│  │      // 4.4 确认                                            │    │
-│  │      co_await link_.async_write({ACK});                     │    │
+│  │  for (;;) {                                                 │    │
+│  │      // 4.1 读取完整 Block frame（Length + Payload + CS）    │    │
+│  │      //     - 首块/握手：按 T2 等待；后续块：按 T4 等待       │    │
+│  │      //     - Block 内字节间：按 T1 读取                      │    │
+│  │      // 4.2 decode_block：失败 -> NAK（最多 retry_limit_）     │    │
+│  │      // 4.3 重复块：header+data 相同 -> ACK 丢弃              │    │
+│  │      // 4.4 按 system_bytes 选择/创建重组器并 accept()        │    │
+│  │      //     - 新 system_bytes 必须从 BlockNumber=1 开始       │    │
+│  │      // 4.5 成功 -> ACK；若某条消息重组完成 -> return ok      │    │
 │  │  }                                                          │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
 │  5. 完成：                                                          │
 │     state_ = idle;                                                  │
-│     return {ok, {reassembler.message_header(),                      │
-│                  reassembler.message_body()}};                      │
+│     return {ok, message};                                           │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
