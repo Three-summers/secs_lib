@@ -1755,6 +1755,133 @@ void test_sender_retries_block_on_nak() {
     TEST_EXPECT_EQ(first, second);
 }
 
+void test_sender_sends_enq_per_block_for_multi_block_scripted() {
+    asio::io_context ioc;
+    ScriptedLink link(ioc.get_executor());
+
+    // 2 块：每块都握手一次（ENQ->EOT），再等 ACK
+    link.push_read_ok(secs::secs1::kEot);
+    link.push_read_ok(secs::secs1::kAck);
+    link.push_read_ok(secs::secs1::kEot);
+    link.push_read_ok(secs::secs1::kAck);
+
+    Timeouts timeouts{};
+    timeouts.t2_protocol = 200ms;
+
+    StateMachine sender(link, std::nullopt, timeouts, 1);
+    auto h = sample_header();
+    auto payload = make_payload(secs::secs1::kMaxBlockDataSize + 10);
+
+    std::error_code result;
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            result = co_await sender.async_send(
+                h, bytes_view{payload.data(), payload.size()});
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT_OK(result);
+
+    // 期望写入序列：ENQ + frame1 + ENQ + frame2
+    TEST_EXPECT_EQ(link.writes().size(), 4u);
+    TEST_EXPECT_EQ(link.writes()[0].size(), 1u);
+    TEST_EXPECT_EQ(link.writes()[0][0], secs::secs1::kEnq);
+    TEST_EXPECT_EQ(link.writes()[2].size(), 1u);
+    TEST_EXPECT_EQ(link.writes()[2][0], secs::secs1::kEnq);
+
+    DecodedBlock d1{};
+    TEST_EXPECT_OK(secs::secs1::decode_block(
+        bytes_view{link.writes()[1].data(), link.writes()[1].size()}, d1));
+    TEST_EXPECT_EQ(d1.header.block_number, 1);
+    TEST_EXPECT(!d1.header.end_bit);
+
+    DecodedBlock d2{};
+    TEST_EXPECT_OK(secs::secs1::decode_block(
+        bytes_view{link.writes()[3].data(), link.writes()[3].size()}, d2));
+    TEST_EXPECT_EQ(d2.header.block_number, 2);
+    TEST_EXPECT(d2.header.end_bit);
+
+    std::vector<byte> reassembled;
+    reassembled.insert(reassembled.end(), d1.data.begin(), d1.data.end());
+    reassembled.insert(reassembled.end(), d2.data.begin(), d2.data.end());
+    TEST_EXPECT_EQ(reassembled.size(), payload.size());
+    TEST_EXPECT(std::equal(
+        reassembled.begin(), reassembled.end(), payload.begin(), payload.end()));
+}
+
+void test_receiver_accepts_enq_per_block_multi_block() {
+    asio::io_context ioc;
+    auto [a, b] = MemoryLink::create(ioc.get_executor());
+
+    Timeouts timeouts{};
+    timeouts.t1_intercharacter = 200ms;
+    timeouts.t2_protocol = 200ms;
+    timeouts.t4_interblock = 200ms;
+
+    StateMachine receiver(b, 0x1234, timeouts, 3);
+    auto h = sample_header();
+    auto payload = make_payload(secs::secs1::kMaxBlockDataSize + 10);
+    auto frames = secs::secs1::fragment_message(
+        h, bytes_view{payload.data(), payload.size()});
+    TEST_EXPECT_EQ(frames.size(), 2u);
+
+    std::atomic<int> done{0};
+    asio::steady_timer watchdog(ioc);
+    watchdog.expires_after(1s);
+    watchdog.async_wait([&](const std::error_code &) {
+        TEST_FAIL("watchdog fired");
+        ioc.stop();
+    });
+
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            for (const auto &frame : frames) {
+                TEST_EXPECT_OK(co_await write_byte(a, secs::secs1::kEnq));
+                auto [ec0, ch0] = co_await a.async_read_byte(200ms);
+                TEST_EXPECT_OK(ec0);
+                TEST_EXPECT_EQ(ch0, secs::secs1::kEot);
+
+                TEST_EXPECT_OK(co_await a.async_write(
+                    bytes_view{frame.data(), frame.size()}));
+                auto [ec1, ack] = co_await a.async_read_byte(200ms);
+                TEST_EXPECT_OK(ec1);
+                TEST_EXPECT_EQ(ack, secs::secs1::kAck);
+            }
+
+            if (++done == 2) {
+                watchdog.cancel();
+                ioc.stop();
+            }
+            co_return;
+        },
+        asio::detached);
+
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            auto [ec, msg] = co_await receiver.async_receive(800ms);
+            TEST_EXPECT_OK(ec);
+            TEST_EXPECT_EQ(msg.body.size(), payload.size());
+            TEST_EXPECT(std::equal(msg.body.begin(),
+                                   msg.body.end(),
+                                   payload.begin(),
+                                   payload.end()));
+            if (++done == 2) {
+                watchdog.cancel();
+                ioc.stop();
+            }
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT_EQ(done.load(), 2);
+}
+
 void test_receiver_nak_then_accept_on_checksum_error() {
     asio::io_context ioc;
     auto [a, b] = MemoryLink::create(ioc.get_executor());
@@ -2250,6 +2377,8 @@ int main() {
     test_state_machine_receive_ignores_noise_before_enq();
     test_sender_retries_handshake_on_nak_then_ok();
     test_sender_retries_block_on_nak();
+    test_sender_sends_enq_per_block_for_multi_block_scripted();
+    test_receiver_accepts_enq_per_block_multi_block();
     test_receiver_nak_then_accept_on_checksum_error();
     test_t1_intercharacter_timeout();
     test_t2_handshake_timeout_to_too_many_retries();

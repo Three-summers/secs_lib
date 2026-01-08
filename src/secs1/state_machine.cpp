@@ -79,56 +79,60 @@ StateMachine::async_send(const Header &header, secs::core::bytes_view body) {
         header.system_bytes,
         body.size());
 
-    // 进入“等待对端允许发送”的阶段（ENQ -> 等待 EOT/ACK）。
-    state_ = State::wait_eot;
-
-    bool handshake_ok = false;
-    for (std::size_t attempt = 0; attempt < retry_limit_; ++attempt) {
-        // 发 ENQ：请求占用链路。
-        auto ec = co_await async_send_control(kEnq);
-        if (ec) {
-            SPDLOG_DEBUG("secs1 async_send ENQ failed: ec={}({})",
-                         ec.value(),
-                         ec.message());
-            state_ = State::idle;
-            co_return ec;
-        }
-
-        // 等待对端响应（T2）。EOT/ACK 视为允许发送；NAK/超时则重试。
-        auto [rec_ec, resp] = co_await async_read_byte(timeouts_.t2_protocol);
-        if (!rec_ec && (resp == kEot || resp == kAck)) {
-            handshake_ok = true;
-            break;
-        }
-        if (!rec_ec && resp == kNak) {
-            continue;
-        }
-        if (is_timeout(rec_ec)) {
-            continue;
-        }
-        if (rec_ec) {
-            SPDLOG_DEBUG("secs1 async_send handshake receive failed: ec={}({})",
-                         rec_ec.value(),
-                         rec_ec.message());
-            state_ = State::idle;
-            co_return rec_ec;
-        }
-        state_ = State::idle;
-        SPDLOG_DEBUG("secs1 async_send handshake protocol_error (resp=0x{:02X})",
-                     static_cast<unsigned int>(resp));
-        co_return make_error_code(errc::protocol_error);
-    }
-
-    if (!handshake_ok) {
-        state_ = State::idle;
-        SPDLOG_DEBUG("secs1 async_send handshake too_many_retries");
-        co_return make_error_code(errc::too_many_retries);
-    }
-
     // SECS-I 规定单个块的数据最大 244 字节：这里把 body 切分并编码成多个帧。
     auto frames = fragment_message(header, body);
 
     for (const auto &frame : frames) {
+        // 注意：兼容更多 SECS-I 实现，这里按“每个块都执行一次 ENQ/EOT 握手”的方式
+        // 发送。单块消息与旧行为一致；多块消息会在 ACK 后再次 ENQ。
+        state_ = State::wait_eot;
+
+        bool handshake_ok = false;
+        for (std::size_t attempt = 0; attempt < retry_limit_; ++attempt) {
+            // 发 ENQ：请求占用链路。
+            auto ec = co_await async_send_control(kEnq);
+            if (ec) {
+                SPDLOG_DEBUG("secs1 async_send ENQ failed: ec={}({})",
+                             ec.value(),
+                             ec.message());
+                state_ = State::idle;
+                co_return ec;
+            }
+
+            // 等待对端响应（T2）。EOT/ACK 视为允许发送；NAK/超时则重试。
+            auto [rec_ec, resp] =
+                co_await async_read_byte(timeouts_.t2_protocol);
+            if (!rec_ec && (resp == kEot || resp == kAck)) {
+                handshake_ok = true;
+                break;
+            }
+            if (!rec_ec && resp == kNak) {
+                continue;
+            }
+            if (is_timeout(rec_ec)) {
+                continue;
+            }
+            if (rec_ec) {
+                SPDLOG_DEBUG(
+                    "secs1 async_send handshake receive failed: ec={}({})",
+                    rec_ec.value(),
+                    rec_ec.message());
+                state_ = State::idle;
+                co_return rec_ec;
+            }
+            state_ = State::idle;
+            SPDLOG_DEBUG(
+                "secs1 async_send handshake protocol_error (resp=0x{:02X})",
+                static_cast<unsigned int>(resp));
+            co_return make_error_code(errc::protocol_error);
+        }
+
+        if (!handshake_ok) {
+            state_ = State::idle;
+            SPDLOG_DEBUG("secs1 async_send handshake too_many_retries");
+            co_return make_error_code(errc::too_many_retries);
+        }
+
         state_ = State::wait_check;
         std::size_t attempts = 0;
 
@@ -225,8 +229,71 @@ StateMachine::async_receive(std::optional<secs::core::duration> timeout) {
 
     auto next_block_timeout = timeouts_.t2_protocol;
     while (!re.has_message()) {
+        // 多块消息的“块间启动方式”存在不同实现：
+        // - 一些实现：每个块都重新 ENQ/EOT；
+        // - 一些实现：只在消息开始 ENQ/EOT，后续块直接发送 Length 开头的块帧。
+        //
+        // 为提升互操作性：当已接收过至少一个块且消息未结束时，允许两种方式：
+        // - 若看到 ENQ，则发送 EOT 再读块帧；
+        // - 若看到合法 Length（10..254），则按“直接块帧”处理。
+        std::optional<secs::core::byte> first_len{};
+        if (last_accepted_header.has_value()) {
+            const auto deadline = secs::core::steady_clock::now() + next_block_timeout;
+            for (;;) {
+                const auto now = secs::core::steady_clock::now();
+                if (now >= deadline) {
+                    state_ = State::idle;
+                    co_return std::pair{
+                        secs::core::make_error_code(secs::core::errc::timeout),
+                        ReceivedMessage{}};
+                }
+
+                const auto remaining = deadline - now;
+                auto [ec, b] = co_await async_read_byte(remaining);
+                if (ec) {
+                    SPDLOG_DEBUG(
+                        "secs1 async_receive waiting next block start failed: ec={}({})",
+                        ec.value(),
+                        ec.message());
+                    state_ = State::idle;
+                    co_return std::pair{ec, ReceivedMessage{}};
+                }
+
+                if (b == kEnq) {
+                    // 对端请求发送下一块：回 EOT 表示允许发送。
+                    auto eot_ec = co_await async_send_control(kEot);
+                    if (eot_ec) {
+                        SPDLOG_DEBUG(
+                            "secs1 async_receive send EOT(for next block) failed: ec={}({})",
+                            eot_ec.value(),
+                            eot_ec.message());
+                        state_ = State::idle;
+                        co_return std::pair{eot_ec, ReceivedMessage{}};
+                    }
+                    next_block_timeout = timeouts_.t2_protocol;
+                    break;
+                }
+
+                const auto len = static_cast<std::size_t>(b);
+                if (len >= kHeaderSize && len <= kMaxBlockLength) {
+                    first_len = b;
+                    break;
+                }
+
+                // 其他字节：视为噪声/控制字符，继续等待（不立即失败）。
+            }
+        }
+
         // 长度字段（第 1 个块用 T2；后续块用 T4）
-        auto [len_ec, len_b] = co_await async_read_byte(next_block_timeout);
+        std::error_code len_ec{};
+        secs::core::byte len_b = 0;
+        if (first_len.has_value()) {
+            len_b = *first_len;
+        } else {
+            auto [ec_tmp, b_tmp] = co_await async_read_byte(next_block_timeout);
+            len_ec = ec_tmp;
+            len_b = b_tmp;
+        }
         if (len_ec) {
             SPDLOG_DEBUG("secs1 async_receive length read failed: ec={}({})",
                          len_ec.value(),
