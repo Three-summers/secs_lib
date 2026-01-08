@@ -1,6 +1,6 @@
 # Protocol 模块详细实现原理
 
-> 文档生成日期：2026-01-07
+> 文档更新：2026-01-08（Codex）
 > 基于源码版本：当前 main 分支
 
 ## 1. 模块概述
@@ -8,6 +8,7 @@
 `secs::protocol` 模块是 HSMS 与 SECS-I 之上的统一抽象层，提供：
 
 - **统一会话**：`Session` 类统一 HSMS 与 SECS-I 的发送/请求/接收接口
+- **单步轮询**：`Session::async_poll_once()` 单步接收并处理一条入站消息（SECS-I 半双工场景推荐）
 - **消息路由**：`Router` 基于 (Stream, Function) 分发入站消息到处理器
 - **事务标识**：`SystemBytes` 分配器保证请求-响应匹配的唯一性
 
@@ -600,6 +601,27 @@
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+### 5.5.1 单步轮询（async_poll_once）
+
+`async_poll_once()` 适用于需要“由业务主循环自己驱动收包节奏”的场景（尤其是 SECS-I 半双工）：
+
+- 典型用途：在主循环里混合“定时发送/手动 fire”与“接收并自动回包”
+- 约束：不应与 `async_run()` 并发运行（避免同时读同一条底层连接/串口）
+
+伪代码（以 SECS-I 为例）：
+
+```
+for (;;) {
+  // 业务侧：先处理 timer/fire（串行）
+  // ...
+
+  // 再单步收包（若超时则继续 loop）
+  auto ec = co_await session.async_poll_once(200ms);
+  if (ec == errc::timeout) continue;
+  if (ec) break; // stop/断线/协议错误等
+}
+```
+
 ### 5.6 请求-响应匹配
 
 ```
@@ -792,9 +814,9 @@
 
 | 文件 | 行数 | 说明 |
 |------|------|------|
-| `include/secs/protocol/router.hpp` | ~74 | Router/DataMessage 定义 |
-| `include/secs/protocol/session.hpp` | ~146 | Session 接口 |
-| `include/secs/protocol/system_bytes.hpp` | ~70 | SystemBytes 分配器接口 |
-| `src/protocol/router.cpp` | ~59 | Router 实现 |
-| `src/protocol/session.cpp` | ~509 | Session 实现 |
-| `src/protocol/system_bytes.cpp` | ~130 | SystemBytes 分配器实现 |
+| `include/secs/protocol/router.hpp` | 73 | Router/DataMessage 定义 |
+| `include/secs/protocol/session.hpp` | 202 | Session 接口 |
+| `include/secs/protocol/system_bytes.hpp` | 69 | SystemBytes 分配器接口 |
+| `src/protocol/router.cpp` | 58 | Router 实现 |
+| `src/protocol/session.cpp` | 638 | Session 实现 |
+| `src/protocol/system_bytes.cpp` | 129 | SystemBytes 分配器实现 |

@@ -1,5 +1,7 @@
 # 使用示例
 
+> 文档更新：2026-01-08（Codex）
+
 ## 编译运行
 
 ```bash
@@ -12,17 +14,18 @@ cmake --build build --target examples
 # 运行
 ./build/examples/secs2_simple
 ./build/examples/c_api_secs2_simple
-	./build/examples/typed_handler_example
-	./build/examples/protocol_custom_reply_example
-	./build/examples/utils_dump_example
-	./build/examples/hsms_server [port]
-	./build/examples/hsms_client [host] [port]
-	./build/examples/hsms_sml_peer --help
-	./build/examples/hsms_pipe_server [device_id]
-	./build/examples/hsms_pipe_client [device_id]
-	./build/examples/secs1_loopback
-	./build/examples/secs1_serial_server <tty_path>
-	./build/examples/secs1_serial_client <tty_path>
+./build/examples/typed_handler_example
+./build/examples/protocol_custom_reply_example
+./build/examples/utils_dump_example
+./build/examples/hsms_server [port]
+./build/examples/hsms_client [host] [port]
+./build/examples/hsms_sml_peer --help
+./build/examples/hsms_pipe_server [device_id]      # UNIX
+./build/examples/hsms_pipe_client [device_id]      # UNIX
+./build/examples/secs1_loopback
+./build/examples/secs1_sml_peer --help             # Windows/POSIX（串口 SML 对端）
+./build/examples/secs1_serial_server <tty_path>    # UNIX（POSIX termios）
+./build/examples/secs1_serial_client <tty_path>    # UNIX（POSIX termios）
 
 # C API：HSMS（TCP）
 ./build/examples/c_api_hsms_server [ip] [port]
@@ -105,6 +108,34 @@ cmake --build build --target examples
 # 主动端（连接）：适合 Windows 测试应用作为 passive 监听
 ./build/examples/hsms_sml_peer --mode active --connect <windows_ip> --port 5000 --sml docs/sml_sample/sample.sml --session-id 0x0001
 ```
+
+## SECS-I（串口）SML 对端示例（Windows/com0com 推荐）
+
+文件：
+- `secs1_sml_peer.cpp`
+
+用途：
+- 打开串口（Windows: `COMx`；POSIX: `/dev/ttyUSB0` 等），加载同一份 SML；
+- 收到 primary 且 W=1 时，按 SML 条件规则自动选择响应模板并回 secondary；
+- 可选开启 SML 的 `every N send` 规则，周期性发送消息（用于联调时自动出流量）。
+
+示例（Windows/com0com）：
+
+```bash
+# com0com 创建一对互联虚拟串口：COM5 <-> COM6
+# 你可以让被测程序打开 COM6，本示例打开 COM5
+
+# 作为 Equipment（R=1）
+./build/examples/secs1_sml_peer --role equipment --serial COM5 --baud 9600 --device-id 0x0001 --sml docs/sml_sample/sample.sml
+
+# 作为 Host（R=0），并启用 SML timers
+./build/examples/secs1_sml_peer --role host --serial COM6 --baud 9600 --device-id 0x0001 --sml docs/sml_sample/sample.sml --enable-timers
+```
+
+排查：
+- `docs/sml_sample/sample.sml` 里的 `S15F32` 体积较大，通常会触发 **多 Block**（244B/Block）发送。
+- 若对端工具日志出现类似 `Received Bad Char(0x75)`、随后 `T1 Timeout` / `NAK`，通常表示它把 **第二个 Block 的 Length(0x75)** 当成“非法字符”，也就是它在 ACK 后期望先收到 `ENQ/EOT` 握手。
+  - 本仓库的 `secs::secs1::StateMachine` 发送端默认按“每个 Block 都执行一次 ENQ/EOT”发送；若仍遇到该现象，请确认使用的是更新后的库/示例二进制。
 
 ## HSMS（pipe）客户端/服务器示例（受限环境推荐）
 

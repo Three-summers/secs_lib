@@ -1,6 +1,6 @@
 # SECS-I 模块详细实现原理
 
-> 文档生成日期：2026-01-06
+> 文档更新：2026-01-08（Codex）
 > 基于源码版本：当前 main 分支
 > 对应标准：SEMI E4（SECS-I Message Transfer）
 
@@ -36,8 +36,9 @@
 │                              │                                      │
 │  ┌───────────────────────────┴─────────────────────────────────┐   │
 │  │                    Link（链路抽象）                          │   │
-│  │  async_read_byte() / async_write() / cancel() / close()     │   │
-│  │  实现：MemoryLink（测试）、PosixSerialLink（串口）           │   │
+│  │  executor() / async_read_byte() / async_write()             │   │
+│  │  实现：MemoryLink（测试）、SerialPortLink（跨平台串口）、    │   │
+│  │        PosixSerialLink（POSIX 串口/pty）                     │   │
 │  └─────────────────────────────────────────────────────────────┘   │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -412,21 +413,15 @@
 │      virtual ~Link() = default;                                     │
 │                                                                     │
 │      // 获取执行器                                                  │
-│      virtual any_io_executor executor() const = 0;                  │
-│                                                                     │
-│      // 读取单个字节（带超时）                                      │
-│      virtual awaitable<pair<error_code, byte>>                      │
-│          async_read_byte(optional<duration> timeout) = 0;           │
+│      virtual any_io_executor executor() const noexcept = 0;         │
 │                                                                     │
 │      // 写入数据                                                    │
 │      virtual awaitable<error_code>                                  │
 │          async_write(bytes_view data) = 0;                          │
 │                                                                     │
-│      // 取消正在进行的操作                                          │
-│      virtual void cancel() noexcept = 0;                            │
-│                                                                     │
-│      // 关闭链路                                                    │
-│      virtual void close() noexcept = 0;                             │
+│      // 读取单个字节（可选超时）                                    │
+│      virtual awaitable<pair<error_code, byte>>                      │
+│          async_read_byte(optional<duration> timeout = nullopt) = 0; │
 │  };                                                                 │
 │                                                                     │
 │  为什么逐字节读取？                                                 │
@@ -451,28 +446,28 @@
 │                                                                     │
 │  1. MemoryLink（内存链路 - 用于单元测试）                           │
 │  ┌────────────────────────────────────────────────────────────┐    │
-│  │  class MemoryLink : public Link {                           │    │
-│  │      deque<byte> buffer_;  // 内存队列                      │    │
-│  │      Event data_ready_;    // 数据可读事件                  │    │
+│  │  class MemoryLink {                                         │    │
+│  │  public:                                                    │    │
+│  │      class Endpoint : public Link { /* ... */ };            │    │
+│  │      static pair<Endpoint, Endpoint> create(executor);      │    │
 │  │  };                                                         │    │
 │  │                                                             │    │
 │  │  // 创建一对互联的内存链路                                  │    │
-│  │  auto [a, b] = MemoryLink::create_pair(executor);           │    │
+│  │  auto [a, b] = MemoryLink::create(executor);                │    │
 │  │  // a 写入的数据可以从 b 读取，反之亦然                     │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
-│  2. PosixSerialLink（POSIX 串口 - 用于真实设备）                    │
+│  2. SerialPortLink（跨平台串口 - Windows COM / POSIX tty）          │
 │  ┌────────────────────────────────────────────────────────────┐    │
-│  │  class PosixSerialLink : public Link {                      │    │
-│  │      asio::posix::stream_descriptor serial_;                │    │
-│  │      struct termios original_termios_;                      │    │
+│  │  class SerialPortLink : public Link {                       │    │
+│  │      asio::serial_port port_;                               │    │
 │  │  };                                                         │    │
 │  │                                                             │    │
 │  │  // 打开串口                                                │    │
-│  │  auto link = PosixSerialLink::open(                         │    │
+│  │  auto [ec, link] = SerialPortLink::open(                    │    │
 │  │      executor,                                              │    │
-│  │      "/dev/ttyUSB0",  // 串口路径                           │    │
-│  │      9600             // 波特率                             │    │
+│  │      "COM34",        // Windows（com0com 虚拟串口也一样）     │    │
+│  │      9600            // 波特率                               │    │
 │  │  );                                                         │    │
 │  │                                                             │    │
 │  │  配置参数（固定）：                                         │    │
@@ -480,6 +475,18 @@
 │  │  - 1 停止位                                                 │    │
 │  │  - 无奇偶校验                                               │    │
 │  │  - 无流控                                                   │    │
+│  └────────────────────────────────────────────────────────────┘    │
+│                                                                     │
+│  3. PosixSerialLink（仅 POSIX：termios/raw + pty 友好）             │
+│  ┌────────────────────────────────────────────────────────────┐    │
+│  │  class PosixSerialLink : public Link {                      │    │
+│  │      asio::posix::stream_descriptor sd_;                    │    │
+│  │      // open_tty_raw()：O_NONBLOCK + termios raw + 禁用流控  │    │
+│  │  };                                                         │    │
+│  │                                                             │    │
+│  │  auto [ec, link] = PosixSerialLink::open(                   │    │
+│  │      executor, "/dev/ttyUSB0", 9600                         │    │
+│  │  );                                                         │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -733,12 +740,13 @@
 
 | 文件 | 行数 | 说明 |
 |------|------|------|
-| `include/secs/secs1/block.hpp` | ~133 | Block/Header 定义 |
-| `include/secs/secs1/link.hpp` | ~80 | Link 抽象接口 |
-| `include/secs/secs1/state_machine.hpp` | ~95 | StateMachine 接口 |
-| `include/secs/secs1/timer.hpp` | ~40 | 定时器配置 |
-| `include/secs/secs1/posix_serial_link.hpp` | ~200 | POSIX 串口实现 |
-| `src/secs1/block.cpp` | ~300 | Block 编解码实现 |
-| `src/secs1/link.cpp` | ~150 | MemoryLink 实现 |
-| `src/secs1/state_machine.cpp` | ~400 | 状态机实现 |
-| `src/secs1/timer.cpp` | ~50 | 定时器实现 |
+| `include/secs/secs1/block.hpp` | 132 | Block/Header 定义 |
+| `include/secs/secs1/link.hpp` | 87 | Link 抽象接口 + MemoryLink |
+| `include/secs/secs1/state_machine.hpp` | 97 | StateMachine 接口 |
+| `include/secs/secs1/timer.hpp` | 41 | 定时器配置 |
+| `include/secs/secs1/serial_port_link.hpp` | 252 | 跨平台串口实现（Windows COM / POSIX tty） |
+| `include/secs/secs1/posix_serial_link.hpp` | 313 | POSIX 串口/pty 实现（termios/raw） |
+| `src/secs1/block.cpp` | 297 | Block 编解码实现 |
+| `src/secs1/link.cpp` | 145 | MemoryLink 实现 |
+| `src/secs1/state_machine.cpp` | 410 | 状态机实现 |
+| `src/secs1/timer.cpp` | 43 | 定时器实现 |

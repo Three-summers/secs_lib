@@ -3,7 +3,7 @@
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![CMake](https://img.shields.io/badge/CMake-3.20+-green.svg)](https://cmake.org/)
 
-> 文档更新：2026-01-07（Codex）
+> 文档更新：2026-01-08（Codex）
 
 基于 C++20 与 standalone Asio 协程的 SECS-I / SECS-II / HSMS (HSMS-SS) 协议栈实现，面向半导体设备通信场景。
 
@@ -37,30 +37,44 @@
   - 新增：`decode_one(..., const DecodeLimits&)`；错误码 `list_too_large` / `payload_too_large` / `total_budget_exceeded` / `out_of_memory`
   - 文件：`include/secs/ii/codec.hpp`、`src/ii/codec.cpp`
   - 覆盖测试：`tests/test_secs2_codec.cpp`
-- 新增：审计与修复路线文档（便于追踪互通问题与覆盖缺口）
-  - 目录：`docs/secs_lib_audit/`、`docs/secs_lib_fixes/`
 - SECS-II（E5）on-wire 编码对齐 `c_dump/Secs_App/secs_II.c`
   - 影响点：`FormatByte` 低 2 位含义、`format_code` 码表（整数/浮点/无符号）
   - 文件：`include/secs/ii/types.hpp`、`src/ii/codec.cpp`
   - 对齐自测：`tests/test_c_dump_secsii_compat.cpp`
 - SECS-I（E4）Block header/checksum 对齐 `c_dump/Secs_App/secs_I.c`
   - 对齐自测：`tests/test_c_dump_secs1_block_compat.cpp`
+- SECS-I：`StateMachine` 提升互操作性（多块消息/不同对端实现差异）
+  - 发送端：按“每个 Block 都执行一次 ENQ/EOT”发送（ACK 后再次 ENQ）
+  - 接收端：兼容“块间 ENQ/EOT”与“直接发送下一块帧（Length 开头）”两种实现
+  - 文件：`include/secs/secs1/state_machine.hpp`、`src/secs1/state_machine.cpp`
+  - 覆盖测试：`tests/test_secs1_framing.cpp`
+- SECS-I：新增跨平台串口 Link：`secs::secs1::SerialPortLink`（Windows COM / POSIX tty）
+  - 文件：`include/secs/secs1/serial_port_link.hpp`
 - `secs::protocol::Session`（SECS-I 后端）新增 R-bit（reverse_bit）方向配置
   - 新增字段：`SessionOptions::secs1_reverse_bit`（Host=0 / Equipment=1）
   - 文件：`include/secs/protocol/session.hpp`、`src/protocol/session.cpp`
   - 覆盖测试：`tests/test_protocol_session.cpp`（搜索 `reverse_bit`）
+- `secs::protocol::Session` 新增：`async_poll_once()`（单步接收+处理一条入站消息）
+  - 主要用于 SECS-I 半双工：在主循环里穿插 timer/fire 时，避免与 `async_run()` 并发读写同一链路
+  - 文件：`include/secs/protocol/session.hpp`、`src/protocol/session.cpp`
 - `secs::protocol::Session` 新增运行时报文 dump（TX/RX 可选，便于联调时动态解析与打印）
   - 新增字段：`SessionOptions::dump`（`enable/dump_tx/dump_rx/sink/hsms/secs1`）
   - 文件：`include/secs/protocol/session.hpp`、`src/protocol/session.cpp`
   - 覆盖测试：`tests/test_protocol_session.cpp`（搜索 `runtime_dump`）
 - `secs::utils` 新增：`dump_secs1_message(header, body, ...)`（SECS-I 消息级 dump）
   - 文件：`include/secs/utils/secs1_dump.hpp`、`src/utils/secs1_dump.cpp`
+- 示例新增：`secs1_sml_peer`（SECS-I 串口 SML 对端；Windows 下可配合 com0com 联调）
+  - 文件：`examples/secs1_sml_peer.cpp`
 - 示例更新：`hsms_client/hsms_server` 改为通过 `protocol::Session` 收发，并默认开启 dump 输出到 stdout
   - 文件：`examples/hsms_client.cpp`、`examples/hsms_server.cpp`
 - 覆盖率统计口径调整：`coverage` 目标不再统计 `c_dump/`（参考实现不计入库覆盖率）
   - 文件：`cmake/Modules/CodeCoverage.cmake`
+- Windows/MinGW：standalone Asio 显式链接 `ws2_32/mswsock`（避免 WSA*/AcceptEx 符号未解析）
+  - 文件：`cmake/AsioStandalone.cmake`
 - 开发体验：新增根目录 `.clangd`，强制 clangd 使用 `build/` 编译数据库
   - 文件：`.clangd`
+- CMake：避免 `FetchContent_Populate()` 弃用警告（CMake 4.x / CMP0169）
+  - 文件：`cmake/SpdlogHeaderOnly.cmake`
 
 ## 架构概览（当前实现）
 
@@ -495,10 +509,12 @@ SECS-I 这一层以“字节流链路”抽象开始：
 说明：
 
 - 本仓库内置 `secs::secs1::MemoryLink` 用于单元测试/仿真
-- 若你在 POSIX 平台对接真实串口/虚拟串口（pty），可直接使用内置工具类：
-  - `secs::secs1::PosixSerialLink`：`include/secs/secs1/posix_serial_link.hpp`
-  - 便捷打开：`secs::secs1::PosixSerialLink::open(ex, path, baud)`
-- 若你在非 POSIX 平台，仍需要自行实现一个 `Link`（可参考 `Link` 接口与上述实现）。
+- 若你要对接真实串口/虚拟串口，仓库内置两种 Link：
+  - `secs::secs1::SerialPortLink`（跨平台，基于 `asio::serial_port`）：`include/secs/secs1/serial_port_link.hpp`
+    - 便捷打开：`secs::secs1::SerialPortLink::open(ex, path, baud)`（Windows 下支持 `COM10+` 自动补 `\\\\.\\` 前缀）
+  - `secs::secs1::PosixSerialLink`（仅 POSIX，termios/raw + pty 友好）：`include/secs/secs1/posix_serial_link.hpp`
+    - 便捷打开：`secs::secs1::PosixSerialLink::open(ex, path, baud)`
+- 若你有自定义链路（例如厂商 SDK / USB / 自定义总线），可自行实现 `Link`（参考 `Link` 接口与上述实现）。
 
 对应测试：`tests/test_secs1_framing.cpp`
 
@@ -517,6 +533,7 @@ SECS-I 这一层以“字节流链路”抽象开始：
   - `async_send(stream, function, body)`：发送 primary（W=0）
   - `async_request(stream, function, body, timeout)`：发送 primary（W=1）并等待 secondary（T3）
   - `async_run()`：接收入站消息、匹配 pending、路由 handler（HSMS 场景推荐长期运行）
+  - `async_poll_once(timeout)`：单步接收并处理一条入站消息（SECS-I 半双工 + 主循环混合 timer/fire 场景推荐）
 
 注意：`function` 必须是 primary（奇数且非 0），否则会返回 `core::errc::invalid_argument`。
 
@@ -622,10 +639,12 @@ cmake --build build --target examples -j
 ./build/examples/secs2_simple
 ./build/examples/hsms_server [port]
 ./build/examples/hsms_client [host] [port]
+./build/examples/hsms_sml_peer --help
 ./build/examples/typed_handler_example
 ./build/examples/secs1_loopback
-./build/examples/secs1_serial_server <tty_path>   # UNIX
-./build/examples/secs1_serial_client <tty_path>   # UNIX
+./build/examples/secs1_sml_peer --help            # Windows/POSIX（串口 SML 对端）
+./build/examples/secs1_serial_server <tty_path>   # UNIX（POSIX termios）
+./build/examples/secs1_serial_client <tty_path>   # UNIX（POSIX termios）
 ```
 
 示例说明见：`examples/README.md`
