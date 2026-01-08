@@ -203,6 +203,28 @@ asio::awaitable<void> Session::async_run() {
     }
 }
 
+asio::awaitable<std::error_code>
+Session::async_poll_once(std::optional<secs::core::duration> timeout) {
+    using secs::core::errc;
+    using secs::core::make_error_code;
+
+    if (stop_requested_) {
+        co_return make_error_code(errc::cancelled);
+    }
+    if (run_loop_active_) {
+        // 避免与 async_run 并发读同一条底层连接/串口。
+        co_return make_error_code(errc::invalid_argument);
+    }
+
+    auto [ec, msg] = co_await async_receive_message_(timeout);
+    if (ec) {
+        co_return ec;
+    }
+
+    co_await handle_inbound_(std::move(msg));
+    co_return std::error_code{};
+}
+
 asio::awaitable<std::error_code> Session::async_send(
     std::uint8_t stream, std::uint8_t function, secs::core::bytes_view body) {
     if (!is_valid_stream(stream) || !is_primary_function(function)) {

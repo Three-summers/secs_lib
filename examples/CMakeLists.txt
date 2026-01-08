@@ -78,6 +78,13 @@ add_executable(hsms_sml_peer hsms_sml_peer.cpp)
 target_link_libraries(hsms_sml_peer PRIVATE secs::protocol secs::sml secs::hsms secs::ii secs::core)
 list(APPEND _secs_example_targets hsms_sml_peer)
 
+# SECS-I（串口）SML 对端：Windows 下可配合 com0com 进行联调
+if(WIN32 OR UNIX)
+  add_executable(secs1_sml_peer secs1_sml_peer.cpp)
+  target_link_libraries(secs1_sml_peer PRIVATE secs::protocol secs::sml secs::ii secs::core)
+  list(APPEND _secs_example_targets secs1_sml_peer)
+endif()
+
 # TypedHandler 示例
 add_executable(typed_handler_example typed_handler_example.cpp)
 target_link_libraries(typed_handler_example PRIVATE secs::protocol secs::ii secs::core)

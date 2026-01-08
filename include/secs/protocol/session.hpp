@@ -121,6 +121,22 @@ public:
     // 接收循环：持续接收入站消息并处理（匹配挂起请求 / 路由处理器）。
     asio::awaitable<void> async_run();
 
+    /**
+     * @brief 单步轮询：接收一条消息并处理（匹配挂起请求 / 路由处理器）。
+     *
+     * 设计目的：
+     * - 适用于需要“自己驱动收发节奏”的场景（尤其是 SECS-I 半双工），例如：
+     *   - 主循环里穿插定时发送；
+     *   - 需要避免与 async_run 并发导致的串口读写冲突。
+     *
+     * @return ok 表示成功处理了一条消息；
+     *         timeout 表示在给定 timeout 内未收到消息；
+     *         其他 error_code 表示接收失败或已 stop。
+     */
+    asio::awaitable<std::error_code>
+    async_poll_once(
+        std::optional<secs::core::duration> timeout = std::nullopt);
+
     // 发送主消息（W=0，不等待回应）。
     asio::awaitable<std::error_code> async_send(std::uint8_t stream,
                                                 std::uint8_t function,
