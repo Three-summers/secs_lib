@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <optional>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -82,6 +83,11 @@ public:
     async_transact(const Header &header, secs::core::bytes_view body);
 
 private:
+    struct InFlight final {
+        Reassembler re{std::nullopt};
+        secs::core::steady_clock::time_point last_block{};
+    };
+
     asio::awaitable<std::error_code> async_send_control(secs::core::byte b);
 
     asio::awaitable<std::pair<std::error_code, secs::core::byte>>
@@ -92,6 +98,16 @@ private:
     Timeouts timeouts_{};
     std::size_t retry_limit_{3};
     State state_{State::idle};
+
+    // 多 Block Message Interleaving：按 system_bytes 追踪多个并行重组器。
+    // async_receive() 每次返回“任意一个已完成”的消息，其余未完成消息会留在 in_flight_
+    // 中等待后续 block。
+    std::unordered_map<std::uint32_t, InFlight> in_flight_{};
+
+    // 重复块（ACK 丢失导致的重发）检测：记录“最近一次成功接收并 ACK 的块”。
+    // 注意：该信息跨 async_receive() 调用保留，用于处理“最后一个块被重发”的情况。
+    std::optional<Header> last_accepted_header_{};
+    std::vector<secs::core::byte> last_accepted_data_{};
 };
 
 } // namespace secs::secs1

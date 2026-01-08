@@ -192,26 +192,31 @@ StateMachine::async_receive(std::optional<secs::core::duration> timeout) {
             ReceivedMessage{}};
     }
 
-    // 等待对端 ENQ（忽略噪声字节）
-    for (;;) {
-        auto [ec, b] = co_await async_read_byte(timeout);
-        if (ec) {
-            SPDLOG_DEBUG("secs1 async_receive failed while waiting ENQ: ec={}({})",
-                         ec.value(),
-                         ec.message());
-            co_return std::pair{ec, ReceivedMessage{}};
+    // 启动接收：
+    // - 若当前没有任何 in-flight 消息：按标准流程等待 ENQ，再回 EOT；
+    // - 若已有 in-flight（多 Block interleaving）：下一块可能以 ENQ 或 Length 开头。
+    bool need_wait_enq = in_flight_.empty();
+    if (need_wait_enq) {
+        // 等待对端 ENQ（忽略噪声字节）
+        for (;;) {
+            auto [ec, b] = co_await async_read_byte(timeout);
+            if (ec) {
+                SPDLOG_DEBUG(
+                    "secs1 async_receive failed while waiting ENQ: ec={}({})",
+                    ec.value(),
+                    ec.message());
+                co_return std::pair{ec, ReceivedMessage{}};
+            }
+            if (b == kEnq) {
+                break;
+            }
         }
-        if (b == kEnq) {
-            break;
-        }
-    }
 
-    SPDLOG_DEBUG("secs1 async_receive got ENQ");
+        SPDLOG_DEBUG("secs1 async_receive got ENQ");
 
-    state_ = State::wait_block;
+        state_ = State::wait_block;
 
-    // 默认总是允许对方发送（若未来需要“忙/拒绝”，可在这里发送 NAK）
-    {
+        // 默认总是允许对方发送（若未来需要“忙/拒绝”，可在这里发送 NAK）
         auto ec = co_await async_send_control(kEot);
         if (ec) {
             SPDLOG_DEBUG("secs1 async_receive send EOT failed: ec={}({})",
@@ -220,28 +225,31 @@ StateMachine::async_receive(std::optional<secs::core::duration> timeout) {
             state_ = State::idle;
             co_return std::pair{ec, ReceivedMessage{}};
         }
+    } else {
+        state_ = State::wait_block;
     }
 
-    Reassembler re(expected_device_id_);
-    std::size_t nack_count = 0;
-    std::optional<Header> last_accepted_header{};
-    std::vector<secs::core::byte> last_accepted_data{};
+    std::size_t nack_count = 0; // decode_block 失败的连续次数（无 header 时无法路由）
+    bool allow_enq_or_length = !need_wait_enq;
+    auto next_block_timeout =
+        need_wait_enq ? timeouts_.t2_protocol : timeouts_.t4_interblock;
 
-    auto next_block_timeout = timeouts_.t2_protocol;
-    while (!re.has_message()) {
+    for (;;) {
         // 多块消息的“块间启动方式”存在不同实现：
         // - 一些实现：每个块都重新 ENQ/EOT；
         // - 一些实现：只在消息开始 ENQ/EOT，后续块直接发送 Length 开头的块帧。
         //
-        // 为提升互操作性：当已接收过至少一个块且消息未结束时，允许两种方式：
+        // 为提升互操作性：当链路上已经存在“正在进行中的多块消息”时，允许两种方式：
         // - 若看到 ENQ，则发送 EOT 再读块帧；
         // - 若看到合法 Length（10..254），则按“直接块帧”处理。
         std::optional<secs::core::byte> first_len{};
-        if (last_accepted_header.has_value()) {
+        if (allow_enq_or_length) {
             const auto deadline = secs::core::steady_clock::now() + next_block_timeout;
             for (;;) {
                 const auto now = secs::core::steady_clock::now();
                 if (now >= deadline) {
+                    // Block 间超时：认为多块消息接收已中断，丢弃全部 in-flight 状态。
+                    in_flight_.clear();
                     state_ = State::idle;
                     co_return std::pair{
                         secs::core::make_error_code(secs::core::errc::timeout),
@@ -255,6 +263,7 @@ StateMachine::async_receive(std::optional<secs::core::duration> timeout) {
                         "secs1 async_receive waiting next block start failed: ec={}({})",
                         ec.value(),
                         ec.message());
+                    in_flight_.clear();
                     state_ = State::idle;
                     co_return std::pair{ec, ReceivedMessage{}};
                 }
@@ -267,6 +276,7 @@ StateMachine::async_receive(std::optional<secs::core::duration> timeout) {
                             "secs1 async_receive send EOT(for next block) failed: ec={}({})",
                             eot_ec.value(),
                             eot_ec.message());
+                        in_flight_.clear();
                         state_ = State::idle;
                         co_return std::pair{eot_ec, ReceivedMessage{}};
                     }
@@ -298,6 +308,7 @@ StateMachine::async_receive(std::optional<secs::core::duration> timeout) {
             SPDLOG_DEBUG("secs1 async_receive length read failed: ec={}({})",
                          len_ec.value(),
                          len_ec.message());
+            in_flight_.clear();
             state_ = State::idle;
             co_return std::pair{len_ec, ReceivedMessage{}};
         }
@@ -305,6 +316,7 @@ StateMachine::async_receive(std::optional<secs::core::duration> timeout) {
         const auto length = static_cast<std::size_t>(len_b);
         if (length < kHeaderSize || length > kMaxBlockLength) {
             (void)co_await async_send_control(kNak);
+            in_flight_.clear();
             state_ = State::idle;
             SPDLOG_DEBUG("secs1 async_receive invalid length: {}", length);
             co_return std::pair{make_error_code(errc::invalid_block),
@@ -323,6 +335,7 @@ StateMachine::async_receive(std::optional<secs::core::duration> timeout) {
                 SPDLOG_DEBUG("secs1 async_receive frame byte read failed: ec={}({})",
                              b_ec.value(),
                              b_ec.message());
+                in_flight_.clear();
                 state_ = State::idle;
                 co_return std::pair{b_ec, ReceivedMessage{}};
             }
@@ -336,6 +349,7 @@ StateMachine::async_receive(std::optional<secs::core::duration> timeout) {
             (void)co_await async_send_control(kNak);
             ++nack_count;
             if (nack_count >= retry_limit_) {
+                in_flight_.clear();
                 state_ = State::idle;
                 SPDLOG_DEBUG("secs1 async_receive too_many_retries (decode)");
                 co_return std::pair{make_error_code(errc::too_many_retries),
@@ -344,57 +358,79 @@ StateMachine::async_receive(std::optional<secs::core::duration> timeout) {
             continue;
         }
 
-        if (last_accepted_header.has_value() &&
-            decoded.header.reverse_bit == last_accepted_header->reverse_bit &&
-            decoded.header.device_id == last_accepted_header->device_id &&
-            decoded.header.wait_bit == last_accepted_header->wait_bit &&
-            decoded.header.stream == last_accepted_header->stream &&
-            decoded.header.function == last_accepted_header->function &&
-            decoded.header.end_bit == last_accepted_header->end_bit &&
-            decoded.header.block_number == last_accepted_header->block_number &&
-            decoded.header.system_bytes == last_accepted_header->system_bytes) {
+        if (last_accepted_header_.has_value() &&
+            decoded.header.reverse_bit == last_accepted_header_->reverse_bit &&
+            decoded.header.device_id == last_accepted_header_->device_id &&
+            decoded.header.wait_bit == last_accepted_header_->wait_bit &&
+            decoded.header.stream == last_accepted_header_->stream &&
+            decoded.header.function == last_accepted_header_->function &&
+            decoded.header.end_bit == last_accepted_header_->end_bit &&
+            decoded.header.block_number == last_accepted_header_->block_number &&
+            decoded.header.system_bytes == last_accepted_header_->system_bytes) {
             const bool data_same =
-                decoded.data.size() == last_accepted_data.size() &&
+                decoded.data.size() == last_accepted_data_.size() &&
                 std::equal(decoded.data.begin(),
                            decoded.data.end(),
-                           last_accepted_data.begin());
+                           last_accepted_data_.begin());
 
-            if (!data_same) {
-                (void)co_await async_send_control(kNak);
-                state_ = State::idle;
-                co_return std::pair{make_error_code(errc::protocol_error),
-                                    ReceivedMessage{}};
+            if (data_same) {
+                // 重复块：典型原因是对端未收到 ACK 而重发；按 E4 语义丢弃并再次 ACK。
+                nack_count = 0;
+                (void)co_await async_send_control(kAck);
+                next_block_timeout = timeouts_.t4_interblock;
+                allow_enq_or_length = true;
+                continue;
             }
-
-            // 重复块：典型原因是对端未收到 ACK 而重发；按 E4 语义丢弃并再次 ACK。
-            nack_count = 0;
-            (void)co_await async_send_control(kAck);
-            next_block_timeout = timeouts_.t4_interblock;
-            continue;
+            // Header 相同但 data 不同：
+            // - 可能是上层复用 system_bytes 后发送的新消息（合法场景）；
+            // - checksum 已通过，因此这里不要误判为协议错误。
+            // 处理策略：按“新块”继续走正常重组流程。
         }
 
-        auto acc_ec = re.accept(decoded);
+        const auto sb = decoded.header.system_bytes;
+        auto it = in_flight_.find(sb);
+        if (it == in_flight_.end()) {
+            // interleaving：允许“新消息”在旧消息未结束时插入，但必须从 BlockNumber=1 开始。
+            if (decoded.header.block_number != 1) {
+                (void)co_await async_send_control(kNak);
+                in_flight_.clear();
+                state_ = State::idle;
+                co_return std::pair{make_error_code(errc::block_sequence_error),
+                                    ReceivedMessage{}};
+            }
+            InFlight st{};
+            st.re = Reassembler(expected_device_id_);
+            st.last_block = secs::core::steady_clock::now();
+            it = in_flight_.emplace(sb, std::move(st)).first;
+        }
+
+        auto acc_ec = it->second.re.accept(decoded);
         if (acc_ec) {
             (void)co_await async_send_control(kNak);
+            in_flight_.clear();
             state_ = State::idle;
             co_return std::pair{acc_ec, ReceivedMessage{}};
         }
+        it->second.last_block = secs::core::steady_clock::now();
 
         // 当前块校验通过
         nack_count = 0;
-        last_accepted_header = decoded.header;
-        last_accepted_data.assign(decoded.data.begin(), decoded.data.end());
+        last_accepted_header_ = decoded.header;
+        last_accepted_data_.assign(decoded.data.begin(), decoded.data.end());
         (void)co_await async_send_control(kAck);
         next_block_timeout = timeouts_.t4_interblock;
+        allow_enq_or_length = true;
+
+        if (it->second.re.has_message()) {
+            ReceivedMessage msg{};
+            msg.header = it->second.re.message_header();
+            auto body_view = it->second.re.message_body();
+            msg.body.assign(body_view.begin(), body_view.end());
+            in_flight_.erase(it);
+            state_ = State::idle;
+            co_return std::pair{std::error_code{}, std::move(msg)};
+        }
     }
-
-    state_ = State::idle;
-
-    ReceivedMessage msg{};
-    msg.header = re.message_header();
-    auto body_view = re.message_body();
-    msg.body.assign(body_view.begin(), body_view.end());
-    co_return std::pair{std::error_code{}, std::move(msg)};
 }
 
 asio::awaitable<std::pair<std::error_code, ReceivedMessage>>
