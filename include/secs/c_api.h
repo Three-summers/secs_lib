@@ -431,6 +431,37 @@ typedef struct secs_protocol_session_options {
     uint32_t poll_interval_ms;
 } secs_protocol_session_options_t;
 
+/*
+ * 协议层会话参数 v2：
+ * - 新增：max_pending_requests（对应 C++：protocol::SessionOptions::max_pending_requests）
+ * - 新增：dump_flags/dump_sink（对应 C++：protocol::SessionOptions::dump）
+ *
+ * 约定：
+ * - 数值字段为 0：表示使用库默认值；
+ * - dump_flags 未设置 SECS_PROTOCOL_DUMP_ENABLE：表示关闭 dump；
+ * - 若开启 dump 且未显式指定 TX/RX（即 flags 中既无 TX 也无 RX）：默认同时开启 TX 与 RX。
+ */
+typedef void (*secs_protocol_dump_sink_fn)(void *user_data,
+                                           const char *data,
+                                           size_t size);
+
+typedef enum secs_protocol_dump_flags {
+    SECS_PROTOCOL_DUMP_ENABLE = 1u << 0,
+    SECS_PROTOCOL_DUMP_TX = 1u << 1,
+    SECS_PROTOCOL_DUMP_RX = 1u << 2,
+    SECS_PROTOCOL_DUMP_COLOR = 1u << 3,
+    SECS_PROTOCOL_DUMP_SECS2_DECODE = 1u << 4
+} secs_protocol_dump_flags_t;
+
+typedef struct secs_protocol_session_options_v2 {
+    uint32_t t3_ms;
+    uint32_t poll_interval_ms;
+    size_t max_pending_requests;
+    uint32_t dump_flags;
+    secs_protocol_dump_sink_fn dump_sink; /* NULL 表示使用库内 spdlog 输出 */
+    void *dump_sink_user;
+} secs_protocol_session_options_v2_t;
+
 typedef struct secs_data_message_view {
     uint8_t stream;
     uint8_t function;
@@ -478,6 +509,13 @@ secs_error_t secs_protocol_session_create_from_hsms(
     secs_hsms_session_t *hsms_sess,
     uint16_t session_id,
     const secs_protocol_session_options_t *options,
+    secs_protocol_session_t **out_sess);
+
+secs_error_t secs_protocol_session_create_from_hsms_v2(
+    secs_context_t *ctx,
+    secs_hsms_session_t *hsms_sess,
+    uint16_t session_id,
+    const secs_protocol_session_options_v2_t *options,
     secs_protocol_session_t **out_sess);
 
 secs_error_t secs_protocol_session_stop(

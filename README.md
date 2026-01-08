@@ -379,7 +379,7 @@ cmake -S . -B build -DSECS_ENABLE_WERROR=ON
 - SECS-II：`secs_ii_item_*` + `secs_ii_encode` / `secs_ii_decode_one`（可选：`secs_ii_decode_one_with_limits` + `secs_ii_decode_limits_init_default`）
 - SML：`secs_sml_runtime_*`
 - HSMS：`secs_hsms_connection_*` + `secs_hsms_session_*`（可选：`secs_hsms_session_create_v2` 用于配置 LINKTEST 连续失败阈值）
-- 协议层：`secs_protocol_session_*`（含 handler 注册、send/request）
+- 协议层：`secs_protocol_session_*`（含 handler 注册、send/request；可选：`secs_protocol_session_create_from_hsms_v2` 配置 runtime dump）
 
 #### 最小调用顺序（C，不贴源码）
 
@@ -397,7 +397,7 @@ cmake -S . -B build -DSECS_ENABLE_WERROR=ON
      - `secs_hsms_session_open_active_connection(client, &client_conn)`
      - `secs_hsms_session_open_passive_connection(server, &server_conn)`
 4. 协议层（推荐给业务用的统一入口）：
-   - `secs_protocol_session_create_from_hsms(ctx, hsms, session_id, ...)`
+   - `secs_protocol_session_create_from_hsms(ctx, hsms, session_id, ...)`（可选：`secs_protocol_session_create_from_hsms_v2` 开启/定向 runtime dump）
    - `secs_protocol_session_set_handler(stream,function, cb, user_data)` 注册处理器（回调在 io 线程触发）
    - 主动发送/请求：
      - `secs_protocol_session_send(...)`（W=0，不等待回应）

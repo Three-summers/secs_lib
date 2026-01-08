@@ -109,6 +109,10 @@ struct protocol_state final {
     std::shared_ptr<secs::hsms::Session> hsms_keepalive{};
     std::unique_ptr<secs::protocol::Session> sess{};
     secs::core::Event run_done{};
+
+    // runtime dump sink（可选）：由 C 侧传入回调，用于接收 dump 字符串。
+    secs_protocol_dump_sink_fn dump_sink{nullptr};
+    void *dump_sink_user{nullptr};
 };
 
 struct secs_protocol_session final {
@@ -1731,6 +1735,75 @@ make_proto_options(const secs_protocol_session_options_t *options) {
     return out;
 }
 
+static void proto_dump_sink_bridge(void *user,
+                                   const char *data,
+                                   std::size_t size) noexcept {
+    auto *state = static_cast<protocol_state *>(user);
+    if (!state || !state->dump_sink || !data || size == 0) {
+        return;
+    }
+    try {
+        state->dump_sink(state->dump_sink_user, data, size);
+    } catch (...) {
+        // C callback 不应抛异常；这里吞掉，避免 noexcept 触发 terminate。
+    }
+}
+
+static secs::protocol::SessionOptions
+make_proto_options_v2(const secs_protocol_session_options_v2_t *options,
+                      protocol_state *state) {
+    secs::protocol::SessionOptions out{};
+    if (!options) {
+        return out;
+    }
+
+    out.t3 = ms_to_duration_or_default(options->t3_ms, out.t3);
+    out.poll_interval =
+        ms_to_duration_or_default(options->poll_interval_ms, out.poll_interval);
+
+    if (options->max_pending_requests != 0) {
+        out.max_pending_requests = options->max_pending_requests;
+    }
+
+    const auto flags = options->dump_flags;
+    if ((flags & SECS_PROTOCOL_DUMP_ENABLE) != 0) {
+        out.dump.enable = true;
+
+        const bool want_tx = (flags & SECS_PROTOCOL_DUMP_TX) != 0;
+        const bool want_rx = (flags & SECS_PROTOCOL_DUMP_RX) != 0;
+        if (!want_tx && !want_rx) {
+            out.dump.dump_tx = true;
+            out.dump.dump_rx = true;
+        } else {
+            out.dump.dump_tx = want_tx;
+            out.dump.dump_rx = want_rx;
+        }
+
+        if ((flags & SECS_PROTOCOL_DUMP_COLOR) != 0) {
+            out.dump.hsms.enable_color = true;
+            out.dump.hsms.hex.enable_color = true;
+            out.dump.hsms.item.enable_color = true;
+            out.dump.secs1.enable_color = true;
+            out.dump.secs1.hex.enable_color = true;
+            out.dump.secs1.item.enable_color = true;
+        }
+
+        if ((flags & SECS_PROTOCOL_DUMP_SECS2_DECODE) != 0) {
+            out.dump.hsms.enable_secs2_decode = true;
+            out.dump.secs1.enable_secs2_decode = true;
+        }
+
+        if (options->dump_sink && state) {
+            state->dump_sink = options->dump_sink;
+            state->dump_sink_user = options->dump_sink_user;
+            out.dump.sink = proto_dump_sink_bridge;
+            out.dump.sink_user = state;
+        }
+    }
+
+    return out;
+}
+
 secs_error_t secs_protocol_session_create_from_hsms(
     secs_context_t *ctx,
     secs_hsms_session_t *hsms_sess,
@@ -1759,6 +1832,53 @@ secs_error_t secs_protocol_session_create_from_hsms(
         state->hsms_keepalive = hsms_sess->sess;
         state->sess = std::make_unique<secs::protocol::Session>(
             *state->hsms_keepalive, session_id, make_proto_options(options));
+
+        // 启动 async_run：保证请求-响应匹配与入站路由在后台持续运行。
+        // 注意：协程捕获 shared_ptr，确保即使 C 侧提前 destroy，run_loop 也不会
+        // UAF。
+        asio::co_spawn(
+            ctx->ioc,
+            [state]() -> asio::awaitable<void> {
+                co_await state->sess->async_run();
+            },
+            [state](std::exception_ptr) { state->run_done.set(); });
+
+        handle->state = std::move(state);
+        *out_sess = handle.release();
+        return ok();
+    });
+}
+
+secs_error_t secs_protocol_session_create_from_hsms_v2(
+    secs_context_t *ctx,
+    secs_hsms_session_t *hsms_sess,
+    uint16_t session_id,
+    const secs_protocol_session_options_v2_t *options,
+    secs_protocol_session_t **out_sess) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !hsms_sess || !hsms_sess->sess || !out_sess) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        if (hsms_sess->ctx != ctx) {
+            // 协议层与 HSMS 会话必须共享同一个
+            // context，否则执行器/线程模型会被破坏。
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_sess = nullptr;
+
+        auto handle = std::unique_ptr<secs_protocol_session>(
+            new (std::nothrow) secs_protocol_session{});
+        if (!handle) {
+            return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+        }
+
+        auto state = std::make_shared<protocol_state>();
+        state->ctx = ctx;
+        state->hsms_keepalive = hsms_sess->sess;
+        state->sess = std::make_unique<secs::protocol::Session>(
+            *state->hsms_keepalive,
+            session_id,
+            make_proto_options_v2(options, state.get()));
 
         // 启动 async_run：保证请求-响应匹配与入站路由在后台持续运行。
         // 注意：协程捕获 shared_ptr，确保即使 C 侧提前 destroy，run_loop 也不会

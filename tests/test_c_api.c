@@ -65,6 +65,33 @@ static int wait_until_atomic_eq(const atomic_int *v,
     return atomic_load(v) == expected;
 }
 
+static int wait_until_atomic_gt(const atomic_int *v,
+                                int threshold,
+                                int max_tries,
+                                long sleep_ns) {
+    struct timespec req;
+    req.tv_sec = 0;
+    req.tv_nsec = (sleep_ns > 0 ? sleep_ns : 1);
+
+    for (int i = 0; i < max_tries; ++i) {
+        if (atomic_load(v) > threshold) {
+            return 1;
+        }
+        (void)nanosleep(&req, NULL);
+    }
+    return atomic_load(v) > threshold;
+}
+
+static void proto_dump_sink(void *user_data, const char *data, size_t size) {
+    (void)data;
+    (void)size;
+    atomic_int *cnt = (atomic_int *)user_data;
+    if (!cnt) {
+        return;
+    }
+    (void)atomic_fetch_add(cnt, 1);
+}
+
 static void test_version_and_error_message(void) {
     const char *ver = secs_version_string();
     if (!ver || ver[0] == '\0') {
@@ -1784,21 +1811,38 @@ static void test_hsms_protocol_loopback(void) {
         expect_err("secs_hsms_session_open_passive_ip(not_an_ip)", err);
     }
 
-    secs_protocol_session_options_t proto_opt;
-    memset(&proto_opt, 0, sizeof(proto_opt));
-    proto_opt.t3_ms = 1000;
-    proto_opt.poll_interval_ms = 5;
+    atomic_int dump_calls;
+    atomic_init(&dump_calls, 0);
+
+    secs_protocol_session_options_v2_t client_proto_opt;
+    memset(&client_proto_opt, 0, sizeof(client_proto_opt));
+    client_proto_opt.t3_ms = 1000;
+    client_proto_opt.poll_interval_ms = 5;
+
+    secs_protocol_session_options_v2_t server_proto_opt;
+    memset(&server_proto_opt, 0, sizeof(server_proto_opt));
+    server_proto_opt.t3_ms = 1000;
+    server_proto_opt.poll_interval_ms = 5;
+    server_proto_opt.dump_flags = (uint32_t)SECS_PROTOCOL_DUMP_ENABLE;
+    server_proto_opt.dump_sink = proto_dump_sink;
+    server_proto_opt.dump_sink_user = &dump_calls;
 
     secs_protocol_session_t *client_proto = NULL;
     secs_protocol_session_t *server_proto = NULL;
     expect_ok(
-        "secs_protocol_session_create_from_hsms(client)",
-        secs_protocol_session_create_from_hsms(
-            ctx, client_hsms, hsms_opt.session_id, &proto_opt, &client_proto));
+        "secs_protocol_session_create_from_hsms_v2(client)",
+        secs_protocol_session_create_from_hsms_v2(ctx,
+                                                  client_hsms,
+                                                  hsms_opt.session_id,
+                                                  &client_proto_opt,
+                                                  &client_proto));
     expect_ok(
-        "secs_protocol_session_create_from_hsms(server)",
-        secs_protocol_session_create_from_hsms(
-            ctx, server_hsms, hsms_opt.session_id, &proto_opt, &server_proto));
+        "secs_protocol_session_create_from_hsms_v2(server)",
+        secs_protocol_session_create_from_hsms_v2(ctx,
+                                                  server_hsms,
+                                                  hsms_opt.session_id,
+                                                  &server_proto_opt,
+                                                  &server_proto));
 
     /* 参数校验：protocol send/request 的 body 指针/长度不一致必须拒绝 */
     {
@@ -1839,6 +1883,10 @@ static void test_hsms_protocol_loopback(void) {
         expect_ok(
             "secs_protocol_session_send",
             secs_protocol_session_send(client_proto, 2, 1, body, sizeof(body)));
+        if (!wait_until_atomic_gt(&dump_calls, 0, 200, 1000000L)) {
+            fprintf(stderr, "FAIL: protocol runtime dump sink not called\n");
+            ++g_failures;
+        }
         expect_ok("secs_protocol_session_erase_handler(no-op)",
                   secs_protocol_session_erase_handler(server_proto, 2, 2));
     }
