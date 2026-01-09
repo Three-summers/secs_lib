@@ -20,6 +20,40 @@
 - `every N send ...` 的 `N` 暂不支持变量
 - ASCII 字符串内的 `${VAR}` 插值暂未实现（仅支持 `<A VAR>` 整值替换）
 
+### 0.1 代码主动发送（示例）
+
+当你想在 C++ 业务代码中“按模板主动发送某条消息”时，可按下面流程：
+
+1) 准备 `secs::sml::Runtime` 并加载 SMLX 源文本  
+2) 准备 `secs::sml::RenderContext` 注入变量（变量值用 `secs::ii::Item` 表达）  
+3) 调用 `Runtime::encode_message_body()` 得到 `stream/function/w_bit + SECS-II body bytes`  
+4) 用 `secs::protocol::Session` 的 `async_send/async_request` 发出去
+
+示意代码（省略错误处理与 io/executor 管理细节）：
+
+```cpp
+#include "secs/protocol/session.hpp"
+#include "secs/sml/render.hpp"
+#include "secs/sml/runtime.hpp"
+
+secs::sml::Runtime rt;
+rt.load(sml_source);
+
+secs::sml::RenderContext ctx;
+ctx.set("MDLN", secs::ii::Item::ascii("WET.01"));
+
+std::vector<secs::core::byte> body;
+std::uint8_t stream = 0, function = 0;
+bool w = false;
+
+auto ec = rt.encode_message_body("establish", ctx, body, &stream, &function, &w);
+if (!ec) {
+  const secs::core::bytes_view body_view{body.data(), body.size()};
+  if (w) co_await session.async_request(stream, function, body_view);
+  else   co_await session.async_send(stream, function, body_view);
+}
+```
+
 ## 1. 这件事“值不值得做”
 
 结论：**值得做**，且非常贴合 `secs::sml` 当前“模板 + 规则”的定位。
