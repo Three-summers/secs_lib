@@ -23,6 +23,7 @@ cmake --build build --target examples
 ./build/examples/hsms_pipe_server [device_id]      # UNIX
 ./build/examples/hsms_pipe_client [device_id]      # UNIX
 ./build/examples/secs1_loopback
+./build/examples/smlx_active_send_example          # SMLX：占位符 + 主动发送（MemoryLink）
 ./build/examples/secs1_sml_peer --help             # Windows/POSIX（串口 SML 对端）
 ./build/examples/secs1_serial_server <tty_path>    # UNIX（POSIX termios）
 ./build/examples/secs1_serial_client <tty_path>    # UNIX（POSIX termios）

@@ -100,6 +100,11 @@ add_executable(secs1_loopback secs1_loopback.cpp)
 target_link_libraries(secs1_loopback PRIVATE secs::protocol secs::core)
 list(APPEND _secs_example_targets secs1_loopback)
 
+# SMLX 主动发送示例（占位符渲染 + encode_message_body）
+add_executable(smlx_active_send_example smlx_active_send_example.cpp)
+target_link_libraries(smlx_active_send_example PRIVATE secs::protocol secs::sml secs::ii secs::core)
+list(APPEND _secs_example_targets smlx_active_send_example)
+
 # HSMS（pipe）示例：通过 stdin/stdout 承载 HSMS 帧（仅在 UNIX 可用，依赖 asio::posix）
 if(UNIX)
   add_executable(hsms_pipe_server hsms_pipe_server.cpp)

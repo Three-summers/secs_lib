@@ -1,7 +1,8 @@
 # SML 模块详细实现原理
 
-> 文档生成日期：2026-01-06
-> 基于源码版本：当前 main 分支
+> 文档更新日期：2026-01-09（Codex）  
+> 基于源码版本：当前 main 分支  
+> 说明：本文覆盖当前实现的 SML 子集 + SMLX v0（占位符/渲染/主动发送）；扩展背景与提案见 `docs/architecture/09-smlx-extension.md`。
 
 ## 1. 模块概述
 
@@ -10,6 +11,8 @@
 - **词法分析**：`Lexer` 将 SML 源文本转换为 Token 序列
 - **语法分析**：`Parser` 将 Token 序列转换为 AST (Document)
 - **运行时**：`Runtime` 提供消息模板查找与条件响应匹配
+- **模板渲染（SMLX v0）**：`RenderContext` + `render_item()` 将“可包含占位符的模板”渲染为 `secs::ii::Item`
+- **主动发送（SMLX v0）**：`Runtime::encode_message_body()` 输出可直接发送的 SECS-II body bytes（并返回 stream/function/w_bit）
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -92,6 +95,12 @@
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+说明（SMLX v0）：
+
+- 消息体 `<Item>` 支持“值占位符”：在原本写字面量的位置写 **标识符（Identifier）**，例如 `<A MDLN>`、`<U2 1 SVIDS 3>`、`<B BYTES>`。
+- 占位符的值由宿主程序通过 `secs::sml::RenderContext` 注入，并在发送前渲染（见 `include/secs/sml/render.hpp` 与 `include/secs/sml/runtime.hpp`）。
+- `if (...) ==<Item>` 的期望值 **当前不允许占位符**（解析阶段直接报 `sml.parser/invalid_condition`，见 `tests/test_sml_parser.cpp`）。
+
 ### 2.2 SECS-II 数据项语法
 
 ```
@@ -130,6 +139,12 @@
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+说明（SMLX v0）：
+
+- `A`：除 `<A "string">` 外，也支持 `<A IDENT>`（IDENT 作为占位符，运行时要求变量值为 `ASCII`）。
+- `B/Boolean/U*/I*/F*`：数组的 values 列表支持混写字面量与占位符（IDENT 作为占位符，运行时要求变量值类型与目标类型一致，并按 values 拼接展开）。
+- `L`：List 仍是“子 Item 序列”，当前不支持在 List 内直接插入“占位符子树”（只能在子 Item 的值位置用占位符）。
 
 ### 2.3 条件规则语法
 
@@ -173,6 +188,10 @@
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+说明（当前实现）：
+
+- 条件期望值 `==<...>` 仅允许纯字面量；若 `<...>` 内包含占位符（Identifier），解析将失败并返回 `sml.parser/invalid_condition`。
 
 ### 2.4 定时规则语法
 
@@ -559,6 +578,12 @@
 
 ### 5.4 Item 解析
 
+说明（SMLX v0）：
+
+- `Parser::parse_item()` 的返回类型为 **TemplateItem**（模板 AST），而不是 `secs::ii::Item`。
+- 在 `A/B/Boolean/U*/I*/F*` 的 values 位置，`Identifier` token 会被解析为占位符 `VarRef{name}`。
+- 条件期望值 `==<...>` 在解析阶段会检查并拒绝占位符（见 `src/sml/parser.cpp` 的 `item_has_var(...)` 分支）。
+
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    parse_item() 流程                                │
@@ -597,12 +622,12 @@
 │  │  }                                                          │    │
 │  │                                                             │    │
 │  │  // 递归解析子元素                                          │    │
-│  │  vector<Item> items;                                        │    │
+│  │  vector<TemplateItem> items;                                │    │
 │  │  while (check(LAngle)) {                                    │    │
 │  │      items.push_back(parse_item());                         │    │
 │  │  }                                                          │    │
 │  │                                                             │    │
-│  │  return Item::list(items);                                  │    │
+│  │  return TemplateItem(items);                                │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -630,7 +655,7 @@
 │      uint8_t stream;        // Stream 号                            │
 │      uint8_t function;      // Function 号                          │
 │      bool w_bit;            // W 位                                 │
-│      ii::Item item;         // 消息体                               │
+│      TemplateItem item;     // 消息体模板（可包含占位符）            │
 │  };                                                                 │
 │                                                                     │
 │  struct ConditionRule {                                             │
@@ -641,7 +666,7 @@
 │  struct Condition {                                                 │
 │      string message_name;            // 触发消息名或 SxFy           │
 │      optional<size_t> index;         // 可选的元素索引              │
-│      optional<ii::Item> expected;    // 可选的期望值                │
+│      optional<TemplateItem> expected;// 可选的期望值（仅字面量）     │
 │  };                                                                 │
 │                                                                     │
 │  struct TimerRule {                                                 │
@@ -651,6 +676,11 @@
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+补充说明：
+
+- `TemplateItem` / `VarRef` 等模板类型定义见 `include/secs/sml/ast.hpp`；渲染逻辑见 `include/secs/sml/render.hpp` 与 `src/sml/render.cpp`。
+- `MessageDef.item` 与 `Condition.expected` 共享同一份模板表示；但 `parse_sml()` 会保证 `Condition.expected` 不含占位符（保持条件匹配的确定性）。
 
 ### 6.2 AST 示例
 
@@ -898,6 +928,37 @@
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+### 7.5 SMLX：模板渲染与主动发送
+
+SMLX v0 的核心是“模板 + 上下文渲染”，并以最小侵入方式复用现有的 SECS-II 编解码：
+
+- `TemplateItem`（AST）→ `render_item()` → `secs::ii::Item`（结构化 Item）
+- `secs::ii::Item` → `secs::ii::encode()` → `SECS-II body bytes`
+
+为方便业务侧“主动发送”，运行时提供一站式接口 `Runtime::encode_message_body()`：
+
+```
+RenderContext ctx;
+ctx.set("MDLN", secs::ii::Item::ascii("WET.01"));
+ctx.set("SVIDS", secs::ii::Item::u2(std::vector<std::uint16_t>{100, 200}));
+
+vector<byte> body;
+uint8_t s, f;
+bool w;
+
+// 1) 查找模板（按消息名或直接 "SxFy"）
+// 2) 渲染占位符（缺失变量/类型不匹配会返回 sml.render）
+// 3) 编码为 SECS-II body bytes
+ec = runtime.encode_message_body("req", ctx, body, &s, &f, &w);
+
+// 业务侧根据 w 决定 async_send / async_request
+```
+
+补充：
+
+- `render_item()` 的错误码域为 `sml.render`（missing_variable/type_mismatch），并会在 OOM 等异常场景下返回 `secs.core/out_of_memory`（见 `src/sml/render.cpp`）。
+- 代码侧完整用法可参考示例：`examples/smlx_active_send_example.cpp`。
+
 ---
 
 ## 8. 错误处理
@@ -928,6 +989,13 @@
 │  │  invalid_condition     : 无效的条件表达式                   │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
+│  Render 错误码 (render_errc，域名：sml.render)：                     │
+│  ┌────────────────────────────────────────────────────────────┐    │
+│  │  ok               : 成功                                    │    │
+│  │  missing_variable : 缺少变量（占位符未注入）                │    │
+│  │  type_mismatch    : 类型不匹配（变量 Item 类型不一致）       │    │
+│  └────────────────────────────────────────────────────────────┘    │
+│                                                                     │
 │  错误信息格式：                                                     │
 │  ┌────────────────────────────────────────────────────────────┐    │
 │  │  struct LexerResult / ParseResult {                         │    │
@@ -954,7 +1022,8 @@
 │  ┌────────────────────────────────────────────────────────────┐    │
 │  │  const char* sml_source = R"(                               │    │
 │  │      // 通信建立                                            │    │
-│  │      establish: S1F13 W <L <A ""> <A "1.0.0">>.             │    │
+│  │      // SMLX：把 MDLN 作为占位符，在运行时注入               │    │
+│  │      establish: S1F13 W <L <A MDLN> <A "1.0.0">>.           │    │
 │  │      establish_ack: S1F14 <L <U2 0> <L <A "EQ"> <A "2.0">>>. │   │
 │  │                                                             │    │
 │  │      // 条件响应                                            │    │
@@ -973,18 +1042,24 @@
 │  │  }                                                          │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
-│  【查找消息模板】                                                   │
+│  【渲染并编码（用于主动发送）】                                     │
 │  ┌────────────────────────────────────────────────────────────┐    │
-│  │  // 按名称查找                                              │    │
-│  │  const MessageDef* msg = runtime.get_message("establish");  │    │
-│  │  if (msg) {                                                 │    │
-│  │      // stream=1, function=13, w_bit=true                   │    │
-│  │      auto body = ii::encode(msg->item);                     │    │
-│  │      session.async_send(msg->stream, msg->function, body);  │    │
-│  │  }                                                          │    │
+│  │  // 注入占位符变量（变量值使用 secs::ii::Item 表达）         │    │
+│  │  sml::RenderContext ctx;                                    │    │
+│  │  ctx.set("MDLN", ii::Item::ascii("WET.01"));                │    │
 │  │                                                             │    │
-│  │  // 按 Stream/Function 查找                                 │    │
-│  │  const MessageDef* rsp = runtime.get_message(1, 14);        │    │
+│  │  // 一站式：查找模板 + 渲染 + SECS-II 编码                   │    │
+│  │  vector<byte> body;                                         │    │
+│  │  uint8_t stream = 0, function = 0;                          │    │
+│  │  bool w_bit = false;                                        │    │
+│  │  auto ec = runtime.encode_message_body(                     │    │
+│  │      "establish", ctx, body, &stream, &function, &w_bit      │    │
+│  │  );                                                         │    │
+│  │                                                             │    │
+│  │  if (!ec) {                                                 │    │
+│  │      // 根据 w_bit 选择 send/request（示例只展示 send）       │    │
+│  │      session.async_send(stream, function, body);            │    │
+│  │  }                                                          │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
 │  【条件响应匹配】                                                   │
@@ -996,10 +1071,15 @@
 │  │  );                                                         │    │
 │  │                                                             │    │
 │  │  if (response_name) {                                       │    │
-│  │      const MessageDef* rsp = runtime.get_message(*response_name);│ │
-│  │      if (rsp) {                                             │    │
-│  │          auto body = ii::encode(rsp->item);                 │    │
-│  │          session.async_send(rsp->stream, rsp->function, body);│  │
+│  │      // 取响应模板并编码（同样支持占位符渲染）                │    │
+│  │      vector<byte> rsp_body;                                 │    │
+│  │      uint8_t rsp_s = 0, rsp_f = 0;                          │    │
+│  │      bool rsp_w = false;                                    │    │
+│  │      auto ec = runtime.encode_message_body(                 │    │
+│  │          *response_name, ctx, rsp_body, &rsp_s, &rsp_f, &rsp_w│   │
+│  │      );                                                     │    │
+│  │      if (!ec) {                                             │    │
+│  │          session.async_send(rsp_s, rsp_f, rsp_body);         │    │
 │  │      }                                                      │    │
 │  │  }                                                          │    │
 │  └────────────────────────────────────────────────────────────┘    │
@@ -1008,16 +1088,17 @@
 │  ┌────────────────────────────────────────────────────────────┐    │
 │  │  for (const auto& timer : runtime.timers()) {               │    │
 │  │      // 设置定时器，每 timer.interval_seconds 秒发送        │    │
-│  │      const MessageDef* msg = runtime.get_message(           │    │
-│  │          timer.message_name                                 │    │
-│  │      );                                                     │    │
-│  │      if (msg) {                                             │    │
-│  │          schedule_timer(timer.interval_seconds, [=]() {     │    │
-│  │              auto body = ii::encode(msg->item);             │    │
-│  │              session.async_send(msg->stream,                │    │
-│  │                                 msg->function, body);       │    │
-│  │          });                                                │    │
-│  │      }                                                      │    │
+│  │      schedule_timer(timer.interval_seconds, [=]() {          │    │
+│  │          vector<byte> body;                                 │    │
+│  │          uint8_t s = 0, f = 0;                              │    │
+│  │          bool w = false;                                    │    │
+│  │          auto ec = runtime.encode_message_body(             │    │
+│  │              timer.message_name, ctx, body, &s, &f, &w       │    │
+│  │          );                                                 │    │
+│  │          if (!ec) {                                         │    │
+│  │              session.async_send(s, f, body);                │    │
+│  │          }                                                  │    │
+│  │      });                                                    │    │
 │  │  }                                                          │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
@@ -1031,10 +1112,12 @@
 | 文件 | 行数 | 说明 |
 |------|------|------|
 | `include/secs/sml/token.hpp` | ~139 | Token 类型定义 |
-| `include/secs/sml/ast.hpp` | ~96 | AST 数据结构 |
-| `include/secs/sml/lexer.hpp` | ~86 | Lexer 接口 |
-| `include/secs/sml/parser.hpp` | ~98 | Parser 接口 |
-| `include/secs/sml/runtime.hpp` | ~160 | Runtime 接口 |
-| `src/sml/lexer.cpp` | ~386 | 词法分析实现 |
-| `src/sml/parser.cpp` | ~723 | 语法分析实现 |
-| `src/sml/runtime.cpp` | ~308 | 运行时实现 |
+| `include/secs/sml/ast.hpp` | ~236 | AST 数据结构（含 TemplateItem/VarRef） |
+| `include/secs/sml/lexer.hpp` | ~85 | Lexer 接口 |
+| `include/secs/sml/parser.hpp` | ~97 | Parser 接口 |
+| `include/secs/sml/render.hpp` | ~88 | SMLX 渲染接口（RenderContext/render_item） |
+| `include/secs/sml/runtime.hpp` | ~196 | Runtime 接口（含 encode_message_body） |
+| `src/sml/lexer.cpp` | ~385 | 词法分析实现 |
+| `src/sml/parser.cpp` | ~871 | 语法分析实现 |
+| `src/sml/render.cpp` | ~228 | SMLX 渲染实现 |
+| `src/sml/runtime.cpp` | ~378 | 运行时实现 |
