@@ -58,14 +58,14 @@ private:
     bool parse_every_rule() noexcept;
 
     // 解析 SECS-II 数据项（<...> 语法）
-    std::optional<ii::Item> parse_item() noexcept;
-    std::optional<ii::Item> parse_list() noexcept;
-    std::optional<ii::Item> parse_ascii() noexcept;
-    std::optional<ii::Item> parse_binary() noexcept;
-    std::optional<ii::Item> parse_boolean() noexcept;
-    std::optional<ii::Item> parse_unsigned(TokenType type) noexcept;
-    std::optional<ii::Item> parse_signed(TokenType type) noexcept;
-    std::optional<ii::Item> parse_float(TokenType type) noexcept;
+    std::optional<TemplateItem> parse_item() noexcept;
+    std::optional<TemplateItem> parse_list() noexcept;
+    std::optional<TemplateItem> parse_ascii() noexcept;
+    std::optional<TemplateItem> parse_binary() noexcept;
+    std::optional<TemplateItem> parse_boolean() noexcept;
+    std::optional<TemplateItem> parse_unsigned(TokenType type) noexcept;
+    std::optional<TemplateItem> parse_signed(TokenType type) noexcept;
+    std::optional<TemplateItem> parse_float(TokenType type) noexcept;
 
     // 解析辅助
     std::optional<Condition> parse_condition() noexcept;

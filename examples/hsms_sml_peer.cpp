@@ -28,6 +28,7 @@
 #include "secs/hsms/session.hpp"
 #include "secs/ii/codec.hpp"
 #include "secs/protocol/session.hpp"
+#include "secs/sml/render.hpp"
 #include "secs/sml/runtime.hpp"
 
 #include <asio/as_tuple.hpp>
@@ -253,8 +254,18 @@ fire_once(std::shared_ptr<ProtocolSession> proto,
         co_return;
     }
 
+    // 当前示例未提供变量注入接口：使用空上下文渲染。
+    secs::sml::RenderContext ctx{};
+    secs::ii::Item rendered{secs::ii::List{}};
+    const auto render_ec = secs::sml::render_item(msg->item, ctx, rendered);
+    if (render_ec) {
+        std::cout << "[fire] render failed: " << name_or_sf
+                  << " ec=" << render_ec.message() << "\n";
+        co_return;
+    }
+
     std::vector<byte> body;
-    const auto enc_ec = secs::ii::encode(msg->item, body);
+    const auto enc_ec = secs::ii::encode(rendered, body);
     if (enc_ec) {
         std::cout << "[fire] encode failed: " << name_or_sf
                   << " ec=" << enc_ec.message() << "\n";
@@ -377,8 +388,19 @@ make_sml_auto_reply(std::shared_ptr<Runtime> rt) {
                     {}};
             }
 
+            // 当前示例未提供变量注入接口：使用空上下文渲染。
+            secs::sml::RenderContext ctx{};
+            secs::ii::Item rendered{secs::ii::List{}};
+            const auto render_ec =
+                secs::sml::render_item(rsp->item, ctx, rendered);
+            if (render_ec) {
+                std::cout << "[auto-reply] render failed: " << render_ec.message()
+                          << "\n";
+                co_return HandlerResult{render_ec, {}};
+            }
+
             std::vector<byte> body;
-            const auto enc_ec = secs::ii::encode(rsp->item, body);
+            const auto enc_ec = secs::ii::encode(rendered, body);
             if (enc_ec) {
                 std::cout << "[auto-reply] encode failed: " << enc_ec.message()
                           << "\n";

@@ -139,6 +139,7 @@ target_link_libraries(secs_protocol PUBLIC secs_core secs_hsms secs_secs1)
 add_library(secs_sml
   src/sml/lexer.cpp
   src/sml/parser.cpp
+  src/sml/render.cpp
   src/sml/runtime.cpp
 )
 add_library(secs::sml ALIAS secs_sml)

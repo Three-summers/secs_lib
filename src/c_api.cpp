@@ -11,6 +11,7 @@
 #include "secs/protocol/router.hpp"
 #include "secs/protocol/session.hpp"
 #include "secs/secs1/block.hpp"
+#include "secs/sml/render.hpp"
 #include "secs/sml/runtime.hpp"
 
 #include <asio/as_tuple.hpp>
@@ -164,6 +165,9 @@ category_from_name(const char *name) noexcept {
     }
     if (std::strcmp(name, secs::sml::parser_error_category().name()) == 0) {
         return &secs::sml::parser_error_category();
+    }
+    if (std::strcmp(name, secs::sml::render_error_category().name()) == 0) {
+        return &secs::sml::render_error_category();
     }
 
     // 标准错误域
@@ -1225,8 +1229,17 @@ secs_sml_runtime_get_message_body_by_name(const secs_sml_runtime_t *rt,
             return c_api_err(SECS_C_API_NOT_FOUND);
         }
 
+        // C API 暂不提供“注入变量”的接口：这里使用空上下文渲染。
+        // 若消息模板包含占位符，将返回 sml.render/missing_variable。
+        secs::sml::RenderContext ctx{};
+        secs::ii::Item rendered{secs::ii::List{}};
+        const auto render_ec = secs::sml::render_item(msg->item, ctx, rendered);
+        if (render_ec) {
+            return from_error_code(render_ec);
+        }
+
         std::vector<byte> out;
-        auto ec = secs::ii::encode(msg->item, out);
+        auto ec = secs::ii::encode(rendered, out);
         if (ec) {
             return from_error_code(ec);
         }
@@ -2136,8 +2149,17 @@ secs_protocol_session_set_sml_default_handler(secs_protocol_session_t *sess,
                         make_error_code(errc::invalid_argument), {}};
                 }
 
+                // 当前 C API 的 SML default handler 不支持变量注入：用空上下文渲染。
+                secs::sml::RenderContext ctx{};
+                secs::ii::Item rendered{secs::ii::List{}};
+                const auto render_ec =
+                    secs::sml::render_item(rsp->item, ctx, rendered);
+                if (render_ec) {
+                    co_return secs::protocol::HandlerResult{render_ec, {}};
+                }
+
                 std::vector<byte> out;
-                const auto enc_ec = secs::ii::encode(rsp->item, out);
+                const auto enc_ec = secs::ii::encode(rendered, out);
                 if (enc_ec) {
                     co_return secs::protocol::HandlerResult{enc_ec, {}};
                 }

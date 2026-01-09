@@ -17,6 +17,8 @@
 
 namespace secs::sml {
 
+class RenderContext;
+
 /**
  * @brief SML 运行时
  *
@@ -64,6 +66,27 @@ public:
     match_response(std::uint8_t stream,
                    std::uint8_t function,
                    const ii::Item &item) const noexcept;
+
+    /**
+     * @brief 渲染并编码消息模板（用于“代码主动发送”）
+     *
+     * @param name_or_sf 消息名；也支持直接传入 SxFy（例如 "S2F22"）
+     * @param ctx 渲染上下文（变量名 -> SECS-II Item）
+     * @param out_body 输出：编码后的 SECS-II body bytes
+     * @param out_stream 可选输出：Stream
+     * @param out_function 可选输出：Function
+     * @param out_w_bit 可选输出：W 位
+     *
+     * @return 渲染失败返回 sml.render；编码失败返回 ii::errc；找不到消息返回
+     * secs.core/invalid_argument。
+     */
+    [[nodiscard]] std::error_code
+    encode_message_body(std::string_view name_or_sf,
+                        const RenderContext &ctx,
+                        std::vector<secs::core::byte> &out_body,
+                        std::uint8_t *out_stream = nullptr,
+                        std::uint8_t *out_function = nullptr,
+                        bool *out_w_bit = nullptr) const noexcept;
 
     /**
      * @brief 获取所有定时规则

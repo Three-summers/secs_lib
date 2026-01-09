@@ -1,8 +1,12 @@
 #include "secs/sml/runtime.hpp"
 
+#include "secs/ii/codec.hpp"
+#include "secs/sml/render.hpp"
+
 #include <charconv>
 #include <cmath>
 #include <limits>
+#include <new>
 
 namespace secs::sml {
 
@@ -216,6 +220,49 @@ Runtime::match_response(std::uint8_t stream,
         return std::nullopt;
     } catch (...) {
         return std::nullopt;
+    }
+}
+
+std::error_code
+Runtime::encode_message_body(std::string_view name_or_sf,
+                             const RenderContext &ctx,
+                             std::vector<secs::core::byte> &out_body,
+                             std::uint8_t *out_stream,
+                             std::uint8_t *out_function,
+                             bool *out_w_bit) const noexcept {
+    try {
+        out_body.clear();
+
+        const auto *msg = get_message(name_or_sf);
+        if (!msg) {
+            return secs::core::make_error_code(secs::core::errc::invalid_argument);
+        }
+
+        secs::ii::Item rendered{secs::ii::List{}};
+        const auto render_ec = secs::sml::render_item(msg->item, ctx, rendered);
+        if (render_ec) {
+            return render_ec;
+        }
+
+        const auto enc_ec = secs::ii::encode(rendered, out_body);
+        if (enc_ec) {
+            return enc_ec;
+        }
+
+        if (out_stream) {
+            *out_stream = msg->stream;
+        }
+        if (out_function) {
+            *out_function = msg->function;
+        }
+        if (out_w_bit) {
+            *out_w_bit = msg->w_bit;
+        }
+        return {};
+    } catch (const std::bad_alloc &) {
+        return secs::core::make_error_code(secs::core::errc::out_of_memory);
+    } catch (...) {
+        return secs::core::make_error_code(secs::core::errc::invalid_argument);
     }
 }
 

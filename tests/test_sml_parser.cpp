@@ -5,6 +5,7 @@
 
 #include "secs/sml/lexer.hpp"
 #include "secs/sml/parser.hpp"
+#include "secs/sml/render.hpp"
 #include "secs/sml/runtime.hpp"
 
 #include "test_main.hpp"
@@ -153,7 +154,11 @@ void test_parser_nested_list() {
     TEST_EXPECT_EQ(result.document.messages.size(), 1u);
 
     const auto &msg = result.document.messages[0];
-    auto *list = msg.item.get_if<List>();
+    RenderContext ctx{};
+    Item rendered{List{}};
+    TEST_EXPECT_OK(render_item(msg.item, ctx, rendered));
+
+    auto *list = rendered.get_if<List>();
     TEST_EXPECT(list != nullptr);
     TEST_EXPECT_EQ(list->size(), 2u);
 
@@ -204,6 +209,66 @@ void test_parser_if_rule_with_condition() {
     TEST_EXPECT(rule.condition.index.has_value());
     TEST_EXPECT_EQ(*rule.condition.index, 2u);
     TEST_EXPECT(rule.condition.expected.has_value());
+}
+
+void test_smlx_render_ascii_placeholder() {
+    auto result = parse_sml(R"(
+    m: S1F1 <A MDLN>.
+  )");
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.messages.size(), 1u);
+
+    RenderContext ctx;
+    ctx.set("MDLN", Item::ascii("WET.01"));
+
+    Item rendered{List{}};
+    TEST_EXPECT_OK(render_item(result.document.messages[0].item, ctx, rendered));
+
+    auto *ascii = rendered.get_if<ASCII>();
+    TEST_EXPECT(ascii != nullptr);
+    TEST_EXPECT_EQ(ascii->value, std::string("WET.01"));
+}
+
+void test_smlx_render_numeric_placeholder_expands_values() {
+    auto result = parse_sml(R"(
+    m: S1F1 <U2 1 SVIDS 3>.
+  )");
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.messages.size(), 1u);
+
+    RenderContext ctx;
+    ctx.set("SVIDS", Item::u2(std::vector<std::uint16_t>{100, 200}));
+
+    Item rendered{List{}};
+    TEST_EXPECT_OK(render_item(result.document.messages[0].item, ctx, rendered));
+
+    auto *u2 = rendered.get_if<U2>();
+    TEST_EXPECT(u2 != nullptr);
+    TEST_EXPECT_EQ(u2->values.size(), 4u);
+    TEST_EXPECT_EQ(u2->values[0], 1u);
+    TEST_EXPECT_EQ(u2->values[1], 100u);
+    TEST_EXPECT_EQ(u2->values[2], 200u);
+    TEST_EXPECT_EQ(u2->values[3], 3u);
+}
+
+void test_smlx_render_missing_variable_is_error() {
+    auto result = parse_sml("m: S1F1 <A MDLN>.");
+    TEST_EXPECT_OK(result.ec);
+
+    RenderContext ctx{};
+    Item rendered{List{}};
+    const auto ec = render_item(result.document.messages[0].item, ctx, rendered);
+    TEST_EXPECT_EQ(ec, make_error_code(render_errc::missing_variable));
+}
+
+void test_parser_condition_expected_disallows_placeholder() {
+    // 条件期望值当前只允许字面量，不允许占位符。
+    auto result = parse_sml(R"(
+    a: S1F1 <L>.
+    rsp: S1F2 <L>.
+    if (a(1)==<A MDLN>) rsp.
+  )");
+    TEST_EXPECT_EQ(result.ec, make_error_code(parser_errc::invalid_condition));
 }
 
 void test_parser_every_rule() {
@@ -949,6 +1014,10 @@ int main() {
     test_parser_nested_list();
     test_parser_if_rule();
     test_parser_if_rule_with_condition();
+    test_smlx_render_ascii_placeholder();
+    test_smlx_render_numeric_placeholder_expands_values();
+    test_smlx_render_missing_variable_is_error();
+    test_parser_condition_expected_disallows_placeholder();
     test_parser_every_rule();
     test_parser_quoted_sf();
     test_parser_error_category_messages();

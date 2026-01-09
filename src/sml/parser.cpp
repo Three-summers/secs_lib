@@ -167,6 +167,217 @@ double parse_float_value(std::string_view text) {
     return std::strtod(text.data(), nullptr);
 }
 
+template <class T>
+[[nodiscard]] bool values_has_var(
+    const std::vector<ValueExpr<T>> &values) noexcept {
+    for (const auto &v : values) {
+        if (std::holds_alternative<VarRef>(v)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] bool item_has_var(const TemplateItem &item) noexcept {
+    struct Visitor final {
+        static bool run(const TemplateItem &it) noexcept {
+            return std::visit(Visitor{}, it.storage());
+        }
+
+        bool operator()(const TplList &list) const noexcept {
+            for (const auto &child : list) {
+                if (run(child)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        bool operator()(const TplASCII &a) const noexcept {
+            return std::holds_alternative<VarRef>(a.value);
+        }
+
+        bool operator()(const TplBinary &b) const noexcept {
+            return values_has_var(b.values);
+        }
+
+        bool operator()(const TplBoolean &b) const noexcept {
+            return values_has_var(b.values);
+        }
+
+        bool operator()(const TplI1 &v) const noexcept {
+            return values_has_var(v.values);
+        }
+        bool operator()(const TplI2 &v) const noexcept {
+            return values_has_var(v.values);
+        }
+        bool operator()(const TplI4 &v) const noexcept {
+            return values_has_var(v.values);
+        }
+        bool operator()(const TplI8 &v) const noexcept {
+            return values_has_var(v.values);
+        }
+
+        bool operator()(const TplU1 &v) const noexcept {
+            return values_has_var(v.values);
+        }
+        bool operator()(const TplU2 &v) const noexcept {
+            return values_has_var(v.values);
+        }
+        bool operator()(const TplU4 &v) const noexcept {
+            return values_has_var(v.values);
+        }
+        bool operator()(const TplU8 &v) const noexcept {
+            return values_has_var(v.values);
+        }
+
+        bool operator()(const TplF4 &v) const noexcept {
+            return values_has_var(v.values);
+        }
+        bool operator()(const TplF8 &v) const noexcept {
+            return values_has_var(v.values);
+        }
+    };
+
+    return Visitor::run(item);
+}
+
+template <class T>
+[[nodiscard]] std::optional<std::vector<T>>
+values_to_literals(const std::vector<ValueExpr<T>> &values) noexcept {
+    std::vector<T> out;
+    out.reserve(values.size());
+    for (const auto &v : values) {
+        const auto *lit = std::get_if<T>(&v);
+        if (!lit) {
+            return std::nullopt;
+        }
+        out.push_back(*lit);
+    }
+    return out;
+}
+
+[[nodiscard]] std::optional<secs::ii::Item>
+tpl_to_ii_item(const TemplateItem &item) noexcept {
+    struct Visitor final {
+        static std::optional<secs::ii::Item> run(const TemplateItem &it) noexcept {
+            return std::visit(Visitor{}, it.storage());
+        }
+
+        std::optional<secs::ii::Item> operator()(const TplList &list) const noexcept {
+            std::vector<secs::ii::Item> out;
+            out.reserve(list.size());
+            for (const auto &child : list) {
+                auto c = run(child);
+                if (!c.has_value()) {
+                    return std::nullopt;
+                }
+                out.push_back(std::move(*c));
+            }
+            return secs::ii::Item::list(std::move(out));
+        }
+
+        std::optional<secs::ii::Item> operator()(const TplASCII &a) const noexcept {
+            const auto *s = std::get_if<std::string>(&a.value);
+            if (!s) {
+                return std::nullopt;
+            }
+            return secs::ii::Item::ascii(*s);
+        }
+
+        std::optional<secs::ii::Item> operator()(const TplBinary &b) const noexcept {
+            auto bytes = values_to_literals<secs::ii::byte>(b.values);
+            if (!bytes.has_value()) {
+                return std::nullopt;
+            }
+            return secs::ii::Item::binary(std::move(*bytes));
+        }
+
+        std::optional<secs::ii::Item> operator()(const TplBoolean &b) const noexcept {
+            auto values = values_to_literals<bool>(b.values);
+            if (!values.has_value()) {
+                return std::nullopt;
+            }
+            return secs::ii::Item::boolean(std::move(*values));
+        }
+
+        std::optional<secs::ii::Item> operator()(const TplI1 &v) const noexcept {
+            auto values = values_to_literals<std::int8_t>(v.values);
+            if (!values.has_value()) {
+                return std::nullopt;
+            }
+            return secs::ii::Item::i1(std::move(*values));
+        }
+        std::optional<secs::ii::Item> operator()(const TplI2 &v) const noexcept {
+            auto values = values_to_literals<std::int16_t>(v.values);
+            if (!values.has_value()) {
+                return std::nullopt;
+            }
+            return secs::ii::Item::i2(std::move(*values));
+        }
+        std::optional<secs::ii::Item> operator()(const TplI4 &v) const noexcept {
+            auto values = values_to_literals<std::int32_t>(v.values);
+            if (!values.has_value()) {
+                return std::nullopt;
+            }
+            return secs::ii::Item::i4(std::move(*values));
+        }
+        std::optional<secs::ii::Item> operator()(const TplI8 &v) const noexcept {
+            auto values = values_to_literals<std::int64_t>(v.values);
+            if (!values.has_value()) {
+                return std::nullopt;
+            }
+            return secs::ii::Item::i8(std::move(*values));
+        }
+
+        std::optional<secs::ii::Item> operator()(const TplU1 &v) const noexcept {
+            auto values = values_to_literals<std::uint8_t>(v.values);
+            if (!values.has_value()) {
+                return std::nullopt;
+            }
+            return secs::ii::Item::u1(std::move(*values));
+        }
+        std::optional<secs::ii::Item> operator()(const TplU2 &v) const noexcept {
+            auto values = values_to_literals<std::uint16_t>(v.values);
+            if (!values.has_value()) {
+                return std::nullopt;
+            }
+            return secs::ii::Item::u2(std::move(*values));
+        }
+        std::optional<secs::ii::Item> operator()(const TplU4 &v) const noexcept {
+            auto values = values_to_literals<std::uint32_t>(v.values);
+            if (!values.has_value()) {
+                return std::nullopt;
+            }
+            return secs::ii::Item::u4(std::move(*values));
+        }
+        std::optional<secs::ii::Item> operator()(const TplU8 &v) const noexcept {
+            auto values = values_to_literals<std::uint64_t>(v.values);
+            if (!values.has_value()) {
+                return std::nullopt;
+            }
+            return secs::ii::Item::u8(std::move(*values));
+        }
+
+        std::optional<secs::ii::Item> operator()(const TplF4 &v) const noexcept {
+            auto values = values_to_literals<float>(v.values);
+            if (!values.has_value()) {
+                return std::nullopt;
+            }
+            return secs::ii::Item::f4(std::move(*values));
+        }
+        std::optional<secs::ii::Item> operator()(const TplF8 &v) const noexcept {
+            auto values = values_to_literals<double>(v.values);
+            if (!values.has_value()) {
+                return std::nullopt;
+            }
+            return secs::ii::Item::f8(std::move(*values));
+        }
+    };
+
+    return Visitor::run(item);
+}
+
 } // namespace
 
 const std::error_category &parser_error_category() noexcept {
@@ -378,13 +589,13 @@ bool Parser::parse_every_rule() noexcept {
     return true;
 }
 
-std::optional<ii::Item> Parser::parse_item() noexcept {
+std::optional<TemplateItem> Parser::parse_item() noexcept {
     if (!match(TokenType::LAngle)) {
         error(parser_errc::expected_item, "expected '<'");
         return std::nullopt;
     }
 
-    std::optional<ii::Item> result;
+    std::optional<TemplateItem> result;
 
     TokenType type = peek().type;
     switch (type) {
@@ -433,7 +644,7 @@ std::optional<ii::Item> Parser::parse_item() noexcept {
     return result;
 }
 
-std::optional<ii::Item> Parser::parse_list() noexcept {
+std::optional<TemplateItem> Parser::parse_list() noexcept {
     advance(); // L（列表）
 
     // 可选的 [n] 大小提示
@@ -448,7 +659,7 @@ std::optional<ii::Item> Parser::parse_list() noexcept {
         }
     }
 
-    std::vector<ii::Item> items;
+    TplList items;
     while (check(TokenType::LAngle)) {
         auto item = parse_item();
         if (!item) {
@@ -457,193 +668,259 @@ std::optional<ii::Item> Parser::parse_list() noexcept {
         items.push_back(std::move(*item));
     }
 
-    return ii::Item::list(std::move(items));
+    return TemplateItem(std::move(items));
 }
 
-std::optional<ii::Item> Parser::parse_ascii() noexcept {
+std::optional<TemplateItem> Parser::parse_ascii() noexcept {
     advance(); // A（ASCII 字符串）
 
-    if (!check(TokenType::String)) {
-        // 空 ASCII
-        return ii::Item::ascii("");
+    TplASCII a;
+    if (check(TokenType::String)) {
+        a.value = advance().value;
+        return TemplateItem(std::move(a));
+    }
+    if (check(TokenType::Identifier)) {
+        a.value = VarRef{advance().value};
+        return TemplateItem(std::move(a));
     }
 
-    std::string value = advance().value;
-    return ii::Item::ascii(std::move(value));
+    // 空 ASCII
+    a.value = std::string{};
+    return TemplateItem(std::move(a));
 }
 
-std::optional<ii::Item> Parser::parse_binary() noexcept {
+std::optional<TemplateItem> Parser::parse_binary() noexcept {
     advance(); // B（二进制数组）
 
-    std::vector<secs::core::byte> bytes;
-    while (check(TokenType::Integer)) {
+    TplBinary b;
+    while (check(TokenType::Integer) || check(TokenType::Identifier)) {
+        if (check(TokenType::Identifier)) {
+            b.values.emplace_back(VarRef{advance().value});
+            continue;
+        }
+
         const auto val = parse_uint64_literal(advance().value);
         if (!val.has_value() || *val > 0xFFu) {
             error(parser_errc::expected_number,
                   "binary byte out of range (expected 0..255)");
             return std::nullopt;
         }
-        bytes.push_back(static_cast<secs::core::byte>(*val));
+        b.values.emplace_back(static_cast<secs::ii::byte>(*val));
     }
 
-    return ii::Item::binary(std::move(bytes));
+    return TemplateItem(std::move(b));
 }
 
-std::optional<ii::Item> Parser::parse_boolean() noexcept {
+std::optional<TemplateItem> Parser::parse_boolean() noexcept {
     advance(); // Boolean（布尔数组）
 
-    std::vector<bool> values;
-    while (check(TokenType::Integer)) {
+    TplBoolean b;
+    while (check(TokenType::Integer) || check(TokenType::Identifier)) {
+        if (check(TokenType::Identifier)) {
+            b.values.emplace_back(VarRef{advance().value});
+            continue;
+        }
+
         const auto val = parse_int64_literal(advance().value);
         if (!val.has_value()) {
             error(parser_errc::expected_number, "invalid boolean literal");
             return std::nullopt;
         }
-        values.push_back(*val != 0);
+        b.values.emplace_back(*val != 0);
     }
 
-    return ii::Item::boolean(std::move(values));
+    return TemplateItem(std::move(b));
 }
 
-std::optional<ii::Item> Parser::parse_unsigned(TokenType type) noexcept {
+std::optional<TemplateItem> Parser::parse_unsigned(TokenType type) noexcept {
     advance(); // U1/U2/U4/U8（无符号整数数组）
 
     switch (type) {
     case TokenType::KwU1: {
-        std::vector<std::uint8_t> values;
-        while (check(TokenType::Integer)) {
-            const auto v = parse_uint64_literal(advance().value);
-            if (!v.has_value() ||
-                *v > std::numeric_limits<std::uint8_t>::max()) {
+        TplU1 v;
+        while (check(TokenType::Integer) || check(TokenType::Identifier)) {
+            if (check(TokenType::Identifier)) {
+                v.values.emplace_back(VarRef{advance().value});
+                continue;
+            }
+
+            const auto n = parse_uint64_literal(advance().value);
+            if (!n.has_value() ||
+                *n > std::numeric_limits<std::uint8_t>::max()) {
                 error(parser_errc::expected_number, "U1 value out of range");
                 return std::nullopt;
             }
-            values.push_back(static_cast<std::uint8_t>(*v));
+            v.values.emplace_back(static_cast<std::uint8_t>(*n));
         }
-        return ii::Item::u1(std::move(values));
+        return TemplateItem(std::move(v));
     }
     case TokenType::KwU2: {
-        std::vector<std::uint16_t> values;
-        while (check(TokenType::Integer)) {
-            const auto v = parse_uint64_literal(advance().value);
-            if (!v.has_value() ||
-                *v > std::numeric_limits<std::uint16_t>::max()) {
+        TplU2 v;
+        while (check(TokenType::Integer) || check(TokenType::Identifier)) {
+            if (check(TokenType::Identifier)) {
+                v.values.emplace_back(VarRef{advance().value});
+                continue;
+            }
+
+            const auto n = parse_uint64_literal(advance().value);
+            if (!n.has_value() ||
+                *n > std::numeric_limits<std::uint16_t>::max()) {
                 error(parser_errc::expected_number, "U2 value out of range");
                 return std::nullopt;
             }
-            values.push_back(static_cast<std::uint16_t>(*v));
+            v.values.emplace_back(static_cast<std::uint16_t>(*n));
         }
-        return ii::Item::u2(std::move(values));
+        return TemplateItem(std::move(v));
     }
     case TokenType::KwU4: {
-        std::vector<std::uint32_t> values;
-        while (check(TokenType::Integer)) {
-            const auto v = parse_uint64_literal(advance().value);
-            if (!v.has_value() ||
-                *v > std::numeric_limits<std::uint32_t>::max()) {
+        TplU4 v;
+        while (check(TokenType::Integer) || check(TokenType::Identifier)) {
+            if (check(TokenType::Identifier)) {
+                v.values.emplace_back(VarRef{advance().value});
+                continue;
+            }
+
+            const auto n = parse_uint64_literal(advance().value);
+            if (!n.has_value() ||
+                *n > std::numeric_limits<std::uint32_t>::max()) {
                 error(parser_errc::expected_number, "U4 value out of range");
                 return std::nullopt;
             }
-            values.push_back(static_cast<std::uint32_t>(*v));
+            v.values.emplace_back(static_cast<std::uint32_t>(*n));
         }
-        return ii::Item::u4(std::move(values));
+        return TemplateItem(std::move(v));
     }
     case TokenType::KwU8: {
-        std::vector<std::uint64_t> values;
-        while (check(TokenType::Integer)) {
-            const auto v = parse_uint64_literal(advance().value);
-            if (!v.has_value()) {
+        TplU8 v;
+        while (check(TokenType::Integer) || check(TokenType::Identifier)) {
+            if (check(TokenType::Identifier)) {
+                v.values.emplace_back(VarRef{advance().value});
+                continue;
+            }
+
+            const auto n = parse_uint64_literal(advance().value);
+            if (!n.has_value()) {
                 error(parser_errc::expected_number, "U8 value out of range");
                 return std::nullopt;
             }
-            values.push_back(*v);
+            v.values.emplace_back(*n);
         }
-        return ii::Item::u8(std::move(values));
+        return TemplateItem(std::move(v));
     }
     default:
         return std::nullopt;
     }
 }
 
-std::optional<ii::Item> Parser::parse_signed(TokenType type) noexcept {
+std::optional<TemplateItem> Parser::parse_signed(TokenType type) noexcept {
     advance(); // I1/I2/I4/I8（有符号整数数组）
 
     switch (type) {
     case TokenType::KwI1: {
-        std::vector<std::int8_t> values;
-        while (check(TokenType::Integer)) {
-            const auto v = parse_int64_literal(advance().value);
-            if (!v.has_value() ||
-                *v < std::numeric_limits<std::int8_t>::min() ||
-                *v > std::numeric_limits<std::int8_t>::max()) {
+        TplI1 v;
+        while (check(TokenType::Integer) || check(TokenType::Identifier)) {
+            if (check(TokenType::Identifier)) {
+                v.values.emplace_back(VarRef{advance().value});
+                continue;
+            }
+
+            const auto n = parse_int64_literal(advance().value);
+            if (!n.has_value() ||
+                *n < std::numeric_limits<std::int8_t>::min() ||
+                *n > std::numeric_limits<std::int8_t>::max()) {
                 error(parser_errc::expected_number, "I1 value out of range");
                 return std::nullopt;
             }
-            values.push_back(static_cast<std::int8_t>(*v));
+            v.values.emplace_back(static_cast<std::int8_t>(*n));
         }
-        return ii::Item::i1(std::move(values));
+        return TemplateItem(std::move(v));
     }
     case TokenType::KwI2: {
-        std::vector<std::int16_t> values;
-        while (check(TokenType::Integer)) {
-            const auto v = parse_int64_literal(advance().value);
-            if (!v.has_value() ||
-                *v < std::numeric_limits<std::int16_t>::min() ||
-                *v > std::numeric_limits<std::int16_t>::max()) {
+        TplI2 v;
+        while (check(TokenType::Integer) || check(TokenType::Identifier)) {
+            if (check(TokenType::Identifier)) {
+                v.values.emplace_back(VarRef{advance().value});
+                continue;
+            }
+
+            const auto n = parse_int64_literal(advance().value);
+            if (!n.has_value() ||
+                *n < std::numeric_limits<std::int16_t>::min() ||
+                *n > std::numeric_limits<std::int16_t>::max()) {
                 error(parser_errc::expected_number, "I2 value out of range");
                 return std::nullopt;
             }
-            values.push_back(static_cast<std::int16_t>(*v));
+            v.values.emplace_back(static_cast<std::int16_t>(*n));
         }
-        return ii::Item::i2(std::move(values));
+        return TemplateItem(std::move(v));
     }
     case TokenType::KwI4: {
-        std::vector<std::int32_t> values;
-        while (check(TokenType::Integer)) {
-            const auto v = parse_int64_literal(advance().value);
-            if (!v.has_value() ||
-                *v < std::numeric_limits<std::int32_t>::min() ||
-                *v > std::numeric_limits<std::int32_t>::max()) {
+        TplI4 v;
+        while (check(TokenType::Integer) || check(TokenType::Identifier)) {
+            if (check(TokenType::Identifier)) {
+                v.values.emplace_back(VarRef{advance().value});
+                continue;
+            }
+
+            const auto n = parse_int64_literal(advance().value);
+            if (!n.has_value() ||
+                *n < std::numeric_limits<std::int32_t>::min() ||
+                *n > std::numeric_limits<std::int32_t>::max()) {
                 error(parser_errc::expected_number, "I4 value out of range");
                 return std::nullopt;
             }
-            values.push_back(static_cast<std::int32_t>(*v));
+            v.values.emplace_back(static_cast<std::int32_t>(*n));
         }
-        return ii::Item::i4(std::move(values));
+        return TemplateItem(std::move(v));
     }
     case TokenType::KwI8: {
-        std::vector<std::int64_t> values;
-        while (check(TokenType::Integer)) {
-            const auto v = parse_int64_literal(advance().value);
-            if (!v.has_value()) {
+        TplI8 v;
+        while (check(TokenType::Integer) || check(TokenType::Identifier)) {
+            if (check(TokenType::Identifier)) {
+                v.values.emplace_back(VarRef{advance().value});
+                continue;
+            }
+
+            const auto n = parse_int64_literal(advance().value);
+            if (!n.has_value()) {
                 error(parser_errc::expected_number, "I8 value out of range");
                 return std::nullopt;
             }
-            values.push_back(*v);
+            v.values.emplace_back(*n);
         }
-        return ii::Item::i8(std::move(values));
+        return TemplateItem(std::move(v));
     }
     default:
         return std::nullopt;
     }
 }
 
-std::optional<ii::Item> Parser::parse_float(TokenType type) noexcept {
+std::optional<TemplateItem> Parser::parse_float(TokenType type) noexcept {
     advance(); // F4/F8（浮点数组）
 
     if (type == TokenType::KwF4) {
-        std::vector<float> values;
-        while (check(TokenType::Float) || check(TokenType::Integer)) {
-            values.push_back(
+        TplF4 v;
+        while (check(TokenType::Float) || check(TokenType::Integer) ||
+               check(TokenType::Identifier)) {
+            if (check(TokenType::Identifier)) {
+                v.values.emplace_back(VarRef{advance().value});
+                continue;
+            }
+            v.values.emplace_back(
                 static_cast<float>(parse_float_value(advance().value)));
         }
-        return ii::Item::f4(std::move(values));
+        return TemplateItem(std::move(v));
     } else {
-        std::vector<double> values;
-        while (check(TokenType::Float) || check(TokenType::Integer)) {
-            values.push_back(parse_float_value(advance().value));
+        TplF8 v;
+        while (check(TokenType::Float) || check(TokenType::Integer) ||
+               check(TokenType::Identifier)) {
+            if (check(TokenType::Identifier)) {
+                v.values.emplace_back(VarRef{advance().value});
+                continue;
+            }
+            v.values.emplace_back(parse_float_value(advance().value));
         }
-        return ii::Item::f8(std::move(values));
+        return TemplateItem(std::move(v));
     }
 }
 
@@ -684,11 +961,25 @@ std::optional<Condition> Parser::parse_condition() noexcept {
 
     // 可选的 ==<Item>（期望值匹配）
     if (match(TokenType::Equals)) {
-        auto item = parse_item();
-        if (!item) {
+        auto tpl = parse_item();
+        if (!tpl) {
             return std::nullopt;
         }
-        cond.expected = std::move(*item);
+
+        // 约束：条件期望值当前仅支持“纯字面量”，不允许占位符（避免在匹配阶段
+        // 引入隐式上下文依赖）。
+        if (item_has_var(*tpl)) {
+            error(parser_errc::invalid_condition,
+                  "placeholders are not allowed in expected item");
+            return std::nullopt;
+        }
+
+        auto expected = tpl_to_ii_item(*tpl);
+        if (!expected.has_value()) {
+            error(parser_errc::invalid_condition, "invalid expected item");
+            return std::nullopt;
+        }
+        cond.expected = std::move(*expected);
     }
 
     return cond;

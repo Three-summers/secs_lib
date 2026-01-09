@@ -118,6 +118,7 @@
 | 06 | sml | [06-sml-module.md](06-sml-module.md) | SML 语法、词法/语法分析、运行时 |
 | 07 | c_api | [07-c-api-module.md](07-c-api-module.md) | C 语言绑定、不透明句柄、阻塞式桥接 |
 | 08 | utils | [08-utils-module.md](08-utils-module.md) | 调试工具：hex/Item dump/HSMS/SECS-I 报文解析 |
+| 09 | sml（提案） | [09-smlx-extension.md](09-smlx-extension.md) | SML 扩展提案：占位符/变量注入、脚本化收发 |
 
 ---
 

@@ -11,6 +11,7 @@
  */
 
 #include "secs/ii/codec.hpp"
+#include "secs/sml/render.hpp"
 #include "secs/sml/runtime.hpp"
 
 #include "test_main.hpp"
@@ -59,8 +60,12 @@ std::vector<std::uint8_t> encode_with_cpp(std::string_view item_text) {
     TEST_EXPECT_EQ(parsed.document.messages.size(), 1u);
 
     const auto &msg = parsed.document.messages[0];
+    secs::sml::RenderContext ctx{};
+    secs::ii::Item rendered{secs::ii::List{}};
+    TEST_EXPECT_OK(secs::sml::render_item(msg.item, ctx, rendered));
+
     std::vector<secs::ii::byte> encoded;
-    TEST_EXPECT_OK(secs::ii::encode(msg.item, encoded));
+    TEST_EXPECT_OK(secs::ii::encode(rendered, encoded));
 
     std::vector<std::uint8_t> out;
     out.reserve(encoded.size());
