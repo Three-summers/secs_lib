@@ -8,6 +8,8 @@
 #include "secs/sml/render.hpp"
 #include "secs/sml/runtime.hpp"
 
+#include "secs/ii/codec.hpp"
+
 #include "test_main.hpp"
 
 #include <string_view>
@@ -16,9 +18,13 @@ namespace {
 
 using namespace secs::sml;
 using secs::ii::ASCII;
+using secs::ii::Binary;
+using secs::ii::Boolean;
 using secs::ii::F4;
 using secs::ii::Item;
+using secs::ii::I2;
 using secs::ii::List;
+using secs::ii::U1;
 using secs::ii::U2;
 
 // ============================================================================
@@ -251,6 +257,99 @@ void test_smlx_render_numeric_placeholder_expands_values() {
     TEST_EXPECT_EQ(u2->values[3], 3u);
 }
 
+void test_smlx_render_binary_placeholder_expands_values() {
+    auto result = parse_sml(R"(
+    m: S1F1 <B 0x01 BYTES 255>.
+  )");
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.messages.size(), 1u);
+
+    RenderContext ctx;
+    ctx.set("BYTES",
+            Item::binary(std::vector<secs::ii::byte>{
+                static_cast<secs::ii::byte>(0x02),
+                static_cast<secs::ii::byte>(0x03),
+            }));
+
+    Item rendered{List{}};
+    TEST_EXPECT_OK(render_item(result.document.messages[0].item, ctx, rendered));
+
+    auto *bin = rendered.get_if<Binary>();
+    TEST_EXPECT(bin != nullptr);
+    TEST_EXPECT_EQ(bin->value.size(), 4u);
+    TEST_EXPECT_EQ(bin->value[0], 1u);
+    TEST_EXPECT_EQ(bin->value[1], 2u);
+    TEST_EXPECT_EQ(bin->value[2], 3u);
+    TEST_EXPECT_EQ(bin->value[3], 255u);
+}
+
+void test_smlx_render_boolean_placeholder_expands_values() {
+    auto result = parse_sml(R"(
+    m: S1F1 <Boolean 0 BOOLS 1>.
+  )");
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.messages.size(), 1u);
+
+    RenderContext ctx;
+    ctx.set("BOOLS", Item::boolean(std::vector<bool>{true, false, true}));
+
+    Item rendered{List{}};
+    TEST_EXPECT_OK(render_item(result.document.messages[0].item, ctx, rendered));
+
+    auto *b = rendered.get_if<Boolean>();
+    TEST_EXPECT(b != nullptr);
+    TEST_EXPECT_EQ(b->values.size(), 5u);
+    TEST_EXPECT_EQ(b->values[0], false);
+    TEST_EXPECT_EQ(b->values[1], true);
+    TEST_EXPECT_EQ(b->values[2], false);
+    TEST_EXPECT_EQ(b->values[3], true);
+    TEST_EXPECT_EQ(b->values[4], true);
+}
+
+void test_smlx_render_signed_placeholder_expands_values() {
+    auto result = parse_sml(R"(
+    m: S1F1 <I2 -1 IVALS 2>.
+  )");
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.messages.size(), 1u);
+
+    RenderContext ctx;
+    ctx.set("IVALS",
+            Item::i2(std::vector<std::int16_t>{-32768, 32767}));
+
+    Item rendered{List{}};
+    TEST_EXPECT_OK(render_item(result.document.messages[0].item, ctx, rendered));
+
+    auto *i2 = rendered.get_if<I2>();
+    TEST_EXPECT(i2 != nullptr);
+    TEST_EXPECT_EQ(i2->values.size(), 4u);
+    TEST_EXPECT_EQ(i2->values[0], static_cast<std::int16_t>(-1));
+    TEST_EXPECT_EQ(i2->values[1], static_cast<std::int16_t>(-32768));
+    TEST_EXPECT_EQ(i2->values[2], static_cast<std::int16_t>(32767));
+    TEST_EXPECT_EQ(i2->values[3], static_cast<std::int16_t>(2));
+}
+
+void test_smlx_render_float_placeholder_expands_values() {
+    auto result = parse_sml(R"(
+    m: S1F1 <F4 1 FVALS 2>.
+  )");
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.messages.size(), 1u);
+
+    RenderContext ctx;
+    ctx.set("FVALS", Item::f4(std::vector<float>{3.5f}));
+
+    Item rendered{List{}};
+    TEST_EXPECT_OK(render_item(result.document.messages[0].item, ctx, rendered));
+
+    auto *f4 = rendered.get_if<F4>();
+    TEST_EXPECT(f4 != nullptr);
+    TEST_EXPECT_EQ(f4->values.size(), 3u);
+    TEST_EXPECT_EQ(f4->values[0], 1.0f);
+    TEST_EXPECT_EQ(f4->values[1], 3.5f);
+    TEST_EXPECT_EQ(f4->values[2], 2.0f);
+}
+
 void test_smlx_render_missing_variable_is_error() {
     auto result = parse_sml("m: S1F1 <A MDLN>.");
     TEST_EXPECT_OK(result.ec);
@@ -261,12 +360,204 @@ void test_smlx_render_missing_variable_is_error() {
     TEST_EXPECT_EQ(ec, make_error_code(render_errc::missing_variable));
 }
 
+void test_smlx_render_type_mismatch_is_error() {
+    // 数值模板要求变量类型完全一致（例如 <U2 ...> 仅接受 U2）。
+    {
+        auto result = parse_sml("m: S1F1 <U2 SVIDS>.");
+        TEST_EXPECT_OK(result.ec);
+
+        RenderContext ctx;
+        ctx.set("SVIDS", Item::u1(std::vector<std::uint8_t>{1, 2}));
+
+        Item rendered{List{}};
+        const auto ec =
+            render_item(result.document.messages[0].item, ctx, rendered);
+        TEST_EXPECT_EQ(ec, make_error_code(render_errc::type_mismatch));
+    }
+
+    // ASCII 占位符仅接受 ASCII。
+    {
+        auto result = parse_sml("m: S1F1 <A MDLN>.");
+        TEST_EXPECT_OK(result.ec);
+
+        RenderContext ctx;
+        ctx.set("MDLN", Item::u2(std::vector<std::uint16_t>{1}));
+
+        Item rendered{List{}};
+        const auto ec =
+            render_item(result.document.messages[0].item, ctx, rendered);
+        TEST_EXPECT_EQ(ec, make_error_code(render_errc::type_mismatch));
+    }
+}
+
+void test_smlx_render_nested_list_with_placeholders() {
+    auto result = parse_sml(R"(
+    m: S1F1 <L <A MDLN> <L <U2 SVIDS>>>.
+  )");
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.messages.size(), 1u);
+
+    RenderContext ctx;
+    ctx.set("MDLN", Item::ascii("WET.01"));
+    ctx.set("SVIDS", Item::u2(std::vector<std::uint16_t>{100, 200}));
+
+    Item rendered{List{}};
+    TEST_EXPECT_OK(render_item(result.document.messages[0].item, ctx, rendered));
+
+    auto *outer = rendered.get_if<List>();
+    TEST_EXPECT(outer != nullptr);
+    TEST_EXPECT_EQ(outer->size(), 2u);
+
+    auto *mdln = (*outer)[0].get_if<ASCII>();
+    TEST_EXPECT(mdln != nullptr);
+    TEST_EXPECT_EQ(mdln->value, std::string("WET.01"));
+
+    auto *inner_list = (*outer)[1].get_if<List>();
+    TEST_EXPECT(inner_list != nullptr);
+    TEST_EXPECT_EQ(inner_list->size(), 1u);
+    auto *u2 = (*inner_list)[0].get_if<U2>();
+    TEST_EXPECT(u2 != nullptr);
+    TEST_EXPECT_EQ(u2->values.size(), 2u);
+    TEST_EXPECT_EQ(u2->values[0], 100u);
+    TEST_EXPECT_EQ(u2->values[1], 200u);
+}
+
+void test_smlx_render_deep_nesting() {
+    constexpr int depth = 64;
+
+    std::string sml;
+    sml += "m: S1F1 ";
+    for (int i = 0; i < depth; ++i) {
+        sml += "<L ";
+    }
+    sml += "<A MDLN>";
+    for (int i = 0; i < depth; ++i) {
+        sml += ">";
+    }
+    sml += ".";
+
+    auto result = parse_sml(sml);
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.messages.size(), 1u);
+
+    RenderContext ctx;
+    ctx.set("MDLN", Item::ascii("X"));
+
+    Item rendered{List{}};
+    TEST_EXPECT_OK(render_item(result.document.messages[0].item, ctx, rendered));
+
+    const Item *cur = &rendered;
+    for (int i = 0; i < depth; ++i) {
+        auto *list = cur->get_if<List>();
+        TEST_EXPECT(list != nullptr);
+        TEST_EXPECT_EQ(list->size(), 1u);
+        cur = &(*list)[0];
+    }
+
+    auto *ascii = cur->get_if<ASCII>();
+    TEST_EXPECT(ascii != nullptr);
+    TEST_EXPECT_EQ(ascii->value, std::string("X"));
+}
+
+void test_runtime_encode_message_body_ok_and_errors() {
+    Runtime rt;
+    const auto ec = rt.load(R"(
+    const_msg: S1F2 <L <A "X"> <U2 1 2>>.
+    ph: S1F1 <A MDLN>.
+  )");
+    TEST_EXPECT_OK(ec);
+    TEST_EXPECT(rt.loaded());
+
+    RenderContext ctx;
+    std::vector<secs::core::byte> body;
+    std::uint8_t stream = 0;
+    std::uint8_t function = 0;
+    bool w_bit = true;
+
+    // 1) 纯字面量模板：空上下文也应能编码
+    TEST_EXPECT_OK(
+        rt.encode_message_body("const_msg", ctx, body, &stream, &function, &w_bit));
+    TEST_EXPECT_EQ(stream, 1u);
+    TEST_EXPECT_EQ(function, 2u);
+    TEST_EXPECT(!w_bit);
+
+    {
+        Item decoded{List{}};
+        std::size_t consumed = 0;
+        TEST_EXPECT_OK(secs::ii::decode_one(
+            secs::core::bytes_view{body.data(), body.size()}, decoded, consumed));
+        TEST_EXPECT_EQ(consumed, body.size());
+
+        const Item expected = Item::list(
+            {Item::ascii("X"), Item::u2(std::vector<std::uint16_t>{1, 2})});
+        TEST_EXPECT(decoded == expected);
+    }
+
+    // 2) 占位符模板：提供上下文后应能编码
+    ctx.set("MDLN", Item::ascii("WET.01"));
+    body.assign({1, 2, 3}); // 确认 encode_message_body 会清空并重新写入
+    TEST_EXPECT_OK(
+        rt.encode_message_body("ph", ctx, body, &stream, &function, &w_bit));
+    TEST_EXPECT_EQ(stream, 1u);
+    TEST_EXPECT_EQ(function, 1u);
+    TEST_EXPECT(!w_bit);
+
+    {
+        Item decoded{List{}};
+        std::size_t consumed = 0;
+        TEST_EXPECT_OK(secs::ii::decode_one(
+            secs::core::bytes_view{body.data(), body.size()}, decoded, consumed));
+        TEST_EXPECT_EQ(consumed, body.size());
+
+        auto *ascii = decoded.get_if<ASCII>();
+        TEST_EXPECT(ascii != nullptr);
+        TEST_EXPECT_EQ(ascii->value, std::string("WET.01"));
+    }
+
+    // 3) 缺少变量：应返回 missing_variable，且 out_body 应为空
+    {
+        RenderContext empty{};
+        body.assign({9, 9});
+        const auto e = rt.encode_message_body("ph", empty, body);
+        TEST_EXPECT_EQ(e, make_error_code(render_errc::missing_variable));
+        TEST_EXPECT(body.empty());
+    }
+
+    // 4) 类型不匹配：应返回 type_mismatch
+    {
+        RenderContext bad{};
+        bad.set("MDLN", Item::u1(std::vector<std::uint8_t>{1}));
+        body.assign({9, 9});
+        const auto e = rt.encode_message_body("ph", bad, body);
+        TEST_EXPECT_EQ(e, make_error_code(render_errc::type_mismatch));
+        TEST_EXPECT(body.empty());
+    }
+
+    // 5) 消息不存在：应返回 secs.core/invalid_argument
+    {
+        body.assign({1, 2, 3});
+        const auto e = rt.encode_message_body("no_such_message", ctx, body);
+        TEST_EXPECT_EQ(e,
+                       secs::core::make_error_code(secs::core::errc::invalid_argument));
+        TEST_EXPECT(body.empty());
+    }
+}
+
 void test_parser_condition_expected_disallows_placeholder() {
     // 条件期望值当前只允许字面量，不允许占位符。
     auto result = parse_sml(R"(
     a: S1F1 <L>.
     rsp: S1F2 <L>.
     if (a(1)==<A MDLN>) rsp.
+  )");
+    TEST_EXPECT_EQ(result.ec, make_error_code(parser_errc::invalid_condition));
+}
+
+void test_parser_condition_expected_disallows_placeholder_in_numeric() {
+    auto result = parse_sml(R"(
+    a: S1F1 <L>.
+    rsp: S1F2 <L>.
+    if (a(1)==<U2 SVIDS>) rsp.
   )");
     TEST_EXPECT_EQ(result.ec, make_error_code(parser_errc::invalid_condition));
 }
@@ -1016,8 +1307,16 @@ int main() {
     test_parser_if_rule_with_condition();
     test_smlx_render_ascii_placeholder();
     test_smlx_render_numeric_placeholder_expands_values();
+    test_smlx_render_binary_placeholder_expands_values();
+    test_smlx_render_boolean_placeholder_expands_values();
+    test_smlx_render_signed_placeholder_expands_values();
+    test_smlx_render_float_placeholder_expands_values();
     test_smlx_render_missing_variable_is_error();
+    test_smlx_render_type_mismatch_is_error();
+    test_smlx_render_nested_list_with_placeholders();
+    test_smlx_render_deep_nesting();
     test_parser_condition_expected_disallows_placeholder();
+    test_parser_condition_expected_disallows_placeholder_in_numeric();
     test_parser_every_rule();
     test_parser_quoted_sf();
     test_parser_error_category_messages();
@@ -1037,6 +1336,7 @@ int main() {
     test_runtime_get_message();
     test_runtime_match_response();
     test_runtime_timers();
+    test_runtime_encode_message_body_ok_and_errors();
     test_document_find_message_and_find_by_sf();
     test_runtime_get_message_by_sf_paths();
     test_runtime_condition_index_and_expected_matching();

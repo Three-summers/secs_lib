@@ -212,8 +212,26 @@ Runtime::match_response(std::uint8_t stream,
                         std::uint8_t function,
                         const ii::Item &item) const noexcept {
     try {
+        RenderContext ctx{};
         for (const auto &rule : document_.conditions) {
-            if (match_condition(rule.condition, stream, function, item)) {
+            if (match_condition(rule.condition, stream, function, item, ctx)) {
+                return rule.response_name;
+            }
+        }
+        return std::nullopt;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<std::string>
+Runtime::match_response(std::uint8_t stream,
+                        std::uint8_t function,
+                        const ii::Item &item,
+                        const RenderContext &ctx) const noexcept {
+    try {
+        for (const auto &rule : document_.conditions) {
+            if (match_condition(rule.condition, stream, function, item, ctx)) {
                 return rule.response_name;
             }
         }
@@ -269,7 +287,8 @@ Runtime::encode_message_body(std::string_view name_or_sf,
 bool Runtime::match_condition(const Condition &cond,
                               std::uint8_t stream,
                               std::uint8_t function,
-                              const ii::Item &item) const noexcept {
+                              const ii::Item &item,
+                              const RenderContext &ctx) const noexcept {
     // 检查消息名是否匹配
     // 条件可以是消息名（如 s1f1），也可以直接写成 SxFy 格式（如 S1F1）
 
@@ -304,7 +323,12 @@ bool Runtime::match_condition(const Condition &cond,
             return false;
         }
 
-        if (!items_equal(*elem, *cond.expected)) {
+        ii::Item expected{ii::List{}};
+        if (render_item(*cond.expected, ctx, expected)) {
+            return false;
+        }
+
+        if (!items_equal(*elem, expected)) {
             return false;
         }
     }

@@ -68,6 +68,19 @@ public:
                    const ii::Item &item) const noexcept;
 
     /**
+     * @brief 匹配条件响应（带渲染上下文）
+     *
+     * 说明：
+     * - 当前 `parse_sml()` 不允许在条件期望值 `==<...>` 中使用占位符；
+     * - 该接口主要用于未来扩展或直接构造 Document 的场景。
+     */
+    [[nodiscard]] std::optional<std::string>
+    match_response(std::uint8_t stream,
+                   std::uint8_t function,
+                   const ii::Item &item,
+                   const RenderContext &ctx) const noexcept;
+
+    /**
      * @brief 渲染并编码消息模板（用于“代码主动发送”）
      *
      * @param name_or_sf 消息名；也支持直接传入 SxFy（例如 "S2F22"）
@@ -132,7 +145,8 @@ private:
     [[nodiscard]] bool match_condition(const Condition &cond,
                                        std::uint8_t stream,
                                        std::uint8_t function,
-                                       const ii::Item &item) const noexcept;
+                                       const ii::Item &item,
+                                       const RenderContext &ctx) const noexcept;
     [[nodiscard]] bool items_equal(const ii::Item &a,
                                    const ii::Item &b) const noexcept;
 

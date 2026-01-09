@@ -178,7 +178,7 @@ struct Condition {
     // - 采用 SECS-II Item 的先序遍历编号（包含根节点）。
     // - 若消息体为 <L ...>，则根 List 的编号为 1，第一个子元素编号为 2。
     std::optional<std::size_t> index;
-    std::optional<ii::Item> expected; // 可选的期望值（目前不支持占位符）
+    std::optional<TemplateItem> expected; // 可选的期望值（当前不允许占位符）
 };
 
 /**

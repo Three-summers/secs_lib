@@ -242,142 +242,6 @@ template <class T>
     return Visitor::run(item);
 }
 
-template <class T>
-[[nodiscard]] std::optional<std::vector<T>>
-values_to_literals(const std::vector<ValueExpr<T>> &values) noexcept {
-    std::vector<T> out;
-    out.reserve(values.size());
-    for (const auto &v : values) {
-        const auto *lit = std::get_if<T>(&v);
-        if (!lit) {
-            return std::nullopt;
-        }
-        out.push_back(*lit);
-    }
-    return out;
-}
-
-[[nodiscard]] std::optional<secs::ii::Item>
-tpl_to_ii_item(const TemplateItem &item) noexcept {
-    struct Visitor final {
-        static std::optional<secs::ii::Item> run(const TemplateItem &it) noexcept {
-            return std::visit(Visitor{}, it.storage());
-        }
-
-        std::optional<secs::ii::Item> operator()(const TplList &list) const noexcept {
-            std::vector<secs::ii::Item> out;
-            out.reserve(list.size());
-            for (const auto &child : list) {
-                auto c = run(child);
-                if (!c.has_value()) {
-                    return std::nullopt;
-                }
-                out.push_back(std::move(*c));
-            }
-            return secs::ii::Item::list(std::move(out));
-        }
-
-        std::optional<secs::ii::Item> operator()(const TplASCII &a) const noexcept {
-            const auto *s = std::get_if<std::string>(&a.value);
-            if (!s) {
-                return std::nullopt;
-            }
-            return secs::ii::Item::ascii(*s);
-        }
-
-        std::optional<secs::ii::Item> operator()(const TplBinary &b) const noexcept {
-            auto bytes = values_to_literals<secs::ii::byte>(b.values);
-            if (!bytes.has_value()) {
-                return std::nullopt;
-            }
-            return secs::ii::Item::binary(std::move(*bytes));
-        }
-
-        std::optional<secs::ii::Item> operator()(const TplBoolean &b) const noexcept {
-            auto values = values_to_literals<bool>(b.values);
-            if (!values.has_value()) {
-                return std::nullopt;
-            }
-            return secs::ii::Item::boolean(std::move(*values));
-        }
-
-        std::optional<secs::ii::Item> operator()(const TplI1 &v) const noexcept {
-            auto values = values_to_literals<std::int8_t>(v.values);
-            if (!values.has_value()) {
-                return std::nullopt;
-            }
-            return secs::ii::Item::i1(std::move(*values));
-        }
-        std::optional<secs::ii::Item> operator()(const TplI2 &v) const noexcept {
-            auto values = values_to_literals<std::int16_t>(v.values);
-            if (!values.has_value()) {
-                return std::nullopt;
-            }
-            return secs::ii::Item::i2(std::move(*values));
-        }
-        std::optional<secs::ii::Item> operator()(const TplI4 &v) const noexcept {
-            auto values = values_to_literals<std::int32_t>(v.values);
-            if (!values.has_value()) {
-                return std::nullopt;
-            }
-            return secs::ii::Item::i4(std::move(*values));
-        }
-        std::optional<secs::ii::Item> operator()(const TplI8 &v) const noexcept {
-            auto values = values_to_literals<std::int64_t>(v.values);
-            if (!values.has_value()) {
-                return std::nullopt;
-            }
-            return secs::ii::Item::i8(std::move(*values));
-        }
-
-        std::optional<secs::ii::Item> operator()(const TplU1 &v) const noexcept {
-            auto values = values_to_literals<std::uint8_t>(v.values);
-            if (!values.has_value()) {
-                return std::nullopt;
-            }
-            return secs::ii::Item::u1(std::move(*values));
-        }
-        std::optional<secs::ii::Item> operator()(const TplU2 &v) const noexcept {
-            auto values = values_to_literals<std::uint16_t>(v.values);
-            if (!values.has_value()) {
-                return std::nullopt;
-            }
-            return secs::ii::Item::u2(std::move(*values));
-        }
-        std::optional<secs::ii::Item> operator()(const TplU4 &v) const noexcept {
-            auto values = values_to_literals<std::uint32_t>(v.values);
-            if (!values.has_value()) {
-                return std::nullopt;
-            }
-            return secs::ii::Item::u4(std::move(*values));
-        }
-        std::optional<secs::ii::Item> operator()(const TplU8 &v) const noexcept {
-            auto values = values_to_literals<std::uint64_t>(v.values);
-            if (!values.has_value()) {
-                return std::nullopt;
-            }
-            return secs::ii::Item::u8(std::move(*values));
-        }
-
-        std::optional<secs::ii::Item> operator()(const TplF4 &v) const noexcept {
-            auto values = values_to_literals<float>(v.values);
-            if (!values.has_value()) {
-                return std::nullopt;
-            }
-            return secs::ii::Item::f4(std::move(*values));
-        }
-        std::optional<secs::ii::Item> operator()(const TplF8 &v) const noexcept {
-            auto values = values_to_literals<double>(v.values);
-            if (!values.has_value()) {
-                return std::nullopt;
-            }
-            return secs::ii::Item::f8(std::move(*values));
-        }
-    };
-
-    return Visitor::run(item);
-}
-
 } // namespace
 
 const std::error_category &parser_error_category() noexcept {
@@ -961,22 +825,16 @@ std::optional<Condition> Parser::parse_condition() noexcept {
 
     // 可选的 ==<Item>（期望值匹配）
     if (match(TokenType::Equals)) {
-        auto tpl = parse_item();
-        if (!tpl) {
+        auto expected = parse_item();
+        if (!expected) {
             return std::nullopt;
         }
 
-        // 约束：条件期望值当前仅支持“纯字面量”，不允许占位符（避免在匹配阶段
-        // 引入隐式上下文依赖）。
-        if (item_has_var(*tpl)) {
+        // 约束：条件期望值只允许“纯字面量”，不允许占位符（避免在匹配阶段引入隐式
+        // 上下文依赖）。
+        if (item_has_var(*expected)) {
             error(parser_errc::invalid_condition,
                   "placeholders are not allowed in expected item");
-            return std::nullopt;
-        }
-
-        auto expected = tpl_to_ii_item(*tpl);
-        if (!expected.has_value()) {
-            error(parser_errc::invalid_condition, "invalid expected item");
             return std::nullopt;
         }
         cond.expected = std::move(*expected);

@@ -1215,6 +1215,109 @@ static void test_sml_runtime_basic(void) {
     secs_sml_runtime_destroy(rt);
 }
 
+static void test_sml_runtime_placeholders(void) {
+    secs_sml_runtime_t *rt = NULL;
+    expect_ok("secs_sml_runtime_create(placeholder)",
+              secs_sml_runtime_create(&rt));
+
+    /*
+     * 占位符消息：
+     * - req 的 body 依赖变量 MDLN（当前 C API 不提供变量注入接口，因此“取模板”
+     *   应报错）；
+     * - 但 if(req)->rsp 的条件匹配只依赖 S/F，不应受影响。
+     */
+    const char *sml = "req: S1F1 W <A MDLN>.\n"
+                      "rsp: S1F2 <L <A \"OK\">>.\n"
+                      "if (req) rsp.\n";
+    expect_ok("secs_sml_runtime_load(placeholder)",
+              secs_sml_runtime_load(rt, sml, strlen(sml)));
+
+    /* rsp：不含占位符，应能正常取到 SECS-II body bytes */
+    {
+        uint8_t *body = NULL;
+        size_t body_n = 0;
+        expect_ok("secs_sml_runtime_get_message_body_by_name(rsp)",
+                  secs_sml_runtime_get_message_body_by_name(
+                      rt, "rsp", &body, &body_n, NULL, NULL, NULL));
+        if (body == NULL || body_n == 0) {
+            fprintf(stderr, "FAIL: rsp body should not be empty\n");
+            ++g_failures;
+        }
+        secs_free(body);
+    }
+
+    /* req：含占位符，当前应返回 sml.render/missing_variable（value=1） */
+    {
+        uint8_t *body = NULL;
+        size_t body_n = 0;
+        secs_error_t err = secs_sml_runtime_get_message_body_by_name(
+            rt, "req", &body, &body_n, NULL, NULL, NULL);
+        expect_err("secs_sml_runtime_get_message_body_by_name(req placeholder)",
+                   err);
+        if (err.category == NULL || strcmp(err.category, "sml.render") != 0 ||
+            err.value != 1) {
+            failf("req placeholder error should be sml.render/missing_variable",
+                  err);
+        }
+        if (body != NULL || body_n != 0) {
+            fprintf(stderr,
+                    "FAIL: req placeholder expected (body=NULL, body_n=0)\n");
+            ++g_failures;
+            if (body) {
+                secs_free(body);
+            }
+        }
+    }
+
+    /* 条件匹配不应受占位符影响 */
+    {
+        secs_ii_item_t *req_item = NULL;
+        expect_ok("secs_ii_item_create_list(req_item)",
+                  secs_ii_item_create_list(&req_item));
+
+        uint8_t *req_body = NULL;
+        size_t req_body_n = 0;
+        expect_ok("secs_ii_encode(req_item)",
+                  secs_ii_encode(req_item, &req_body, &req_body_n));
+        secs_ii_item_destroy(req_item);
+
+        char *out_name = NULL;
+        expect_ok("secs_sml_runtime_match_response(placeholder req)",
+                  secs_sml_runtime_match_response(
+                      rt, 1, 1, req_body, req_body_n, &out_name));
+        if (!out_name || strcmp(out_name, "rsp") != 0) {
+            fprintf(stderr, "FAIL: match_response expected rsp\n");
+            ++g_failures;
+        }
+        if (out_name) {
+            secs_free(out_name);
+        }
+        secs_free(req_body);
+    }
+
+    secs_sml_runtime_destroy(rt);
+
+    /*
+     * 负例：条件期望值中包含占位符应被解析器拒绝（sml.parser/invalid_condition=7）。
+     */
+    {
+        secs_sml_runtime_t *bad_rt = NULL;
+        expect_ok("secs_sml_runtime_create(bad placeholder expected)",
+                  secs_sml_runtime_create(&bad_rt));
+        const char *bad = "a: S1F1 <L>.\n"
+                          "rsp: S1F2 <L>.\n"
+                          "if (a(1)==<A MDLN>) rsp.\n";
+        secs_error_t err = secs_sml_runtime_load(bad_rt, bad, strlen(bad));
+        expect_err("secs_sml_runtime_load(bad placeholder expected)", err);
+        if (err.category == NULL || strcmp(err.category, "sml.parser") != 0 ||
+            err.value != 7) {
+            failf("bad placeholder expected should be sml.parser/invalid_condition",
+                  err);
+        }
+        secs_sml_runtime_destroy(bad_rt);
+    }
+}
+
 struct open_args {
     secs_hsms_session_t *sess;
     secs_hsms_connection_t **io_conn;
@@ -2226,6 +2329,7 @@ int main(void) {
     test_ii_encode_decode_and_malicious();
     test_ii_all_types_and_views();
     test_sml_runtime_basic();
+    test_sml_runtime_placeholders();
     test_hsms_open_passive_ip_invalid_cases();
     test_hsms_protocol_loopback();
 
