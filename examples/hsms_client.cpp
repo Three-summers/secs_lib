@@ -7,9 +7,9 @@
  */
 
 #include <secs/hsms/session.hpp>
-#include <secs/ii/codec.hpp>
 #include <secs/ii/item.hpp>
 #include <secs/protocol/session.hpp>
+#include <secs/utils/protocol_helpers.hpp>
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
@@ -69,33 +69,27 @@ asio::awaitable<void> client_session(hsms::Session &session,
         std::cout << "\n[客户端] 发送 S1F1 (Are You There)...\n";
 
         ii::Item request_item = ii::Item::list({}); // 空 List
-        std::vector<core::byte> body;
-        ii::encode(request_item, body);
-
-        auto [req_ec, reply] = co_await proto.async_request(
+        auto [req_ec, out] = co_await secs::utils::async_request_decoded(
+            proto,
             1, // Stream（流号）
             1, // Function（功能号）
-            core::bytes_view{body.data(), body.size()});
+            request_item);
 
         if (req_ec) {
-            std::cout << "[客户端] S1F1 失败: " << req_ec.message() << "\n";
+            if (out.reply.function != 0) {
+                std::cout << "[客户端] 收到 S1F2 响应，但解码失败: "
+                          << req_ec.message() << "\n";
+            } else {
+                std::cout << "[客户端] S1F1 失败: " << req_ec.message() << "\n";
+                co_return;
+            }
         } else {
             std::cout << "[客户端] 收到 S1F2 响应\n";
+        }
 
-            // 解码响应
-            if (!reply.body.empty()) {
-                ii::Item decoded{ii::Item::ascii("")};
-                std::size_t consumed = 0;
-                auto dec_ec = ii::decode_one(
-                    core::bytes_view{reply.body.data(), reply.body.size()},
-                    decoded,
-                    consumed);
-                if (!dec_ec) {
-                    if (auto *ascii = decoded.get_if<ii::ASCII>()) {
-                        std::cout << "[客户端] 响应内容: \"" << ascii->value
-                                  << "\"\n";
-                    }
-                }
+        if (out.decoded.has_value()) {
+            if (auto *ascii = out.decoded->item.get_if<ii::ASCII>()) {
+                std::cout << "[客户端] 响应内容: \"" << ascii->value << "\"\n";
             }
         }
     }
@@ -110,19 +104,17 @@ asio::awaitable<void> client_session(hsms::Session &session,
                             ii::Item::list({
                                 // PARAMS（参数列表，空）
                             })});
-
-        std::vector<core::byte> body;
-        ii::encode(command, body);
-
-        auto [req_ec, reply] = co_await proto.async_request(
+        auto [req_ec, out] = co_await secs::utils::async_request_decoded(
+            proto,
             2,  // Stream（流号）
             41, // Function（功能号）
-            core::bytes_view{body.data(), body.size()});
+            command);
 
         if (req_ec) {
             std::cout << "[客户端] S2F41 失败: " << req_ec.message() << "\n";
         } else {
             std::cout << "[客户端] 收到 S2F42 响应\n";
+            (void)out;
         }
     }
 
@@ -137,13 +129,11 @@ asio::awaitable<void> client_session(hsms::Session &session,
                                 // RPT（空报告）
                             })});
 
-        std::vector<core::byte> body;
-        ii::encode(event, body);
-
-        ec = co_await proto.async_send(
+        ec = co_await secs::utils::async_send_item(
+            proto,
             6,  // Stream（流号）
             11, // Function（功能号）
-            core::bytes_view{body.data(), body.size()});
+            event);
         if (ec) {
             std::cout << "[客户端] S6F11 发送失败: " << ec.message() << "\n";
         } else {

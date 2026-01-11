@@ -4,8 +4,8 @@
  */
 
 #include <secs/hsms/message.hpp>
-#include <secs/ii/codec.hpp>
 #include <secs/ii/item.hpp>
+#include <secs/utils/ii_helpers.hpp>
 
 #include <cstdint>
 #include <iomanip>
@@ -137,8 +137,11 @@ int main() {
     // 5. S1F1 数据消息（Are You There）- 空 List
     {
         ii::Item request = ii::Item::list({});
-        std::vector<core::byte> body;
-        ii::encode(request, body);
+        auto [enc_ec, body] = secs::utils::encode_item(request);
+        if (enc_ec) {
+            std::cerr << "SECS-II encode 失败: " << enc_ec.message() << "\n";
+            return 1;
+        }
 
         auto msg = hsms::make_data_message(
             0x0001,  // Session ID
@@ -156,8 +159,11 @@ int main() {
     // 6. S1F2 数据消息（响应）- ASCII 字符串
     {
         ii::Item response = ii::Item::ascii("OK");
-        std::vector<core::byte> body;
-        ii::encode(response, body);
+        auto [enc_ec, body] = secs::utils::encode_item(response);
+        if (enc_ec) {
+            std::cerr << "SECS-II encode 失败: " << enc_ec.message() << "\n";
+            return 1;
+        }
 
         auto msg = hsms::make_data_message(
             0x0001,  // Session ID
@@ -178,8 +184,11 @@ int main() {
             ii::Item::ascii("START"),  // RCMD
             ii::Item::list({})         // PARAMS (空)
         });
-        std::vector<core::byte> body;
-        ii::encode(command, body);
+        auto [enc_ec, body] = secs::utils::encode_item(command);
+        if (enc_ec) {
+            std::cerr << "SECS-II encode 失败: " << enc_ec.message() << "\n";
+            return 1;
+        }
 
         auto msg = hsms::make_data_message(
             0x0001,  // Session ID
@@ -201,8 +210,11 @@ int main() {
             ii::Item::u4({100}),    // CEID
             ii::Item::list({})      // RPT (空)
         });
-        std::vector<core::byte> body;
-        ii::encode(event, body);
+        auto [enc_ec, body] = secs::utils::encode_item(event);
+        if (enc_ec) {
+            std::cerr << "SECS-II encode 失败: " << enc_ec.message() << "\n";
+            return 1;
+        }
 
         auto msg = hsms::make_data_message(
             0x0001,  // Session ID

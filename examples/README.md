@@ -207,8 +207,8 @@ ctest --test-dir build -R hsms_pipe_examples --output-on-failure
 演示如何使用 SECS-II 编解码 API：
 
 ```cpp
-#include <secs/ii/codec.hpp>
 #include <secs/ii/item.hpp>
+#include <secs/utils/ii_helpers.hpp>
 
 using namespace secs::ii;
 
@@ -217,17 +217,16 @@ int main() {
   Item msg = Item::ascii("Hello SECS");
 
   // 编码
-  std::vector<byte> encoded;
-  auto ec = encode(msg, encoded);
-  if (ec) return 1;
+  auto [enc_ec, encoded] = secs::utils::encode_item(msg);
+  if (enc_ec) return 1;
 
   // 解码
-  Item decoded{Item::ascii("")};
-  std::size_t consumed;
-  ec = decode_one(bytes_view{encoded.data(), encoded.size()}, decoded, consumed);
+  auto [dec_ec, decoded] =
+      secs::utils::decode_one_item(bytes_view{encoded.data(), encoded.size()});
+  if (dec_ec) return 1;
 
   // 访问结果
-  auto* ascii_ptr = decoded.get_if<ASCII>();
+  auto* ascii_ptr = decoded.item.get_if<ASCII>();
   if (ascii_ptr) {
     std::cout << ascii_ptr->value << "\n";
   }
@@ -322,12 +321,9 @@ auto& list = std::get<List>(item.storage());
 ### 编解码
 
 ```cpp
-// 编码
-std::vector<byte> out;
-encode(item, out);
+// 编码（返回 {ec, bytes}）
+auto [enc_ec, out] = secs::utils::encode_item(item);
 
-// 解码
-Item result{Item::ascii("")};
-std::size_t consumed;
-decode_one(input_bytes, result, consumed);
+// 解码（返回 {ec, {item/consumed/fully_consumed}}）
+auto [dec_ec, result] = secs::utils::decode_one_item(input_bytes);
 ```

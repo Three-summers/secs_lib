@@ -17,8 +17,8 @@
 #include "secs/hsms/connection.hpp"
 #include "secs/hsms/message.hpp"
 #include "secs/hsms/session.hpp"
-#include "secs/ii/codec.hpp"
 #include "secs/ii/item.hpp"
+#include "secs/utils/ii_helpers.hpp"
 #
 #include <asio/as_tuple.hpp>
 #include <asio/co_spawn.hpp>
@@ -154,23 +154,22 @@ asio::awaitable<int> run(std::uint16_t device_id) {
 #
     // 验证请求体（示例用固定 Item；不一致也可继续回显，但单测会要求一致）。
     const auto expected = make_expected_item();
-    secs::ii::Item decoded = secs::ii::Item::binary({});
-    std::size_t consumed = 0;
-    if (auto dec_ec = secs::ii::decode_one(
-            bytes_view{req.body.data(), req.body.size()}, decoded, consumed);
-        dec_ec) {
+    auto [dec_ec, decoded] = secs::utils::decode_one_item(
+        bytes_view{req.body.data(), req.body.size()});
+    if (dec_ec) {
         std::cerr << "[pipe_server] 请求 body 解码失败: " << dec_ec.message()
                   << "\n";
         session.stop();
         co_return 4;
     }
-    if (consumed != req.body.size()) {
-        std::cerr << "[pipe_server] 请求 body 存在未消费尾部: consumed=" << consumed
+    if (!decoded.fully_consumed) {
+        std::cerr << "[pipe_server] 请求 body 存在未消费尾部: consumed="
+                  << decoded.consumed
                   << " total=" << req.body.size() << "\n";
         session.stop();
         co_return 5;
     }
-    if (decoded != expected) {
+    if (decoded.item != expected) {
         std::cerr << "[pipe_server] 请求 Item 与预期不一致\n";
         session.stop();
         co_return 6;
@@ -220,4 +219,3 @@ int main(int argc, char **argv) {
     io.run();
     return rc;
 }
-

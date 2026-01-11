@@ -25,11 +25,11 @@
 #include "secs/core/error.hpp"
 #include "secs/core/event.hpp"
 #include "secs/core/log.hpp"
-#include "secs/ii/codec.hpp"
 #include "secs/ii/item.hpp"
 #include "secs/protocol/session.hpp"
 #include "secs/secs1/link.hpp"
 #include "secs/secs1/state_machine.hpp"
+#include "secs/utils/protocol_helpers.hpp"
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
@@ -78,13 +78,6 @@ struct DeviceState final {
     };
 };
 
-static std::pair<std::error_code, std::vector<byte>>
-encode_item(const Item &item) {
-    std::vector<byte> out;
-    const auto ec = secs::ii::encode(item, out);
-    return {ec, std::move(out)};
-}
-
 // 解析请求 body：期望是 U1，取第一个元素作为 “group id”。
 static std::pair<std::error_code, std::uint8_t>
 decode_u1_first(bytes_view body) {
@@ -92,14 +85,15 @@ decode_u1_first(bytes_view body) {
         return {std::error_code{}, 0};
     }
 
-    Item decoded(Item::list({}));
-    std::size_t consumed = 0;
-    const auto ec = secs::ii::decode_one(body, decoded, consumed);
+    auto [ec, decoded] = secs::utils::decode_one_item(body);
     if (ec) {
         return {ec, 0};
     }
+    if (!decoded.fully_consumed) {
+        return {make_error_code(errc::invalid_argument), 0};
+    }
 
-    const auto *u1 = decoded.get_if<secs::ii::U1>();
+    const auto *u1 = decoded.item.get_if<secs::ii::U1>();
     if (!u1 || u1->values.empty()) {
         return {make_error_code(errc::invalid_argument), 0};
     }
@@ -117,16 +111,15 @@ static std::error_code decode_and_print_item(const char *title,
         return {};
     }
 
-    Item decoded(Item::list({}));
-    std::size_t consumed = 0;
-    const auto ec = secs::ii::decode_one(
-        bytes_view{msg.body.data(), msg.body.size()}, decoded, consumed);
+    auto [ec, decoded] = secs::utils::decode_one_item(
+        bytes_view{msg.body.data(), msg.body.size()});
     if (ec) {
         std::cout << "  decode_one failed: " << ec.message() << "\n";
         return ec;
     }
 
-    if (const auto *list = decoded.get_if<List>(); list && list->size() == 2) {
+    if (const auto *list = decoded.item.get_if<List>();
+        list && list->size() == 2) {
         if (const auto *a0 = (*list)[0].get_if<secs::ii::ASCII>()) {
             std::cout << "  [0] ASCII: " << a0->value << "\n";
         }
@@ -140,9 +133,9 @@ static std::error_code decode_and_print_item(const char *title,
             }
             std::cout << "\n";
         }
-    } else if (const auto *ascii = decoded.get_if<secs::ii::ASCII>()) {
+    } else if (const auto *ascii = decoded.item.get_if<secs::ii::ASCII>()) {
         std::cout << "  ASCII: " << ascii->value << "\n";
-    } else if (const auto *f4 = decoded.get_if<secs::ii::F4>()) {
+    } else if (const auto *f4 = decoded.item.get_if<secs::ii::F4>()) {
         std::cout << "  F4 count=" << f4->values.size() << " values:";
         for (float v : f4->values) {
             std::cout << " " << v;
@@ -203,9 +196,7 @@ static asio::awaitable<void> demo_host_requests_equipment() {
                     Item::ascii("project: " + state.project_id),
                     Item::ascii("version: " + state.version_id),
                 });
-
-                auto [ec, body] = encode_item(rsp_item);
-                co_return HandlerResult{ec, std::move(body)};
+                co_return secs::utils::make_handler_result(rsp_item);
             }
             case 3: {
                 auto [dec_ec, group] = decode_u1_first(
@@ -227,9 +218,7 @@ static asio::awaitable<void> demo_host_requests_equipment() {
                     Item::ascii("01H1"),
                     Item::f4(std::move(values)),
                 });
-
-                auto [ec, body] = encode_item(rsp_item);
-                co_return HandlerResult{ec, std::move(body)};
+                co_return secs::utils::make_handler_result(rsp_item);
             }
             default:
                 co_return HandlerResult{make_error_code(errc::invalid_argument),
@@ -258,8 +247,12 @@ static asio::awaitable<void> demo_host_requests_equipment() {
     // Host -> Equipment：S1F3(W=1) 请求（body=U1{group}）
     for (std::uint8_t group : {static_cast<std::uint8_t>(0),
                                static_cast<std::uint8_t>(1)}) {
-        std::vector<byte> req_body;
-        (void)secs::ii::encode(Item::u1({group}), req_body);
+        auto [enc_ec, req_body] = secs::utils::encode_item(Item::u1({group}));
+        if (enc_ec) {
+            std::cout << "Host S1F3 encode(group=" << static_cast<int>(group)
+                      << ") failed: " << enc_ec.message() << "\n";
+            continue;
+        }
 
         auto [ec, rsp] = co_await host.async_request(
             1,
@@ -316,8 +309,7 @@ static asio::awaitable<void> demo_equipment_requests_host() {
         [](const DataMessage &req) -> asio::awaitable<HandlerResult> {
             // 示例：回一个简单的 ASCII("OK")（secondary S2F2）
             (void)req;
-            auto [ec, body] = encode_item(Item::ascii("OK"));
-            co_return HandlerResult{ec, std::move(body)};
+            co_return secs::utils::make_handler_result(Item::ascii("OK"));
         });
 
     // Host 侧常驻接收循环（负责接收 Equipment primary 并回包）。
@@ -329,19 +321,22 @@ static asio::awaitable<void> demo_equipment_requests_host() {
 
     // Equipment 主动发起 request：S2F1(W=1)
     {
-        std::vector<byte> req_body;
-        (void)secs::ii::encode(Item::ascii("ping"), req_body);
-
-        auto [ec, rsp] = co_await equip.async_request(
-            2,
-            1,
-            bytes_view{req_body.data(), req_body.size()},
-            1s);
-        if (ec) {
-            std::cout << "Equipment S2F1 request failed: " << ec.message()
+        auto [enc_ec, req_body] = secs::utils::encode_item(Item::ascii("ping"));
+        if (enc_ec) {
+            std::cout << "Equipment S2F1 encode failed: " << enc_ec.message()
                       << "\n";
         } else {
-            (void)decode_and_print_item("[Equipment] recv", rsp);
+            auto [ec, rsp] = co_await equip.async_request(
+                2,
+                1,
+                bytes_view{req_body.data(), req_body.size()},
+                1s);
+            if (ec) {
+                std::cout << "Equipment S2F1 request failed: " << ec.message()
+                          << "\n";
+            } else {
+                (void)decode_and_print_item("[Equipment] recv", rsp);
+            }
         }
     }
 
@@ -371,4 +366,3 @@ int main() {
     ioc.run();
     return 0;
 }
-

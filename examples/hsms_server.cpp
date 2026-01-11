@@ -7,9 +7,9 @@
  */
 
 #include <secs/hsms/session.hpp>
-#include <secs/ii/codec.hpp>
 #include <secs/ii/item.hpp>
 #include <secs/protocol/session.hpp>
+#include <secs/utils/protocol_helpers.hpp>
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
@@ -53,15 +53,12 @@ asio::awaitable<void> handle_session(hsms::Session &,
                       << " (W=" << (msg.w_bit ? 1 : 0) << ")\n";
 
             // 解码 SECS-II 数据（仅演示：失败不影响回包）
-            if (!msg.body.empty()) {
-                ii::Item decoded{ii::Item::ascii("")};
-                std::size_t consumed = 0;
-                auto dec_ec = ii::decode_one(
-                    core::bytes_view{msg.body.data(), msg.body.size()},
-                    decoded,
-                    consumed);
-
-                if (!dec_ec) {
+            {
+                auto [dec_ec, decoded_opt] =
+                    secs::utils::decode_one_item_if_any(
+                        core::bytes_view{msg.body.data(), msg.body.size()});
+                if (!dec_ec && decoded_opt.has_value()) {
+                    const auto &decoded = decoded_opt->item;
                     if (auto *ascii = decoded.get_if<ii::ASCII>()) {
                         std::cout << "[服务器] 数据内容 (ASCII): \"" << ascii->value
                                   << "\"\n";
@@ -76,12 +73,7 @@ asio::awaitable<void> handle_session(hsms::Session &,
             }
 
             // 构造响应：S{n}F{n+1}
-            ii::Item reply_item = ii::Item::ascii("OK");
-            std::vector<core::byte> reply_body;
-            ii::encode(reply_item, reply_body);
-
-            co_return protocol::HandlerResult{std::error_code{},
-                                              std::move(reply_body)};
+            co_return secs::utils::make_handler_result(ii::Item::ascii("OK"));
         });
 
     co_await proto.async_run();

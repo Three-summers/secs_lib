@@ -4,8 +4,8 @@
  */
 
 #include <secs/hsms/message.hpp>
-#include <secs/ii/codec.hpp>
 #include <secs/ii/item.hpp>
+#include <secs/utils/ii_helpers.hpp>
 
 #include <cstdint>
 #include <iomanip>
@@ -270,19 +270,23 @@ int main() {
     }
 
     // 2. S1F1
-    {
-        std::cout << COLOR_LABEL << "示例 2：S1F1（Are You There）- 空 List\n" << COLOR_RESET;
-        std::cout << "代码：\n";
-        std::cout << "  ii::Item request = ii::Item::list({});\n";
-        std::cout << "  make_data_message(0x0001, 1, 1, true, 0x00000003, body)\n";
-
-        ii::Item request = ii::Item::list({});
-        std::vector<core::byte> body;
-        ii::encode(request, body);
-
-        auto msg = hsms::make_data_message(
-            0x0001, 1, 1, true, 0x00000003,
-            core::bytes_view{body.data(), body.size()});
+	    {
+	        std::cout << COLOR_LABEL << "示例 2：S1F1（Are You There）- 空 List\n" << COLOR_RESET;
+	        std::cout << "代码：\n";
+	        std::cout << "  ii::Item request = ii::Item::list({});\n";
+	        std::cout << "  auto [enc_ec, body] = secs::utils::encode_item(request);\n";
+	        std::cout << "  make_data_message(0x0001, 1, 1, true, 0x00000003, body)\n";
+	
+	        ii::Item request = ii::Item::list({});
+	        auto [enc_ec, body] = secs::utils::encode_item(request);
+	        if (enc_ec) {
+	            std::cerr << "SECS-II encode failed: " << enc_ec.message() << "\n";
+	            return 1;
+	        }
+	
+	        auto msg = hsms::make_data_message(
+	            0x0001, 1, 1, true, 0x00000003,
+	            core::bytes_view{body.data(), body.size()});
 
         std::vector<core::byte> frame;
         hsms::encode_frame(msg, frame);
@@ -292,19 +296,23 @@ int main() {
     }
 
     // 3. S1F2
-    {
-        std::cout << COLOR_LABEL << "示例 3：S1F2（响应）- ASCII \"OK\"\n" << COLOR_RESET;
-        std::cout << "代码：\n";
-        std::cout << "  ii::Item response = ii::Item::ascii(\"OK\");\n";
-        std::cout << "  make_data_message(0x0001, 1, 2, false, 0x00000003, body)\n";
-
-        ii::Item response = ii::Item::ascii("OK");
-        std::vector<core::byte> body;
-        ii::encode(response, body);
-
-        auto msg = hsms::make_data_message(
-            0x0001, 1, 2, false, 0x00000003,
-            core::bytes_view{body.data(), body.size()});
+	    {
+	        std::cout << COLOR_LABEL << "示例 3：S1F2（响应）- ASCII \"OK\"\n" << COLOR_RESET;
+	        std::cout << "代码：\n";
+	        std::cout << "  ii::Item response = ii::Item::ascii(\"OK\");\n";
+	        std::cout << "  auto [enc_ec, body] = secs::utils::encode_item(response);\n";
+	        std::cout << "  make_data_message(0x0001, 1, 2, false, 0x00000003, body)\n";
+	
+	        ii::Item response = ii::Item::ascii("OK");
+	        auto [enc_ec, body] = secs::utils::encode_item(response);
+	        if (enc_ec) {
+	            std::cerr << "SECS-II encode failed: " << enc_ec.message() << "\n";
+	            return 1;
+	        }
+	
+	        auto msg = hsms::make_data_message(
+	            0x0001, 1, 2, false, 0x00000003,
+	            core::bytes_view{body.data(), body.size()});
 
         std::vector<core::byte> frame;
         hsms::encode_frame(msg, frame);
@@ -314,24 +322,28 @@ int main() {
     }
 
     // 4. S2F41
-    {
-        std::cout << COLOR_LABEL << "示例 4：S2F41（Host Command）- 嵌套 List\n" << COLOR_RESET;
-        std::cout << "代码：\n";
-        std::cout << "  ii::Item command = ii::Item::list({\n";
-        std::cout << "      ii::Item::ascii(\"START\"),\n";
-        std::cout << "      ii::Item::list({})\n";
-        std::cout << "  });\n";
-
-        ii::Item command = ii::Item::list({
-            ii::Item::ascii("START"),
-            ii::Item::list({})
-        });
-        std::vector<core::byte> body;
-        ii::encode(command, body);
-
-        auto msg = hsms::make_data_message(
-            0x0001, 2, 41, true, 0x00000004,
-            core::bytes_view{body.data(), body.size()});
+	    {
+	        std::cout << COLOR_LABEL << "示例 4：S2F41（Host Command）- 嵌套 List\n" << COLOR_RESET;
+	        std::cout << "代码：\n";
+	        std::cout << "  ii::Item command = ii::Item::list({\n";
+	        std::cout << "      ii::Item::ascii(\"START\"),\n";
+	        std::cout << "      ii::Item::list({})\n";
+	        std::cout << "  });\n";
+	        std::cout << "  auto [enc_ec, body] = secs::utils::encode_item(command);\n";
+	
+	        ii::Item command = ii::Item::list({
+	            ii::Item::ascii("START"),
+	            ii::Item::list({})
+	        });
+	        auto [enc_ec, body] = secs::utils::encode_item(command);
+	        if (enc_ec) {
+	            std::cerr << "SECS-II encode failed: " << enc_ec.message() << "\n";
+	            return 1;
+	        }
+	
+	        auto msg = hsms::make_data_message(
+	            0x0001, 2, 41, true, 0x00000004,
+	            core::bytes_view{body.data(), body.size()});
 
         std::vector<core::byte> frame;
         hsms::encode_frame(msg, frame);

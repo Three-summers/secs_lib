@@ -16,11 +16,11 @@
 
 #include <secs/core/common.hpp>
 #include <secs/hsms/message.hpp>
-#include <secs/ii/codec.hpp>
 #include <secs/ii/item.hpp>
 #include <secs/secs1/block.hpp>
 #include <secs/utils/hex.hpp>
 #include <secs/utils/hsms_dump.hpp>
+#include <secs/utils/ii_helpers.hpp>
 #include <secs/utils/item_dump.hpp>
 #include <secs/utils/secs1_dump.hpp>
 
@@ -138,13 +138,10 @@ void demo_hsms_frame_dump() {
     std::cout << "====================\n";
 
     // 构造一个 S1F2 的 HSMS Data Message，body 是 SECS-II: A \"OK\"。
-    std::vector<core::byte> secs2_body;
-    {
-        const auto ec = ii::encode(ii::Item::ascii("OK"), secs2_body);
-        if (ec) {
-            std::cerr << "SECS-II encode 失败: " << ec.message() << "\n";
-            return;
-        }
+    auto [enc_ec, secs2_body] = secs::utils::encode_item(ii::Item::ascii("OK"));
+    if (enc_ec) {
+        std::cerr << "SECS-II encode 失败: " << enc_ec.message() << "\n";
+        return;
     }
 
     const auto msg = hsms::make_data_message(
@@ -196,13 +193,10 @@ void demo_secs1_block_dump() {
     std::cout << "示例 2：SECS-I 单 block dump（含 SECS-II 解码）\n";
     std::cout << "====================\n";
 
-    std::vector<core::byte> secs2_body;
-    {
-        const auto ec = ii::encode(ii::Item::ascii("OK"), secs2_body);
-        if (ec) {
-            std::cerr << "SECS-II encode 失败: " << ec.message() << "\n";
-            return;
-        }
+    auto [enc_ec, secs2_body] = secs::utils::encode_item(ii::Item::ascii("OK"));
+    if (enc_ec) {
+        std::cerr << "SECS-II encode 失败: " << enc_ec.message() << "\n";
+        return;
     }
 
     secs::secs1::Header hdr{};
@@ -249,13 +243,10 @@ void demo_secs1_multiblock_reassemble() {
     }
     const ii::Item big_item = ii::Item::binary(raw_binary);
 
-    std::vector<core::byte> secs2_body;
-    {
-        const auto ec = ii::encode(big_item, secs2_body);
-        if (ec) {
-            std::cerr << "SECS-II encode 失败: " << ec.message() << "\n";
-            return;
-        }
+    auto [enc_ec, secs2_body] = secs::utils::encode_item(big_item);
+    if (enc_ec) {
+        std::cerr << "SECS-II encode 失败: " << enc_ec.message() << "\n";
+        return;
     }
 
     secs::secs1::Header base{};

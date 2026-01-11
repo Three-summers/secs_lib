@@ -156,6 +156,7 @@ target_link_libraries(secs_sml PUBLIC secs_ii secs_core)
 
 add_library(secs_utils
   src/utils/hex.cpp
+  src/utils/ii_helpers.cpp
   src/utils/item_dump.cpp
   src/utils/hsms_dump.cpp
   src/utils/secs1_dump.cpp

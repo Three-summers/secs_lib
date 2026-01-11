@@ -4,7 +4,7 @@ set(_secs_example_targets)
 
 # SECS-II 编解码简单示例
 add_executable(secs2_simple secs2_simple.cpp)
-target_link_libraries(secs2_simple PRIVATE secs::ii secs::core)
+target_link_libraries(secs2_simple PRIVATE secs::utils secs::ii secs::core)
 list(APPEND _secs_example_targets secs2_simple)
 
 # C API（C ABI）SECS-II 编解码示例（源文件为 C，但链接需使用 C++ 链接器）
@@ -60,12 +60,12 @@ list(APPEND _secs_example_targets hsms_client)
 
 # HSMS 16进制报文示例
 add_executable(hsms_hex_dump hsms_hex_dump.cpp)
-target_link_libraries(hsms_hex_dump PRIVATE secs::hsms secs::ii secs::core)
+target_link_libraries(hsms_hex_dump PRIVATE secs::utils secs::hsms secs::ii secs::core)
 list(APPEND _secs_example_targets hsms_hex_dump)
 
 # HSMS 帧构建可视化示例
 add_executable(hsms_frame_builder_visual hsms_frame_builder_visual.cpp)
-target_link_libraries(hsms_frame_builder_visual PRIVATE secs::hsms secs::ii secs::core)
+target_link_libraries(hsms_frame_builder_visual PRIVATE secs::utils secs::hsms secs::ii secs::core)
 list(APPEND _secs_example_targets hsms_frame_builder_visual)
 
 # 二进制报文 dump 工具示例（secs::utils）
@@ -108,11 +108,11 @@ list(APPEND _secs_example_targets smlx_active_send_example)
 # HSMS（pipe）示例：通过 stdin/stdout 承载 HSMS 帧（仅在 UNIX 可用，依赖 asio::posix）
 if(UNIX)
   add_executable(hsms_pipe_server hsms_pipe_server.cpp)
-  target_link_libraries(hsms_pipe_server PRIVATE secs::hsms secs::ii secs::core)
+  target_link_libraries(hsms_pipe_server PRIVATE secs::utils secs::hsms secs::ii secs::core)
   list(APPEND _secs_example_targets hsms_pipe_server)
 
   add_executable(hsms_pipe_client hsms_pipe_client.cpp)
-  target_link_libraries(hsms_pipe_client PRIVATE secs::hsms secs::ii secs::core)
+  target_link_libraries(hsms_pipe_client PRIVATE secs::utils secs::hsms secs::ii secs::core)
   list(APPEND _secs_example_targets hsms_pipe_client)
 endif()
 

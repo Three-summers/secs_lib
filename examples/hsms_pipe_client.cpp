@@ -17,8 +17,8 @@
 #include "secs/hsms/connection.hpp"
 #include "secs/hsms/message.hpp"
 #include "secs/hsms/session.hpp"
-#include "secs/ii/codec.hpp"
 #include "secs/ii/item.hpp"
+#include "secs/utils/ii_helpers.hpp"
 #
 #include <asio/as_tuple.hpp>
 #include <asio/co_spawn.hpp>
@@ -152,8 +152,8 @@ asio::awaitable<int> run(std::uint16_t device_id) {
     }
 #
     const auto item = make_test_item();
-    std::vector<byte> body;
-    if (auto enc_ec = secs::ii::encode(item, body); enc_ec) {
+    auto [enc_ec, body] = secs::utils::encode_item(item);
+    if (enc_ec) {
         std::cerr << "[pipe_client] SECS-II 编码失败: " << enc_ec.message()
                   << "\n";
         session.stop();
@@ -177,23 +177,22 @@ asio::awaitable<int> run(std::uint16_t device_id) {
         co_return 6;
     }
 #
-    secs::ii::Item decoded = secs::ii::Item::binary({});
-    std::size_t consumed = 0;
-    if (auto dec_ec = secs::ii::decode_one(
-            bytes_view{rsp.body.data(), rsp.body.size()}, decoded, consumed);
-        dec_ec) {
+    auto [dec_ec, decoded] = secs::utils::decode_one_item(
+        bytes_view{rsp.body.data(), rsp.body.size()});
+    if (dec_ec) {
         std::cerr << "[pipe_client] 响应 body 解码失败: " << dec_ec.message()
                   << "\n";
         session.stop();
         co_return 7;
     }
-    if (consumed != rsp.body.size()) {
-        std::cerr << "[pipe_client] 响应 body 存在未消费尾部: consumed=" << consumed
+    if (!decoded.fully_consumed) {
+        std::cerr << "[pipe_client] 响应 body 存在未消费尾部: consumed="
+                  << decoded.consumed
                   << " total=" << rsp.body.size() << "\n";
         session.stop();
         co_return 8;
     }
-    if (decoded != item) {
+    if (decoded.item != item) {
         std::cerr << "[pipe_client] 响应 Item 与请求不一致\n";
         session.stop();
         co_return 9;
@@ -228,4 +227,3 @@ int main(int argc, char **argv) {
     io.run();
     return rc;
 }
-

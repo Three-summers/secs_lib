@@ -11,9 +11,9 @@
 
 #include "vendor_messages.hpp"
 
-#include "secs/ii/codec.hpp"
 #include "secs/protocol/router.hpp"
 #include "secs/protocol/typed_handler.hpp"
+#include "secs/utils/ii_helpers.hpp"
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
@@ -92,8 +92,12 @@ void simulate_message_handling(Router &router) {
 
             // 编码请求
             auto request_item = S1F1Request{}.to_item();
-            std::vector<byte> request_body;
-            encode(request_item, request_body);
+            auto [enc_ec, request_body] = secs::utils::encode_item(request_item);
+            if (enc_ec) {
+                std::cout << "[Error] encode failed: " << enc_ec.message()
+                          << "\n";
+                co_return;
+            }
 
             // 构造 DataMessage
             DataMessage msg;
@@ -109,14 +113,15 @@ void simulate_message_handling(Router &router) {
                 auto [ec, response_body] = co_await (*handler_opt)(msg);
                 if (!ec) {
                     // 解码响应
-                    Item response_item{List{}};
-                    std::size_t consumed = 0;
-                    decode_one(
-                        bytes_view{response_body.data(), response_body.size()},
-                        response_item,
-                        consumed);
+                    auto [dec_ec, decoded] = secs::utils::decode_one_item(
+                        bytes_view{response_body.data(), response_body.size()});
+                    if (dec_ec) {
+                        std::cout << "[Error] decode failed: " << dec_ec.message()
+                                  << "\n";
+                        co_return;
+                    }
 
-                    auto response = S1F2Response::from_item(response_item);
+                    auto response = S1F2Response::from_item(decoded.item);
                     if (response) {
                         std::cout << "[Result] MDLN=" << response->mdln
                                   << ", SOFTREV=" << response->softrev << "\n";
@@ -141,8 +146,12 @@ void simulate_message_handling(Router &router) {
             S2F13Request request;
             request.ecids = {100, 200, 300};
             auto request_item = request.to_item();
-            std::vector<byte> request_body;
-            encode(request_item, request_body);
+            auto [enc_ec, request_body] = secs::utils::encode_item(request_item);
+            if (enc_ec) {
+                std::cout << "[Error] encode failed: " << enc_ec.message()
+                          << "\n";
+                co_return;
+            }
 
             // 构造 DataMessage
             DataMessage msg;
@@ -158,14 +167,15 @@ void simulate_message_handling(Router &router) {
                 auto [ec, response_body] = co_await (*handler_opt)(msg);
                 if (!ec) {
                     // 解码响应
-                    Item response_item{List{}};
-                    std::size_t consumed = 0;
-                    decode_one(
-                        bytes_view{response_body.data(), response_body.size()},
-                        response_item,
-                        consumed);
+                    auto [dec_ec, decoded] = secs::utils::decode_one_item(
+                        bytes_view{response_body.data(), response_body.size()});
+                    if (dec_ec) {
+                        std::cout << "[Error] decode failed: " << dec_ec.message()
+                                  << "\n";
+                        co_return;
+                    }
 
-                    auto response = S2F14Response::from_item(response_item);
+                    auto response = S2F14Response::from_item(decoded.item);
                     if (response) {
                         std::cout << "[Result] ECVs: ";
                         for (const auto &v : response->ecvs) {

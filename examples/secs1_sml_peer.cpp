@@ -24,12 +24,12 @@
  */
 
 #include "secs/core/log.hpp"
-#include "secs/ii/codec.hpp"
 #include "secs/protocol/session.hpp"
 #include "secs/secs1/serial_port_link.hpp"
 #include "secs/secs1/state_machine.hpp"
 #include "secs/sml/render.hpp"
 #include "secs/sml/runtime.hpp"
+#include "secs/utils/protocol_helpers.hpp"
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
@@ -238,12 +238,14 @@ make_sml_auto_reply(std::shared_ptr<Runtime> rt) {
 
             // 解码入站 body（无 body 时使用空 List；便于匹配仅依赖 SxFy 的规则）。
             secs::ii::Item decoded{secs::ii::List{}};
-            if (!req.body.empty()) {
-                std::size_t consumed = 0;
-                const auto dec_ec = secs::ii::decode_one(
-                    bytes_view{req.body.data(), req.body.size()}, decoded, consumed);
+            {
+                auto [dec_ec, decoded_opt] = secs::utils::decode_one_item_if_any(
+                    bytes_view{req.body.data(), req.body.size()});
                 if (dec_ec) {
                     co_return HandlerResult{dec_ec, {}};
+                }
+                if (decoded_opt.has_value()) {
+                    decoded = std::move(decoded_opt->item);
                 }
             }
 
@@ -290,17 +292,16 @@ make_sml_auto_reply(std::shared_ptr<Runtime> rt) {
                 co_return HandlerResult{render_ec, {}};
             }
 
-            std::vector<byte> body;
-            const auto enc_ec = secs::ii::encode(rendered, body);
-            if (enc_ec) {
-                std::cout << "[auto-reply] encode failed: " << enc_ec.message()
-                          << "\n";
-                co_return HandlerResult{enc_ec, {}};
+            auto result = secs::utils::make_handler_result(rendered);
+            if (result.first) {
+                std::cout << "[auto-reply] encode failed: "
+                          << result.first.message() << "\n";
+                co_return HandlerResult{result.first, {}};
             }
 
             std::cout << "[auto-reply] matched " << *matched
-                      << " -> reply body_n=" << body.size() << "\n";
-            co_return HandlerResult{std::error_code{}, std::move(body)};
+                      << " -> reply body_n=" << result.second.size() << "\n";
+            co_return result;
         } catch (const std::bad_alloc &) {
             co_return HandlerResult{
                 secs::core::make_error_code(secs::core::errc::out_of_memory), {}};
@@ -338,40 +339,30 @@ fire_once(ProtocolSession &proto, std::shared_ptr<Runtime> rt, std::string name_
         co_return;
     }
 
-    std::vector<byte> body;
-    const auto enc_ec = secs::ii::encode(rendered, body);
-    if (enc_ec) {
-        std::cout << "[fire] encode failed: " << name_or_sf
-                  << " ec=" << enc_ec.message() << "\n";
-        co_return;
-    }
-
     if (msg->w_bit) {
         std::cout << "[fire] request " << name_or_sf << " -> S"
                   << static_cast<int>(msg->stream) << "F"
-                  << static_cast<int>(msg->function) << " (body=" << body.size()
-                  << ")\n";
-        auto [ec, rsp] = co_await proto.async_request(
-            msg->stream,
-            msg->function,
-            bytes_view{body.data(), body.size()},
-            std::nullopt);
-        if (ec) {
+                  << static_cast<int>(msg->function) << "\n";
+
+        auto [ec, out] = co_await secs::utils::async_request_decoded(
+            proto, msg->stream, msg->function, rendered, std::nullopt);
+        if (ec && out.reply.function == 0) {
             std::cout << "[fire] request failed: " << ec.message() << "\n";
             co_return;
         }
-        print_message_header("[fire][rsp]", rsp);
+        if (ec) {
+            std::cout << "[fire] response decode failed: " << ec.message()
+                      << "\n";
+        }
+        print_message_header("[fire][rsp]", out.reply);
         co_return;
     }
 
     std::cout << "[fire] send " << name_or_sf << " -> S"
               << static_cast<int>(msg->stream) << "F"
-              << static_cast<int>(msg->function) << " (body=" << body.size()
-              << ")\n";
-    const auto ec =
-        co_await proto.async_send(msg->stream,
-                                  msg->function,
-                                  bytes_view{body.data(), body.size()});
+              << static_cast<int>(msg->function) << "\n";
+    const auto ec = co_await secs::utils::async_send_item(
+        proto, msg->stream, msg->function, rendered);
     if (ec) {
         std::cout << "[fire] send failed: " << ec.message() << "\n";
     }

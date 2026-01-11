@@ -13,13 +13,13 @@
  *   ./smlx_active_send_example
  */
 
-#include "secs/ii/codec.hpp"
 #include "secs/ii/item.hpp"
 #include "secs/protocol/session.hpp"
 #include "secs/secs1/link.hpp"
 #include "secs/secs1/state_machine.hpp"
 #include "secs/sml/render.hpp"
 #include "secs/sml/runtime.hpp"
+#include "secs/utils/protocol_helpers.hpp"
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
@@ -201,17 +201,15 @@ static void dump_decoded_item(std::string_view prefix, const ii::Item &decoded) 
 
 static std::pair<std::error_code, ii::Item>
 decode_body(core::bytes_view body) {
-    ii::Item decoded{ii::List{}};
-    std::size_t consumed = 0;
-    const auto ec = ii::decode_one(body, decoded, consumed);
+    auto [ec, decoded] = secs::utils::decode_one_item(body);
     if (ec) {
         return {ec, ii::Item::list({})};
     }
-    if (consumed != body.size()) {
+    if (!decoded.fully_consumed) {
         return {core::make_error_code(core::errc::invalid_argument),
                 ii::Item::list({})};
     }
-    return {std::error_code{}, std::move(decoded)};
+    return {std::error_code{}, std::move(decoded.item)};
 }
 
 asio::awaitable<int> run() {
@@ -436,47 +434,43 @@ rsp_all: S1F14
         co_return 0;
     }
 
-    auto [req_ec, rsp] =
-        co_await host_sess.async_request(stream, function, req_view, 5s);
+    auto [req_ec, out] = co_await secs::utils::async_request_decoded(
+        host_sess, stream, function, req_view, 5s);
     if (req_ec) {
-        std::cerr << "[Host] async_request failed: " << req_ec.message()
-                  << "\n";
+        std::cerr << "[Host] async_request failed: " << req_ec.message() << "\n";
         host_sess.stop();
         eq_sess.stop();
         co_return 4;
     }
 
+    const auto &rsp = out.reply;
     std::cout << "[Host] got response: S" << static_cast<int>(rsp.stream)
               << "F" << static_cast<int>(rsp.function) << " (W=" << rsp.w_bit
               << "), body=" << rsp.body.size() << " bytes\n";
 
     // 6) Host 侧：解码回应并打印（验证“响应也可由模板+变量生成”）。
-    if (!rsp.body.empty()) {
-        auto [dec_ec, decoded] = decode_body(
-            core::bytes_view{rsp.body.data(), rsp.body.size()});
-        if (dec_ec) {
-            std::cerr << "[Host] decode rsp failed: " << dec_ec.message()
-                      << "\n";
-            host_sess.stop();
-            eq_sess.stop();
-            co_return 5;
-        }
-
-        const ii::Item expected = ii::Item::list({
-            ii::Item::ascii("REV.01"),
-            ii::Item::u2(std::vector<std::uint16_t>{0, 4001, 4002, 65535}),
-            ii::Item::binary(std::vector<ii::byte>{0xAA, 0xBB}),
-        });
-        if (!(decoded == expected)) {
-            std::cerr << "[Host] rendered response mismatch\n";
-            dump_decoded_item("[Host] decoded response:", decoded);
-            host_sess.stop();
-            eq_sess.stop();
-            co_return 6;
-        }
-
-        dump_decoded_item("[Host] decoded response (render OK):", decoded);
+    if (!out.decoded.has_value()) {
+        std::cerr << "[Host] empty response body\n";
+        host_sess.stop();
+        eq_sess.stop();
+        co_return 5;
     }
+
+    const auto &decoded = out.decoded->item;
+    const ii::Item expected = ii::Item::list({
+        ii::Item::ascii("REV.01"),
+        ii::Item::u2(std::vector<std::uint16_t>{0, 4001, 4002, 65535}),
+        ii::Item::binary(std::vector<ii::byte>{0xAA, 0xBB}),
+    });
+    if (!(decoded == expected)) {
+        std::cerr << "[Host] rendered response mismatch\n";
+        dump_decoded_item("[Host] decoded response:", decoded);
+        host_sess.stop();
+        eq_sess.stop();
+        co_return 6;
+    }
+
+    dump_decoded_item("[Host] decoded response (render OK):", decoded);
 
     std::cout << "PASS\n";
     host_sess.stop();
