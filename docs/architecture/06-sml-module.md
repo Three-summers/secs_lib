@@ -929,7 +929,7 @@
 SMLX v0 的核心是“模板 + 上下文渲染”，并以最小侵入方式复用现有的 SECS-II 编解码：
 
 - `TemplateItem`（AST）→ `render_item()` → `secs::ii::Item`（结构化 Item）
-- `secs::ii::Item` → `secs::ii::encode()` → `SECS-II body bytes`
+- `secs::ii::Item` → `secs::ii::encode(item, out_bytes)` → `SECS-II body bytes`
 
 为方便业务侧“主动发送”，运行时提供一站式接口 `Runtime::encode_message_body()`：
 
@@ -1061,9 +1061,18 @@ ec = runtime.encode_message_body("req", ctx, body, &s, &f, &w);
 │  【条件响应匹配】                                                   │
 │  ┌────────────────────────────────────────────────────────────┐    │
 │  │  // 收到消息时查找响应                                      │    │
-│  │  auto inbound_item = ii::decode_one(msg.body);              │    │
-│  │  auto response_name = runtime.match_response(               │    │
-│  │      msg.stream, msg.function, *inbound_item                │    │
+│  │  secs::ii::Item decoded{secs::ii::List{}};                  │    │
+│  │  {                                                          │    │
+│  │      auto [dec_ec, decoded_opt] =                            │    │
+│  │          secs::utils::decode_one_item_if_any(                │    │
+│  │              secs::core::bytes_view{msg.body.data(), msg.body.size()});│   │
+│  │      if (dec_ec) { /* handle error */ }                      │    │
+│  │      if (decoded_opt.has_value()) {                          │    │
+│  │          decoded = std::move(decoded_opt->item);              │    │
+│  │      }                                                       │    │
+│  │  }                                                           │    │
+│  │  auto response_name = runtime.match_response(                │    │
+│  │      msg.stream, msg.function, decoded                       │    │
 │  │  );                                                         │    │
 │  │                                                             │    │
 │  │  if (response_name) {                                       │    │
@@ -1075,7 +1084,9 @@ ec = runtime.encode_message_body("req", ctx, body, &s, &f, &w);
 │  │          *response_name, ctx, rsp_body, &rsp_s, &rsp_f, &rsp_w│   │
 │  │      );                                                     │    │
 │  │      if (!ec) {                                             │    │
-│  │          session.async_send(rsp_s, rsp_f, rsp_body);         │    │
+│  │          co_await session.async_send(                        │    │
+│  │              rsp_s, rsp_f,                                   │    │
+│  │              secs::core::bytes_view{rsp_body.data(), rsp_body.size()});│   │
 │  │      }                                                      │    │
 │  │  }                                                          │    │
 │  └────────────────────────────────────────────────────────────┘    │
@@ -1107,13 +1118,13 @@ ec = runtime.encode_message_body("req", ctx, body, &s, &f, &w);
 
 | 文件 | 行数 | 说明 |
 |------|------|------|
-| `include/secs/sml/token.hpp` | ~139 | Token 类型定义 |
-| `include/secs/sml/ast.hpp` | ~236 | AST 数据结构（含 TemplateItem/VarRef） |
-| `include/secs/sml/lexer.hpp` | ~85 | Lexer 接口 |
-| `include/secs/sml/parser.hpp` | ~97 | Parser 接口 |
-| `include/secs/sml/render.hpp` | ~88 | SMLX 渲染接口（RenderContext/render_item） |
-| `include/secs/sml/runtime.hpp` | ~196 | Runtime 接口（含 encode_message_body） |
-| `src/sml/lexer.cpp` | ~385 | 词法分析实现 |
-| `src/sml/parser.cpp` | ~871 | 语法分析实现 |
-| `src/sml/render.cpp` | ~228 | SMLX 渲染实现 |
-| `src/sml/runtime.cpp` | ~378 | 运行时实现 |
+| `include/secs/sml/token.hpp` | 138 | Token 类型定义 |
+| `include/secs/sml/ast.hpp` | 236 | AST 数据结构（含 TemplateItem/VarRef） |
+| `include/secs/sml/lexer.hpp` | 85 | Lexer 接口 |
+| `include/secs/sml/parser.hpp` | 97 | Parser 接口 |
+| `include/secs/sml/render.hpp` | 88 | SMLX 渲染接口（RenderContext/render_item） |
+| `include/secs/sml/runtime.hpp` | 200 | Runtime 接口（含 encode_message_body） |
+| `src/sml/lexer.cpp` | 385 | 词法分析实现 |
+| `src/sml/parser.cpp` | 871 | 语法分析实现 |
+| `src/sml/render.cpp` | 228 | SMLX 渲染实现 |
+| `src/sml/runtime.cpp` | 373 | 运行时实现 |

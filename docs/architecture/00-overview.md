@@ -1,11 +1,11 @@
 # secs_lib 架构总览
 
-> 文档生成日期：2026-01-07
+> 文档更新：2026-01-11（Codex）
 > 基于源码版本：当前 main 分支
 
 ## 项目简介
 
-`secs_lib` 是一个现代 C++20 实现的 SECS/GEM 协议库，支持半导体设备与主机（Host）之间的通信。该库实现了以下 SEMI 标准：
+`secs_lib` 是一个现代 C++20 实现的 SECS 协议库，支持半导体设备与主机（Host）之间的通信。该库实现了以下 SEMI 标准：
 
 - **SECS-I（SEMI E4）**：串口半双工传输层
 - **SECS-II（SEMI E5）**：消息内容编解码层
@@ -44,8 +44,8 @@
 │   ┌──────┴──────────────────┐                 ┌──────────────┴───────┐      │
 │   │      HSMS (hsms)        │                 │     SECS-I (secs1)   │      │
 │   │   TCP/IP 全双工传输     │                 │    串口半双工传输    │      │
-│   │  - Connection          │                 │  - Port              │      │
-│   │  - Session FSM         │                 │  - Handshake FSM     │      │
+│   │  - Connection          │                 │  - Link              │      │
+│   │  - Session（状态机）   │                 │  - StateMachine      │      │
 │   │  - T3/T5/T6/T7/T8      │                 │  - T1/T2/T3/T4       │      │
 │   └─────────────────────────┘                 └──────────────────────┘      │
 │                                    │                                        │
@@ -75,33 +75,13 @@
 ## 模块依赖关系
 
 ```
-                     ┌───────────┐
-                     │  c_api    │
-                     └─────┬─────┘
-                           │
-                     ┌─────▼─────┐
-                     │    sml    │
-                     └─────┬─────┘
-                           │
-                     ┌─────▼─────┐
-                     │ protocol  │
-                     └─────┬─────┘
-                           │
-            ┌──────────────┼──────────────┐
-            │              │              │
-      ┌─────▼─────┐  ┌─────▼─────┐  (共享)
-      │   hsms    │  │  secs1    │
-      └─────┬─────┘  └─────┬─────┘
-            │              │
-            └──────┬───────┘
-                   │
-             ┌─────▼─────┐
-             │    ii     │
-             └─────┬─────┘
-                   │
-             ┌─────▼─────┐
-             │   core    │
-             └───────────┘
+c_api     -> protocol, sml
+protocol  -> core, hsms, secs1, utils
+sml       -> core, ii
+utils     -> core, ii, hsms, secs1
+hsms      -> core
+secs1     -> core
+ii        -> core
 ```
 
 ---
@@ -150,9 +130,9 @@
 
 ```cpp
 asio::awaitable<void> example() {
-    auto result = co_await session.async_request(stream, func, body);
-    if (result) {
-        process(*result);
+    auto [ec, reply] = co_await session.async_request(stream, func, body);
+    if (!ec) {
+        process(reply);
     }
 }
 ```
@@ -180,9 +160,12 @@ if (ec) {
 `protocol::Session` 抽象屏蔽 HSMS 与 SECS-I 差异：
 
 ```cpp
-// 相同的 API，不同的后端
-Session session(hsms_connection);   // HSMS over TCP
-Session session(secs1_port);        // SECS-I over Serial
+// 相同的 protocol::Session API，不同的后端
+secs::hsms::Session hsms(ex, hsms_opt);
+secs::protocol::Session sess_hsms(hsms, hsms_opt.session_id);
+
+secs::secs1::StateMachine secs1(link, /*expected_device_id=*/device_id);
+secs::protocol::Session sess_secs1(secs1, /*device_id=*/device_id);
 ```
 
 ---
@@ -201,7 +184,7 @@ Session session(secs1_port);        // SECS-I over Serial
 │    │  构造 ii::Item                                                     │
 │    ▼                                                                    │
 │  ┌─────────────────────┐                                               │
-│  │  ii::encode(item)   │  → 序列化为字节流                             │
+│  │  ii::encode(item, out) │  → 序列化为字节流                          │
 │  └──────────┬──────────┘                                               │
 │             │                                                           │
 │             ▼                                                           │
@@ -256,7 +239,7 @@ Session session(secs1_port);        // SECS-I over Serial
 │                                │                                        │
 │                                ▼                                        │
 │  ┌─────────────────────┐                                               │
-│  │  ii::decode(body)   │  → 反序列化为 ii::Item                        │
+│  │  ii::decode_one(body, ...) │  → 反序列化为 ii::Item                 │
 │  └──────────┬──────────┘                                               │
 │             │                                                           │
 │             ▼                                                           │
@@ -272,35 +255,50 @@ Session session(secs1_port);        // SECS-I over Serial
 ### 构建
 
 ```bash
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build .
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
 ```
 
 ### 示例：HSMS 连接
 
 ```cpp
-#include <secs/hsms/connection.hpp>
-#include <secs/protocol/session.hpp>
+#include <asio/awaitable.hpp>
+#include <asio/co_spawn.hpp>
+#include <asio/detached.hpp>
+#include <asio/io_context.hpp>
+#include <asio/ip/tcp.hpp>
+
 #include <secs/ii/item.hpp>
+#include <secs/hsms/session.hpp>
+#include <secs/protocol/session.hpp>
+#include <secs/utils/protocol_helpers.hpp>
 
-asio::awaitable<void> run_client(asio::io_context& ctx) {
-    hsms::ConnectionOptions opts;
-    opts.remote_address = "192.168.1.100";
-    opts.remote_port = 5000;
-    opts.mode = hsms::ConnectionMode::Active;
+asio::awaitable<void> run_client(asio::io_context& ioc) {
+    secs::hsms::SessionOptions hsms_opt{};
+    hsms_opt.session_id = 0x0001;
 
-    hsms::Connection conn(ctx, opts);
-    co_await conn.async_connect();
-    co_await conn.async_select();
+    secs::hsms::Session hsms(ioc.get_executor(), hsms_opt);
+    secs::protocol::Session proto(hsms, hsms_opt.session_id);
 
-    protocol::Session session(conn);
+    const asio::ip::tcp::endpoint endpoint{
+        asio::ip::make_address("192.168.1.100"),
+        5000,
+    };
 
-    // 发送 S1F1 并等待 S1F2 响应
-    auto result = co_await session.async_request(1, 1, {});
-    if (result) {
-        auto item = ii::decode_one(result->body);
-        // 处理响应...
+    auto ec = co_await hsms.async_open_active(endpoint);
+    if (ec) {
+        co_return;
+    }
+
+    // 推荐：启动协议层接收循环（用于路由入站 primary、唤醒 pending request）。
+    asio::co_spawn(ioc, proto.async_run(), asio::detached);
+
+    // 发送 S1F1 并等待 S1F2 响应（示例：空 List 作为 body）
+    auto [req_ec, out] =
+        co_await secs::utils::async_request_decoded(
+            proto, 1, 1, secs::ii::Item::list({}));
+    if (!req_ec && out.decoded.has_value()) {
+        // out.decoded->item 为解码后的 secs::ii::Item
     }
 }
 ```
@@ -308,9 +306,10 @@ asio::awaitable<void> run_client(asio::io_context& ctx) {
 ### 示例：SML 配置
 
 ```cpp
+#include <secs/sml/render.hpp>
 #include <secs/sml/runtime.hpp>
 
-sml::Runtime runtime;
+secs::sml::Runtime runtime;
 auto ec = runtime.load(R"(
     // 消息模板
     establish: S1F13 W <L <A ""> <A "1.0.0">>.
@@ -324,25 +323,36 @@ auto ec = runtime.load(R"(
     every 30 send heartbeat.
 )");
 
-// 查找消息模板
-const auto* msg = runtime.get_message("establish");
-auto body = ii::encode(msg->item);
+// 渲染并编码消息模板（可选：通过 ctx 注入占位符变量）
+secs::sml::RenderContext ctx{};
+std::vector<secs::core::byte> body{};
+std::uint8_t stream = 0;
+std::uint8_t function = 0;
+bool w_bit = false;
+ec = runtime.encode_message_body("establish",
+                                 ctx,
+                                 body,
+                                 &stream,
+                                 &function,
+                                 &w_bit);
 ```
 
 ---
 
 ## 源文件统计
 
-| 模块 | 头文件数 | 源文件数 | 总行数（约） |
+| 模块 | 头文件数 | 源文件数 | 行数（wc -l） |
 |------|----------|----------|--------------|
-| core | 4 | 1 | ~350 |
-| ii | 4 | 2 | ~1,200 |
-| hsms | 4 | 3 | ~1,800 |
-| secs1 | 5 | 4 | ~1,500 |
-| protocol | 3 | 3 | ~900 |
-| sml | 5 | 3 | ~1,600 |
-| c_api | 1 | 1 | ~2,660 |
-| **总计** | **26** | **17** | **~10,010** |
+| core | 5 | 4 | 703 |
+| ii | 3 | 2 | 1485 |
+| hsms | 4 | 4 | 2108 |
+| secs1 | 6 | 4 | 1869 |
+| protocol | 4 | 3 | 1515 |
+| sml | 6 | 4 | 2701 |
+| utils | 6 | 5 | 1505 |
+| c_api | 1 | 1 | 2915 |
+| messages（可选，header-only） | 3 | 0 | 159 |
+| **总计** | **38** | **27** | **14960** |
 
 ---
 

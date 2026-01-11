@@ -719,11 +719,11 @@
 |------|------|------|
 | `include/secs/secs1/block.hpp` | 132 | Block/Header 定义 |
 | `include/secs/secs1/link.hpp` | 87 | Link 抽象接口 + MemoryLink |
-| `include/secs/secs1/state_machine.hpp` | 97 | StateMachine 接口 |
+| `include/secs/secs1/state_machine.hpp` | 113 | StateMachine 接口 |
 | `include/secs/secs1/timer.hpp` | 41 | 定时器配置 |
 | `include/secs/secs1/serial_port_link.hpp` | 252 | 跨平台串口实现（Windows COM / POSIX tty） |
 | `include/secs/secs1/posix_serial_link.hpp` | 313 | POSIX 串口/pty 实现（termios/raw） |
 | `src/secs1/block.cpp` | 297 | Block 编解码实现 |
 | `src/secs1/link.cpp` | 145 | MemoryLink 实现 |
-| `src/secs1/state_machine.cpp` | 410 | 状态机实现 |
+| `src/secs1/state_machine.cpp` | 446 | 状态机实现 |
 | `src/secs1/timer.cpp` | 43 | 定时器实现 |

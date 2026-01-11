@@ -848,8 +848,8 @@ typedef struct secs_error {
 
 | 文件 | 行数 | 说明 |
 |------|------|------|
-| `include/secs/c_api.h` | ~544 | C 语言头文件（接口声明） |
-| `src/c_api.cpp` | ~2115 | C API 实现 |
+| `include/secs/c_api.h` | 604 | C 语言头文件（接口声明） |
+| `src/c_api.cpp` | 2311 | C API 实现 |
 
 ---
 

@@ -402,10 +402,12 @@ enum class errc : int {
 
 | 文件 | 行数 | 说明 |
 |------|------|------|
-| `include/secs/core/common.hpp` | ~25 | 基础类型定义 |
-| `include/secs/core/buffer.hpp` | ~70 | FixedBuffer 接口 |
-| `include/secs/core/error.hpp` | ~36 | errc 枚举与 error_code 集成 |
-| `include/secs/core/event.hpp` | ~61 | Event 协程同步原语接口 |
-| `src/core/buffer.cpp` | ~257 | FixedBuffer 实现 |
-| `src/core/error.cpp` | ~55 | error_category 实现 |
-| `src/core/event.cpp` | ~94 | Event 实现 |
+| `include/secs/core/common.hpp` | 24 | 基础类型定义 |
+| `include/secs/core/buffer.hpp` | 69 | FixedBuffer 接口 |
+| `include/secs/core/error.hpp` | 35 | errc 枚举与 error_code 集成 |
+| `include/secs/core/event.hpp` | 63 | Event 协程同步原语接口 |
+| `include/secs/core/log.hpp` | 28 | 日志封装接口（spdlog 隔离） |
+| `src/core/buffer.cpp` | 256 | FixedBuffer 实现 |
+| `src/core/error.cpp` | 54 | error_category 实现 |
+| `src/core/event.cpp` | 115 | Event 实现 |
+| `src/core/log.cpp` | 59 | 日志封装实现 |

@@ -775,17 +775,15 @@ for (;;) {
 │  │  protocol::Session session(hsms_session, /*session_id=*/1); │    │
 │  │                                                             │    │
 │  │  // 发送 S1F13 (通信建立请求)，等待 S1F14                   │    │
-│  │  auto body = ii::encode(Item::list({                        │    │
-│  │      Item::ascii(""),       // MDLN                         │    │
-│  │      Item::ascii("1.0.0")   // SOFTREV                      │    │
-│  │  }));                                                       │    │
+│  │  auto req_item = ii::Item::list({                           │    │
+│  │      ii::Item::ascii(""),      // MDLN                       │    │
+│  │      ii::Item::ascii("1.0.0"), // SOFTREV                    │    │
+│  │  });                                                        │    │
 │  │                                                             │    │
-│  │  auto [ec, rsp] = co_await session.async_request(           │    │
-│  │      1, 13, body                                            │    │
-│  │  );                                                         │    │
-│  │  if (!ec) {                                                 │    │
-│  │      // 解析 S1F14 响应                                     │    │
-│  │      auto item = ii::decode_one(rsp.body);                  │    │
+│  │  auto [ec, out] = co_await secs::utils::async_request_decoded│    │
+│  │      (session, 1, 13, req_item);                             │    │
+│  │  if (!ec && out.decoded.has_value()) {                       │    │
+│  │      // out.decoded->item 为解码后的 secs::ii::Item          │    │
 │  │  }                                                          │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
@@ -796,18 +794,20 @@ for (;;) {
 │  │      [](const DataMessage& msg) -> awaitable<HandlerResult> │    │
 │  │  {                                                          │    │
 │  │      // 解析请求                                            │    │
-│  │      auto req_item = ii::decode_one(msg.body);              │    │
+│  │      auto [dec_ec, decoded] = secs::utils::decode_one_item( │    │
+│  │          secs::core::bytes_view{msg.body.data(), msg.body.size()});│   │
+│  │      if (dec_ec) { co_return {dec_ec, {}}; }                │    │
+│  │      const auto& req_item = decoded.item;                   │    │
 │  │                                                             │    │
 │  │      // 构造响应 (S1F14)                                    │    │
-│  │      auto rsp = Item::list({                                │    │
-│  │          Item::u2({0}),                    // COMMACK=0     │    │
-│  │          Item::list({                                       │    │
-│  │              Item::ascii("EQUIP_MODEL"),   // MDLN          │    │
-│  │              Item::ascii("2.0.0")          // SOFTREV       │    │
+│  │      auto rsp = ii::Item::list({                            │    │
+│  │          ii::Item::u2({0}),                  // COMMACK=0    │    │
+│  │          ii::Item::list({                                   │    │
+│  │              ii::Item::ascii("EQUIP_MODEL"), // MDLN         │    │
+│  │              ii::Item::ascii("2.0.0"),      // SOFTREV       │    │
 │  │          })                                                 │    │
 │  │      });                                                    │    │
-│  │      auto body = ii::encode(rsp);                           │    │
-│  │      co_return {error_code{}, body};                        │    │
+│  │      co_return secs::utils::make_handler_result(rsp);        │    │
 │  │  });                                                        │    │
 │  │                                                             │    │
 │  │  // 启动接收循环                                            │    │
@@ -823,9 +823,10 @@ for (;;) {
 
 | 文件 | 行数 | 说明 |
 |------|------|------|
-| `include/secs/protocol/router.hpp` | 73 | Router/DataMessage 定义 |
-| `include/secs/protocol/session.hpp` | 202 | Session 接口 |
+| `include/secs/protocol/router.hpp` | 78 | Router/DataMessage 定义 |
+| `include/secs/protocol/session.hpp` | 220 | Session 接口 |
 | `include/secs/protocol/system_bytes.hpp` | 69 | SystemBytes 分配器接口 |
-| `src/protocol/router.cpp` | 58 | Router 实现 |
-| `src/protocol/session.cpp` | 638 | Session 实现 |
+| `include/secs/protocol/typed_handler.hpp` | 190 | TypedHandler（header-only） |
+| `src/protocol/router.cpp` | 74 | Router 实现 |
+| `src/protocol/session.cpp` | 755 | Session 实现 |
 | `src/protocol/system_bytes.cpp` | 129 | SystemBytes 分配器实现 |

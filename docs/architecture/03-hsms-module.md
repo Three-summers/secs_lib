@@ -743,11 +743,11 @@
 
 | 文件 | 行数 | 说明 |
 |------|------|------|
-| `include/secs/hsms/message.hpp` | ~132 | Message/Header 定义 |
-| `include/secs/hsms/connection.hpp` | ~130 | Connection 接口 |
-| `include/secs/hsms/session.hpp` | ~180 | Session 接口 |
-| `include/secs/hsms/timer.hpp` | ~40 | 定时器工具 |
-| `src/hsms/message.cpp` | ~280 | 消息编解码实现 |
-| `src/hsms/connection.cpp` | ~350 | Connection 实现 |
-| `src/hsms/session.cpp` | ~700 | Session 状态机实现 |
-| `src/hsms/timer.cpp` | ~50 | 定时器实现 |
+| `include/secs/hsms/message.hpp` | 131 | Message/Header 定义 |
+| `include/secs/hsms/connection.hpp` | 134 | Connection 接口 |
+| `include/secs/hsms/session.hpp` | 224 | Session 接口 |
+| `include/secs/hsms/timer.hpp` | 34 | 定时器工具 |
+| `src/hsms/message.cpp` | 279 | 消息编解码实现 |
+| `src/hsms/connection.cpp` | 457 | Connection 实现 |
+| `src/hsms/session.cpp` | 801 | Session 状态机实现 |
+| `src/hsms/timer.cpp` | 48 | 定时器实现 |

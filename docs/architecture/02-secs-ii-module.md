@@ -27,7 +27,8 @@
 │                                                                     │
 │  ┌─────────────────────────────────────────────────────────────┐   │
 │  │                    编解码层                                   │   │
-│  │  encode(Item) -> bytes    |    decode_one(bytes) -> Item    │   │
+│  │  encode(item, out_bytes) -> error_code                      │   │
+│  │  decode_one(in, out_item, consumed) -> error_code           │   │
 │  └─────────────────────────────────────────────────────────────┘   │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -553,8 +554,8 @@
 
 | 文件 | 行数 | 说明 |
 |------|------|------|
-| `include/secs/ii/types.hpp` | ~44 | format_code 枚举定义 |
-| `include/secs/ii/item.hpp` | ~175 | Item 类型系统 |
-| `include/secs/ii/codec.hpp` | ~104 | 编解码 API |
-| `src/ii/item.cpp` | ~152 | Item 实现（工厂方法、比较） |
-| `src/ii/codec.cpp` | ~1015 | 编解码核心实现 |
+| `include/secs/ii/types.hpp` | 43 | format_code 枚举定义 |
+| `include/secs/ii/item.hpp` | 174 | Item 类型系统 |
+| `include/secs/ii/codec.hpp` | 103 | 编解码 API |
+| `src/ii/item.cpp` | 151 | Item 实现（工厂方法、比较） |
+| `src/ii/codec.cpp` | 1014 | 编解码核心实现 |
