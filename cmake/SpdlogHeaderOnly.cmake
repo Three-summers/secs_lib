@@ -13,6 +13,44 @@ set(SECS_FETCH_SPDLOG_GIT_REPOSITORY "https://github.com/gabime/spdlog.git"
 set(SECS_FETCH_SPDLOG_GIT_TAG "v1.13.0"
   CACHE STRING "Git tag/commit used when SECS_FETCH_SPDLOG is enabled")
 
+# spdlog 编译期日志级别（SPDLOG_ACTIVE_LEVEL）：
+# - 该宏会在编译期剔除高于 active level 的日志代码路径（降低热路径开销）；
+# - 默认策略：顶层构建（开发/本仓库自测）为 DEBUG；作为依赖被嵌入时为 INFO。
+set(_secs_spdlog_active_level_default "SPDLOG_LEVEL_INFO")
+if(SECS_PROJECT_IS_TOP_LEVEL)
+  set(_secs_spdlog_active_level_default "SPDLOG_LEVEL_DEBUG")
+endif()
+
+set(SECS_SPDLOG_ACTIVE_LEVEL "${_secs_spdlog_active_level_default}"
+  CACHE STRING "Compile-time spdlog active level (SPDLOG_LEVEL_*)")
+set_property(CACHE SECS_SPDLOG_ACTIVE_LEVEL PROPERTY STRINGS
+  SPDLOG_LEVEL_TRACE
+  SPDLOG_LEVEL_DEBUG
+  SPDLOG_LEVEL_INFO
+  SPDLOG_LEVEL_WARN
+  SPDLOG_LEVEL_ERROR
+  SPDLOG_LEVEL_CRITICAL
+  SPDLOG_LEVEL_OFF
+)
+
+set(_secs_spdlog_active_level_values
+  SPDLOG_LEVEL_TRACE
+  SPDLOG_LEVEL_DEBUG
+  SPDLOG_LEVEL_INFO
+  SPDLOG_LEVEL_WARN
+  SPDLOG_LEVEL_ERROR
+  SPDLOG_LEVEL_CRITICAL
+  SPDLOG_LEVEL_OFF
+)
+list(FIND _secs_spdlog_active_level_values "${SECS_SPDLOG_ACTIVE_LEVEL}" _secs_spdlog_active_level_idx)
+if(_secs_spdlog_active_level_idx EQUAL -1)
+  message(FATAL_ERROR
+    "Invalid SECS_SPDLOG_ACTIVE_LEVEL='${SECS_SPDLOG_ACTIVE_LEVEL}'.\n"
+    "Expected one of: ${_secs_spdlog_active_level_values}\n"
+    "Example: -DSECS_SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_INFO\n"
+  )
+endif()
+
 function(secs_fetch_spdlog_include_dir out_var)
   include(FetchContent)
 
@@ -104,7 +142,7 @@ function(secs_ensure_spdlog_target)
   )
   target_compile_definitions(secs_spdlog INTERFACE
     SPDLOG_NO_EXCEPTIONS
-    SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_DEBUG
+    SPDLOG_ACTIVE_LEVEL=${SECS_SPDLOG_ACTIVE_LEVEL}
   )
 endfunction()
 

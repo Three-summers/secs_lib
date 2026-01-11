@@ -122,6 +122,12 @@
 
 ---
 
+## 可选组件
+
+- `include/secs/messages/standard.hpp`：常用/标准消息类型（基于 `secs::ii::Item` 的 `from_item/to_item`），用于减少重复样板代码
+
+---
+
 ## 技术栈
 
 | 技术 | 用途 |
@@ -131,6 +137,8 @@
 | CMake | 构建系统 |
 | 自研轻量测试框架 | 单元测试（入口见 `tests/test_main.hpp`） |
 | spdlog | 日志库（可选） |
+
+补充：本仓库使用 header-only spdlog，并支持通过 CMake 变量 `SECS_SPDLOG_ACTIVE_LEVEL` 设置编译期日志级别（用于裁剪高于该级别的日志代码路径）。
 
 ---
 
@@ -343,6 +351,7 @@ auto body = ii::encode(msg->item);
 | 版本 | 日期 | 主要变更 |
 |------|------|----------|
 | 1.0 | 2026-01-07 | 初始版本，完成全部模块文档 |
+| 1.1 | 2026-01-11 | 修复 P0/P1 风险并补齐拓展：HSMS 接收去二次拷贝、protocol 取消式 run loop、TypedHandler DecodeOptions、HSMS 控制消息观测、C API 可配置 io 线程、Router stream-only fallback、standard messages |
 
 ---
 

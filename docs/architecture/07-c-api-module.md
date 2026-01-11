@@ -775,6 +775,8 @@ typedef struct secs_error {
 | API | 功能 | 阻塞 |
 |-----|------|------|
 | `secs_context_create(&ctx)` | 创建上下文（启动 io 线程） | 是 |
+| `secs_context_create_with_options(&ctx, &opt)` | 创建上下文（可配置 io 线程数） | 是 |
+| `secs_context_options_init_default(&opt)` | 初始化默认参数 | 否 |
 | `secs_context_destroy(ctx)` | 销毁上下文（等待 io 线程退出） | 是 |
 
 ### 12.3 SECS-II Item

@@ -398,30 +398,59 @@ Connection::async_read_message() {
                             Message{}};
     }
 
-    std::vector<core::byte> payload;
-    try {
-        payload.resize(payload_len);
-    } catch (const std::length_error &) {
-        co_return std::pair{core::make_error_code(core::errc::buffer_overflow),
-                            Message{}};
-    } catch (const std::bad_alloc &) {
-        co_return std::pair{core::make_error_code(core::errc::out_of_memory),
-                            Message{}};
-    } catch (...) {
-        co_return std::pair{core::make_error_code(core::errc::invalid_argument),
-                            Message{}};
-    }
+    // 读入 HSMS payload（10B header + body）：
+    // - 先读 header 并解析；
+    // - 再把 body 直接读入 Message::body，避免临时 payload 缓冲与二次拷贝。
+    std::array<core::byte, kHeaderSize> header_buf{};
     ec = co_await async_read_exactly(
-        core::mutable_bytes_view{payload.data(), payload.size()}, frame_started);
+        core::mutable_bytes_view{header_buf.data(), header_buf.size()},
+        frame_started);
     if (ec) {
         co_return std::pair{ec, Message{}};
     }
 
-    Message msg;
-    ec = decode_payload(core::bytes_view{payload.data(), payload.size()}, msg);
-    if (ec) {
-        co_return std::pair{ec, Message{}};
+    Header h;
+    h.session_id = static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(header_buf[0]) << 8U) |
+        static_cast<std::uint16_t>(header_buf[1]));
+    h.header_byte2 = header_buf[2];
+    h.header_byte3 = header_buf[3];
+    h.p_type = header_buf[4];
+    h.s_type = static_cast<SType>(header_buf[5]);
+    h.system_bytes = read_u32_be_(header_buf.data() + 6);
+
+    if (h.p_type != kPTypeSecs2) {
+        co_return std::pair{core::make_error_code(core::errc::invalid_argument),
+                            Message{}};
     }
+
+    Message msg;
+    msg.header = h;
+
+    const auto body_len_u32 = payload_len - static_cast<std::uint32_t>(kHeaderSize);
+    const auto body_len = static_cast<std::size_t>(body_len_u32);
+    if (body_len != 0U) {
+        try {
+            msg.body.resize(body_len);
+        } catch (const std::length_error &) {
+            co_return std::pair{
+                core::make_error_code(core::errc::buffer_overflow), Message{}};
+        } catch (const std::bad_alloc &) {
+            co_return std::pair{core::make_error_code(core::errc::out_of_memory),
+                                Message{}};
+        } catch (...) {
+            co_return std::pair{
+                core::make_error_code(core::errc::invalid_argument), Message{}};
+        }
+
+        ec = co_await async_read_exactly(
+            core::mutable_bytes_view{msg.body.data(), msg.body.size()},
+            frame_started);
+        if (ec) {
+            co_return std::pair{ec, Message{}};
+        }
+    }
+
     co_return std::pair{std::error_code{}, std::move(msg)};
 }
 

@@ -228,6 +228,41 @@ static void test_log_set_level_smoke(void) {
     }
 }
 
+static void test_context_create_with_options_smoke(void) {
+    /* options init helper */
+    secs_context_options_t def;
+    memset(&def, 0, sizeof(def));
+    secs_context_options_init_default(&def);
+    if (def.io_threads != 1) {
+        fprintf(stderr, "FAIL: secs_context_options_init_default io_threads=%zu\n",
+                def.io_threads);
+        ++g_failures;
+    }
+
+    /* create with explicit thread count */
+    secs_context_t *ctx = NULL;
+    secs_context_options_t opt;
+    memset(&opt, 0, sizeof(opt));
+    opt.io_threads = 2;
+    expect_ok("secs_context_create_with_options(io_threads=2)",
+              secs_context_create_with_options(&ctx, &opt));
+    secs_context_destroy(ctx);
+
+    /* io_threads=0：按约定表示“使用默认值” */
+    ctx = NULL;
+    memset(&opt, 0, sizeof(opt));
+    opt.io_threads = 0;
+    expect_ok("secs_context_create_with_options(io_threads=0)",
+              secs_context_create_with_options(&ctx, &opt));
+    secs_context_destroy(ctx);
+
+    /* opt=NULL：使用默认参数（与 secs_context_create 行为一致） */
+    ctx = NULL;
+    expect_ok("secs_context_create_with_options(NULL opt)",
+              secs_context_create_with_options(&ctx, NULL));
+    secs_context_destroy(ctx);
+}
+
 static void test_hsms_open_passive_ip_invalid_cases(void) {
     secs_context_t *ctx = NULL;
     expect_ok("secs_context_create(ctx)", secs_context_create(&ctx));
@@ -2324,6 +2359,7 @@ int main(void) {
     test_version_and_error_message();
     test_error_message_category_mapping();
     test_log_set_level_smoke();
+    test_context_create_with_options_smoke();
     test_invalid_argument_fast_fail();
     test_hsms_session_create_v2_smoke();
     test_ii_encode_decode_and_malicious();

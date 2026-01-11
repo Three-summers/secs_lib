@@ -156,11 +156,15 @@ bool Runtime::build_index() noexcept {
                 name_index_[msg.name] = i;
             }
 
-            // 按 Stream/Function 索引（仅匿名消息）
+            // 按 Stream/Function 索引：
+            // - 匿名消息（name 为空）始终占优：与历史行为一致（优先按 sf_index_ 命中）。
+            // - 命名消息仅在“该 SF 尚未有匿名定义”时进入索引；同 SF 多条命名消息时，
+            //   保持“第一条命中”的兼容语义（历史实现为 O(N) 线性扫描并返回首个匹配）。
+            std::uint16_t key = (static_cast<std::uint16_t>(msg.stream) << 8) |
+                                static_cast<std::uint16_t>(msg.function);
             if (msg.name.empty()) {
-                std::uint16_t key =
-                    (static_cast<std::uint16_t>(msg.stream) << 8) |
-                    static_cast<std::uint16_t>(msg.function);
+                sf_index_[key] = i;
+            } else if (sf_index_.find(key) == sf_index_.end()) {
                 sf_index_[key] = i;
             }
         }
@@ -189,21 +193,12 @@ const MessageDef *Runtime::get_message(std::string_view name) const noexcept {
 
 const MessageDef *Runtime::get_message(std::uint8_t stream,
                                        std::uint8_t function) const noexcept {
-    // 先尝试按 SF 查找匿名消息
     std::uint16_t key = (static_cast<std::uint16_t>(stream) << 8) |
                         static_cast<std::uint16_t>(function);
     auto it = sf_index_.find(key);
     if (it != sf_index_.end()) {
         return &document_.messages[it->second];
     }
-
-    // 遍历查找命名消息
-    for (const auto &msg : document_.messages) {
-        if (msg.stream == stream && msg.function == function) {
-            return &msg;
-        }
-    }
-
     return nullptr;
 }
 

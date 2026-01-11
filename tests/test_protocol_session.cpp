@@ -33,6 +33,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -280,6 +281,34 @@ void test_router_set_find_erase_clear() {
     Router r;
     TEST_EXPECT(!r.find(1, 1).has_value());
 
+    auto invoke =
+        [&](std::uint8_t stream,
+            std::uint8_t function) -> std::optional<std::vector<byte>> {
+        auto h = r.find(stream, function);
+        if (!h.has_value()) {
+            return std::nullopt;
+        }
+
+        std::optional<std::vector<byte>> out;
+        asio::io_context ioc;
+        asio::co_spawn(
+            ioc,
+            [&]() -> asio::awaitable<void> {
+                DataMessage msg{};
+                msg.stream = stream;
+                msg.function = function;
+                msg.w_bit = false;
+                msg.system_bytes = 0;
+                auto [ec, body] = co_await (*h)(msg);
+                TEST_EXPECT_OK(ec);
+                out = std::move(body);
+                co_return;
+            },
+            asio::detached);
+        ioc.run();
+        return out;
+    };
+
     r.set_default(
         [](const DataMessage &)
             -> asio::awaitable<secs::protocol::HandlerResult> {
@@ -287,9 +316,25 @@ void test_router_set_find_erase_clear() {
                                                     std::vector<byte>{0xFF}};
         });
     TEST_EXPECT(r.find(9, 9).has_value());
+    TEST_EXPECT_EQ(invoke(9, 9)->at(0), static_cast<byte>(0xFF));
 
     r.clear_default();
     TEST_EXPECT(!r.find(9, 9).has_value());
+    TEST_EXPECT(!invoke(9, 9).has_value());
+
+    r.set_default(
+        [](const DataMessage &)
+            -> asio::awaitable<secs::protocol::HandlerResult> {
+            co_return secs::protocol::HandlerResult{std::error_code{},
+                                                    std::vector<byte>{0xEE}};
+        });
+    r.set_stream_default(
+        1,
+        [](const DataMessage &)
+            -> asio::awaitable<secs::protocol::HandlerResult> {
+            co_return secs::protocol::HandlerResult{std::error_code{},
+                                                    std::vector<byte>{0xAB}};
+        });
 
     r.set(1,
           1,
@@ -299,9 +344,14 @@ void test_router_set_find_erase_clear() {
                                                       std::vector<byte>{0xAA}};
           });
     TEST_EXPECT(r.find(1, 1).has_value());
+    // 优先级：精确匹配 > stream-only fallback > default
+    TEST_EXPECT_EQ(invoke(1, 1)->at(0), static_cast<byte>(0xAA));
+    TEST_EXPECT_EQ(invoke(1, 2)->at(0), static_cast<byte>(0xAB));
+    TEST_EXPECT_EQ(invoke(2, 2)->at(0), static_cast<byte>(0xEE));
 
     r.erase(1, 1);
-    TEST_EXPECT(!r.find(1, 1).has_value());
+    TEST_EXPECT(r.find(1, 1).has_value());
+    TEST_EXPECT_EQ(invoke(1, 1)->at(0), static_cast<byte>(0xAB));
 
     r.set(2,
           3,
@@ -310,12 +360,7 @@ void test_router_set_find_erase_clear() {
               co_return secs::protocol::HandlerResult{std::error_code{},
                                                       std::vector<byte>{}};
           });
-    r.set_default(
-        [](const DataMessage &)
-            -> asio::awaitable<secs::protocol::HandlerResult> {
-            co_return secs::protocol::HandlerResult{std::error_code{},
-                                                    std::vector<byte>{0xEE}};
-        });
+    r.clear_stream_default(1);
     r.clear();
     TEST_EXPECT(!r.find(2, 3).has_value());
     TEST_EXPECT(!r.find(9, 9).has_value());
@@ -543,6 +588,103 @@ void test_hsms_protocol_stop_cancels_pending() {
         asio::detached);
 
     ioc.run();
+    TEST_EXPECT(done);
+}
+
+void test_hsms_protocol_stop_from_foreign_thread_cancels_pending() {
+    asio::io_context ioc;
+    const std::uint16_t session_id = 0x1019;
+
+    secs::core::Event server_opened{};
+    secs::core::Event client_opened{};
+
+    secs::hsms::Session server(ioc.get_executor(),
+                               secs::hsms::SessionOptions{
+                                   .session_id = session_id,
+                                   .t3 = 2s,
+                                   .t5 = 10ms,
+                                   .t6 = 50ms,
+                                   .t7 = 50ms,
+                                   .t8 = 0ms,
+                                   .linktest_interval = 0ms,
+                                   .auto_reconnect = false,
+                               });
+
+    secs::hsms::Session client(ioc.get_executor(),
+                               secs::hsms::SessionOptions{
+                                   .session_id = session_id,
+                                   .t3 = 2s,
+                                   .t5 = 10ms,
+                                   .t6 = 50ms,
+                                   .t7 = 50ms,
+                                   .t8 = 0ms,
+                                   .linktest_interval = 0ms,
+                                   .auto_reconnect = false,
+                               });
+
+    Session proto_client(
+        client, session_id, SessionOptions{.t3 = 2s, .poll_interval = 1ms});
+
+    auto duplex = make_memory_duplex(ioc.get_executor());
+    Connection server_conn(std::move(duplex.server_stream));
+    Connection client_conn(std::move(duplex.client_stream));
+
+    asio::co_spawn(
+        ioc,
+        [&, server_conn = std::move(server_conn)]() mutable
+        -> asio::awaitable<void> {
+            auto ec =
+                co_await server.async_open_passive(std::move(server_conn));
+            TEST_EXPECT_OK(ec);
+            server_opened.set();
+        },
+        asio::detached);
+
+    asio::co_spawn(
+        ioc,
+        [&, client_conn = std::move(client_conn)]() mutable
+        -> asio::awaitable<void> {
+            auto ec = co_await client.async_open_active(std::move(client_conn));
+            TEST_EXPECT_OK(ec);
+            client_opened.set();
+        },
+        asio::detached);
+
+    std::atomic<bool> request_started{false};
+    std::atomic<bool> done{false};
+
+    std::thread stopper([&]() {
+        for (int i = 0; i < 200 && !request_started.load(); ++i) {
+            std::this_thread::sleep_for(1ms);
+        }
+        // 给 async_request 一个机会进入等待态，覆盖 stop() 的“取消 pending 等待者”路径。
+        std::this_thread::sleep_for(2ms);
+        proto_client.stop();
+    });
+
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            TEST_EXPECT_OK(co_await server_opened.async_wait(200ms));
+            TEST_EXPECT_OK(co_await client_opened.async_wait(200ms));
+
+            request_started = true;
+            auto [ec, rsp] = co_await proto_client.async_request(
+                1, 1, as_bytes("will-cancel-from-thread"), 2s);
+            (void)rsp;
+            TEST_EXPECT_EQ(ec, make_error_code(errc::cancelled));
+
+            server.stop();
+            client.stop();
+
+            done = true;
+            ioc.stop();
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    stopper.join();
     TEST_EXPECT(done);
 }
 
@@ -1673,6 +1815,7 @@ int main() {
     test_router_set_find_erase_clear();
     test_hsms_protocol_pending_filters();
     test_hsms_protocol_stop_cancels_pending();
+    test_hsms_protocol_stop_from_foreign_thread_cancels_pending();
     test_hsms_protocol_max_pending_requests_limit();
     test_hsms_protocol_disconnect_cancels_pending();
     test_hsms_protocol_run_without_poll_interval();

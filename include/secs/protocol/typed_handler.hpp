@@ -64,6 +64,19 @@ concept SecsMessage = requires(const ii::Item &item, const T &msg) {
 template <SecsMessage TRequest, SecsMessage TResponse>
 class TypedHandler {
 public:
+    struct DecodeOptions final {
+        // SECS-II 解码资源限制（用于约束不可信输入的资源消耗）。
+        ii::DecodeLimits limits{};
+
+        // 是否要求 consumed==msg.body.size()（严格消费整个输入）。
+        // - true：若存在尾随 bytes，返回 invalid_argument；
+        // - false：允许尾随 bytes（与历史行为一致）。
+        bool strict_consumed{true};
+    };
+
+    explicit TypedHandler(DecodeOptions options = {})
+        : decode_options_(std::move(options)) {}
+
     virtual ~TypedHandler() = default;
 
     /**
@@ -110,10 +123,15 @@ public:
         const auto decode_ec = ii::decode_one(
             secs::core::bytes_view{msg.body.data(), msg.body.size()},
             request_item,
-            consumed);
+            consumed,
+            decode_options_.limits);
 
         if (decode_ec) {
             co_return HandlerResult{decode_ec, {}};
+        }
+        if (decode_options_.strict_consumed && consumed != msg.body.size()) {
+            co_return HandlerResult{
+                core::make_error_code(core::errc::invalid_argument), {}};
         }
 
         // 步骤 2：Item → TRequest
@@ -142,6 +160,9 @@ public:
 
         co_return HandlerResult{std::error_code{}, std::move(response_body)};
     }
+
+private:
+    DecodeOptions decode_options_{};
 };
 
 /**

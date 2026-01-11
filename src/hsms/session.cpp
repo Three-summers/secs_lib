@@ -136,6 +136,51 @@ void Session::on_disconnected_(std::error_code reason) noexcept {
     inbound_data_.clear();
 }
 
+void Session::emit_control_event_(ControlDirection direction,
+                                  const Message &msg) noexcept {
+    if (!options_.on_control_event) {
+        return;
+    }
+    if (!msg.is_control()) {
+        return;
+    }
+
+    ControlEvent ev{};
+    ev.direction = direction;
+    ev.state = state_;
+    ev.s_type = msg.header.s_type;
+    ev.session_id = msg.header.session_id;
+    ev.system_bytes = msg.header.system_bytes;
+    ev.header_byte2 = msg.header.header_byte2;
+    ev.header_byte3 = msg.header.header_byte3;
+
+    if (msg.header.s_type == SType::reject_req &&
+        msg.body.size() == static_cast<std::size_t>(kHeaderSize)) {
+        const auto *p = msg.body.data();
+        Header h{};
+        h.session_id = static_cast<std::uint16_t>(
+            (static_cast<std::uint16_t>(p[0]) << 8U) |
+            static_cast<std::uint16_t>(p[1]));
+        h.header_byte2 = p[2];
+        h.header_byte3 = p[3];
+        h.p_type = p[4];
+        h.s_type = static_cast<SType>(p[5]);
+        h.system_bytes = (static_cast<std::uint32_t>(p[6]) << 24U) |
+                         (static_cast<std::uint32_t>(p[7]) << 16U) |
+                         (static_cast<std::uint32_t>(p[8]) << 8U) |
+                         static_cast<std::uint32_t>(p[9]);
+
+        ev.has_rejected_header = true;
+        ev.rejected_header = h;
+    }
+
+    try {
+        options_.on_control_event(options_.on_control_event_user, ev);
+    } catch (...) {
+        // 回调仅用于观测/统计，不应影响会话可用性。
+    }
+}
+
 void Session::stop() noexcept {
     stop_requested_ = true;
     connection_.cancel_and_close();
@@ -185,6 +230,7 @@ asio::awaitable<void> Session::reader_loop_() {
         }
 
         // 控制消息：SELECT/DESELECT/LINKTEST/SEPARATE 等。
+        emit_control_event_(ControlDirection::rx, msg);
         if (msg.header.session_id != kHsmsSsControlSessionId) {
             // HSMS-SS 约束：控制消息的 SessionID 固定为 0xFFFF。
             // 若对端发来其它值，通常意味着：
@@ -205,10 +251,14 @@ asio::awaitable<void> Session::reader_loop_() {
             // - 校验 SessionID（HSMS-SS：固定 0xFFFF，不匹配则拒绝并断线）
             // - 已处于 selected 时重复收到 SELECT.req：回拒绝，但保持连接
             if (!options_.passive_accept_select) {
-                (void)co_await connection_.async_write_message(
-                    make_select_rsp(msg.header.session_id,
-                                    kRspReject,
-                                    msg.header.system_bytes));
+                const auto rsp = make_select_rsp(msg.header.session_id,
+                                                 kRspReject,
+                                                 msg.header.system_bytes);
+                const auto write_ec =
+                    co_await connection_.async_write_message(rsp);
+                if (!write_ec) {
+                    emit_control_event_(ControlDirection::tx, rsp);
+                }
                 // 仅拒绝 SELECT，不进入 selected；保持连接处于 NOT_SELECTED，
                 // 便于对端读取到拒绝响应并自行决定后续行为（例如断线/重试）。
                 set_not_selected_();
@@ -216,18 +266,26 @@ asio::awaitable<void> Session::reader_loop_() {
             }
 
             if (state_ == SessionState::selected) {
-                (void)co_await connection_.async_write_message(
-                    make_select_rsp(msg.header.session_id,
-                                    kRspReject,
-                                    msg.header.system_bytes));
+                const auto rsp = make_select_rsp(msg.header.session_id,
+                                                 kRspReject,
+                                                 msg.header.system_bytes);
+                const auto write_ec =
+                    co_await connection_.async_write_message(rsp);
+                if (!write_ec) {
+                    emit_control_event_(ControlDirection::tx, rsp);
+                }
                 break;
             }
 
             if (msg.header.session_id != kHsmsSsControlSessionId) {
-                (void)co_await connection_.async_write_message(
-                    make_select_rsp(msg.header.session_id,
-                                    kRspReject,
-                                    msg.header.system_bytes));
+                const auto rsp = make_select_rsp(msg.header.session_id,
+                                                 kRspReject,
+                                                 msg.header.system_bytes);
+                const auto write_ec =
+                    co_await connection_.async_write_message(rsp);
+                if (!write_ec) {
+                    emit_control_event_(ControlDirection::tx, rsp);
+                }
                 (void)co_await connection_.async_close();
                 on_disconnected_(
                     core::make_error_code(core::errc::invalid_argument));
@@ -235,10 +293,13 @@ asio::awaitable<void> Session::reader_loop_() {
                 break;
             }
 
-            (void)co_await connection_.async_write_message(
-                make_select_rsp(msg.header.session_id,
-                                kRspOk,
-                                msg.header.system_bytes));
+            const auto rsp = make_select_rsp(msg.header.session_id,
+                                             kRspOk,
+                                             msg.header.system_bytes);
+            const auto write_ec = co_await connection_.async_write_message(rsp);
+            if (!write_ec) {
+                emit_control_event_(ControlDirection::tx, rsp);
+            }
             set_selected_();
             break;
         }
@@ -255,10 +316,13 @@ asio::awaitable<void> Session::reader_loop_() {
         case SType::deselect_req: {
             // 收到 DESELECT.req：先立即阻断 data，再回复 DESELECT.rsp，并退回 NOT_SELECTED。
             set_not_selected_();
-            (void)co_await connection_.async_write_message(
-                make_deselect_rsp(msg.header.session_id,
-                                  kRspOk,
-                                  msg.header.system_bytes));
+            const auto rsp = make_deselect_rsp(msg.header.session_id,
+                                               kRspOk,
+                                               msg.header.system_bytes);
+            const auto write_ec = co_await connection_.async_write_message(rsp);
+            if (!write_ec) {
+                emit_control_event_(ControlDirection::tx, rsp);
+            }
             break;
         }
         case SType::deselect_rsp: {
@@ -269,8 +333,12 @@ asio::awaitable<void> Session::reader_loop_() {
         }
         case SType::linktest_req: {
             // 收到 LINKTEST.req：立即回复 LINKTEST.rsp（不进入 inbound_data_）
-            (void)co_await connection_.async_write_message(
-                make_linktest_rsp(msg.header.session_id, msg.header.system_bytes));
+            const auto rsp =
+                make_linktest_rsp(msg.header.session_id, msg.header.system_bytes);
+            const auto write_ec = co_await connection_.async_write_message(rsp);
+            if (!write_ec) {
+                emit_control_event_(ControlDirection::tx, rsp);
+            }
             break;
         }
         case SType::linktest_rsp: {
@@ -278,8 +346,7 @@ asio::awaitable<void> Session::reader_loop_() {
             break;
         }
         case SType::reject_req: {
-            // Reject.req：当前不向上层暴露，仅保持会话稳定（后续可扩展 reason code
-            // 解析/回调）。
+            // Reject.req：不影响会话状态；可通过 options_.on_control_event 观测。
             break;
         }
         case SType::separate_req: {
@@ -290,8 +357,11 @@ asio::awaitable<void> Session::reader_loop_() {
         }
         default: {
             // 未实现/未知的控制类型：按 Reject 反馈，避免对端只能靠断线诊断。
-            (void)co_await connection_.async_write_message(
-                make_reject_req(/*reason_code=*/1, msg.header));
+            const auto rej = make_reject_req(/*reason_code=*/1, msg.header);
+            const auto write_ec = co_await connection_.async_write_message(rej);
+            if (!write_ec) {
+                emit_control_event_(ControlDirection::tx, rej);
+            }
             break;
         }
         }
@@ -410,6 +480,7 @@ Session::async_control_transaction_(const Message &req,
         pending_.erase(sb);
         co_return std::pair{ec, Message{}};
     }
+    emit_control_event_(ControlDirection::tx, req);
 
     ec = co_await pending->ready.async_wait(timeout);
     if (ec == core::make_error_code(core::errc::timeout)) {
@@ -629,7 +700,11 @@ asio::awaitable<std::error_code> Session::async_send(const Message &msg) {
                      msg.header.system_bytes);
     }
 
-    co_return co_await connection_.async_write_message(msg);
+    auto ec = co_await connection_.async_write_message(msg);
+    if (!ec) {
+        emit_control_event_(ControlDirection::tx, msg);
+    }
+    co_return ec;
 }
 
 asio::awaitable<std::pair<std::error_code, Message>>

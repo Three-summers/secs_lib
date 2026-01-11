@@ -759,7 +759,7 @@
 │  │  unordered_map<uint16_t, size_t> sf_index_;                 │    │
 │  │                                                             │    │
 │  │  // Key = (stream << 8) | function                          │    │
-│  │  // 仅索引匿名消息                                          │    │
+│  │  // 选择规则：匿名消息优先；否则首个命名匹配               │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
 │  build_index() 流程：                                               │
@@ -772,10 +772,12 @@
 │  │          name_index_[msg.name] = i;                         │    │
 │  │      }                                                      │    │
 │  │                                                             │    │
-│  │      // 匿名消息：加入 sf_index_                            │    │
+│  │      // Stream/Function 索引：                              │    │
+│  │      uint16_t key = (stream << 8) | function;               │    │
 │  │      if (msg.name.empty()) {                                │    │
-│  │          uint16_t key = (stream << 8) | function;           │    │
-│  │          sf_index_[key] = i;                                │    │
+│  │          sf_index_[key] = i;        // 匿名消息始终占优       │    │
+│  │      } else if (sf_index_.find(key) == end) {               │    │
+│  │          sf_index_[key] = i;        // 首个命名匹配           │    │
 │  │      }                                                      │    │
 │  │  }                                                          │    │
 │  └────────────────────────────────────────────────────────────┘    │
@@ -808,18 +810,12 @@
 │                                                                     │
 │  get_message(stream, function)：按 S/F 查找                         │
 │  ┌────────────────────────────────────────────────────────────┐    │
-│  │  1. 尝试 sf_index_ 查找匿名消息：                           │    │
+│  │  1. 查找 sf_index_：                                       │    │
 │  │     uint16_t key = (stream << 8) | function;                │    │
 │  │     auto it = sf_index_.find(key);                          │    │
 │  │     if (it != end) return &messages[it->second];            │    │
 │  │                                                             │    │
-│  │  2. 遍历查找命名消息：                                      │    │
-│  │     for (const auto& msg : messages) {                      │    │
-│  │         if (msg.stream == stream && msg.function == func)   │    │
-│  │             return &msg;                                    │    │
-│  │     }                                                       │    │
-│  │                                                             │    │
-│  │  3. 未找到：                                                │    │
+│  │  2. 未找到：                                                │    │
 │  │     return nullptr;                                         │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │

@@ -99,6 +99,40 @@ public:
     }
 };
 
+class NonStrictHandler : public TypedHandler<TestRequest, TestResponse> {
+public:
+    using Base = TypedHandler<TestRequest, TestResponse>;
+    using DecodeOptions = typename Base::DecodeOptions;
+
+    NonStrictHandler() : Base(DecodeOptions{.strict_consumed = false}) {}
+
+    asio::awaitable<std::pair<std::error_code, TestResponse>>
+    handle(const TestRequest &request,
+           const DataMessage & /*原始消息*/) override {
+        TestResponse response{"ECHO:" + request.value};
+        co_return std::pair{std::error_code{}, response};
+    }
+};
+
+class SmallLimitHandler : public TypedHandler<TestRequest, TestResponse> {
+public:
+    using Base = TypedHandler<TestRequest, TestResponse>;
+    using DecodeOptions = typename Base::DecodeOptions;
+
+    SmallLimitHandler(std::uint32_t max_payload_bytes)
+        : Base(DecodeOptions{
+              .limits = secs::ii::DecodeLimits{.max_payload_bytes = max_payload_bytes},
+              .strict_consumed = true,
+          }) {}
+
+    asio::awaitable<std::pair<std::error_code, TestResponse>>
+    handle(const TestRequest &request,
+           const DataMessage & /*原始消息*/) override {
+        TestResponse response{"ECHO:" + request.value};
+        co_return std::pair{std::error_code{}, response};
+    }
+};
+
 // ============================================================================
 // 辅助函数
 // ============================================================================
@@ -257,6 +291,76 @@ void test_handler_error() {
     ioc.run();
 }
 
+void test_decode_strict_consumed_rejects_trailing_bytes() {
+    asio::io_context ioc;
+    auto handler = std::make_shared<SuccessHandler>();
+
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            TestRequest req{"hello"};
+            auto body = encode_request(req);
+            body.push_back(static_cast<byte>(0x00)); // 尾随垃圾字节
+
+            auto msg = make_data_message(body);
+            auto [ec, response_body] = co_await handler->invoke(msg);
+
+            TEST_EXPECT(ec == make_error_code(errc::invalid_argument));
+            TEST_EXPECT(response_body.empty());
+
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+}
+
+void test_decode_non_strict_consumed_allows_trailing_bytes() {
+    asio::io_context ioc;
+    auto handler = std::make_shared<NonStrictHandler>();
+
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            TestRequest req{"hello"};
+            auto body = encode_request(req);
+            body.push_back(static_cast<byte>(0x00)); // 尾随垃圾字节
+
+            auto msg = make_data_message(body);
+            auto [ec, response_body] = co_await handler->invoke(msg);
+
+            TEST_EXPECT_OK(ec);
+            TEST_EXPECT(!response_body.empty());
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+}
+
+void test_decode_limits_can_reject_large_payload() {
+    asio::io_context ioc;
+    auto handler = std::make_shared<SmallLimitHandler>(1U); // max_payload_bytes=1
+
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            // ASCII payload 长度为 2，大于限制，应触发 ii::errc::payload_too_large
+            TestRequest req{"aa"};
+            auto body = encode_request(req);
+            auto msg = make_data_message(body);
+
+            auto [ec, response_body] = co_await handler->invoke(msg);
+            TEST_EXPECT(ec == secs::ii::make_error_code(secs::ii::errc::payload_too_large));
+            TEST_EXPECT(response_body.empty());
+
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+}
+
 void test_register_typed_handler() {
     asio::io_context ioc;
     Router router;
@@ -327,6 +431,9 @@ int main() {
     test_decode_error_invalid_item();
     test_decode_error_truncated_body();
     test_handler_error();
+    test_decode_strict_consumed_rejects_trailing_bytes();
+    test_decode_non_strict_consumed_allows_trailing_bytes();
+    test_decode_limits_can_reject_large_payload();
     test_register_typed_handler();
     test_multiple_handlers();
     test_secs_message_concept();

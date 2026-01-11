@@ -37,7 +37,10 @@ struct SessionOptions final {
     // 达到上限时，async_request(HSMS) 会快速失败，避免 pending_ 无界增长。
     std::size_t max_pending_requests{256};
 
-    // 接收循环的轮询间隔：用于 stop() 检查与避免永久阻塞。
+    // 接收循环的轮询间隔（仅 async_run/SECS-I 后端使用）：
+    // - SECS-I 底层 Link/StateMachine 当前不支持主动 cancel，因此 async_run 需要
+    //   通过轮询超时来检查 stop() 并避免永久阻塞。
+    // - HSMS 后端由 stop() 主动取消底层读，不依赖轮询。
     secs::core::duration poll_interval{std::chrono::milliseconds{10}};
 
     // 仅对 SECS-I 后端有效：R-bit（reverse_bit）方向位。
@@ -176,6 +179,21 @@ private:
     void cancel_all_pending_(std::error_code reason) noexcept;
 
     void ensure_hsms_run_loop_started_();
+
+    // 为了避免 Pending::ready(core::Event) 在多线程 io_context 下出现跨线程并发访问，
+    // public API 会把实际逻辑收敛到同一 executor/strand 上执行。
+    asio::awaitable<void> async_run_impl_();
+    asio::awaitable<std::error_code>
+    async_poll_once_impl_(std::optional<secs::core::duration> timeout);
+    asio::awaitable<std::error_code>
+    async_send_impl_(std::uint8_t stream,
+                     std::uint8_t function,
+                     secs::core::bytes_view body);
+    asio::awaitable<std::pair<std::error_code, DataMessage>>
+    async_request_impl_(std::uint8_t stream,
+                        std::uint8_t function,
+                        secs::core::bytes_view body,
+                        std::optional<secs::core::duration> timeout);
 
     Backend backend_{Backend::hsms};
     asio::any_io_executor executor_{};

@@ -8,8 +8,13 @@
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
+#include <asio/dispatch.hpp>
+#include <asio/strand.hpp>
+#include <asio/this_coro.hpp>
+#include <asio/use_awaitable.hpp>
 
 #include <chrono>
+#include <new>
 #include <sstream>
 #include <string_view>
 #include <spdlog/spdlog.h>
@@ -146,13 +151,17 @@ normalize_timeout(secs::core::duration d) noexcept {
 Session::Session(secs::hsms::Session &hsms,
                  std::uint16_t session_id,
                  SessionOptions options)
-    : backend_(Backend::hsms), executor_(hsms.executor()), options_(options),
+    : backend_(Backend::hsms),
+      executor_(asio::make_strand(hsms.executor())),
+      options_(options),
       hsms_(&hsms), hsms_session_id_(session_id) {}
 
 Session::Session(secs::secs1::StateMachine &secs1,
                  std::uint16_t device_id,
                  SessionOptions options)
-    : backend_(Backend::secs1), executor_(secs1.executor()), options_(options),
+    : backend_(Backend::secs1),
+      executor_(asio::make_strand(secs1.executor())),
+      options_(options),
       secs1_(&secs1), secs1_device_id_(device_id) {}
 
 void Session::ensure_hsms_run_loop_started_() {
@@ -165,17 +174,54 @@ void Session::ensure_hsms_run_loop_started_() {
     asio::co_spawn(
         executor_,
         [this]() -> asio::awaitable<void> {
-            co_await async_run();
+            co_await async_run_impl_();
         }, // GCOVR_EXCL_LINE：co_spawn 内联分支不计入覆盖率
         asio::detached);
 }
 
 void Session::stop() noexcept {
-    stop_requested_ = true;
-    cancel_all_pending_(make_error_code(errc::cancelled));
+    // 约束：core::Event 默认假设同一 executor/strand 语境，因此 stop() 通过 dispatch
+    // 收敛到 Session 自身的 executor_ 执行，避免跨线程直接 cancel waiters。
+    try {
+        asio::dispatch(executor_, [this]() noexcept {
+            if (stop_requested_) {
+                return;
+            }
+
+            stop_requested_ = true;
+            cancel_all_pending_(make_error_code(errc::cancelled));
+
+            // HSMS 后端：主动取消底层阻塞读，避免依赖 poll_interval 轮询退出。
+            if (backend_ == Backend::hsms && hsms_) {
+                hsms_->stop();
+            }
+        });
+    } catch (...) {
+        // best-effort：dispatch/post 失败通常意味着资源不足，此处不抛异常。
+    }
 }
 
 asio::awaitable<void> Session::async_run() {
+    const auto ex = co_await asio::this_coro::executor;
+    if (ex == executor_) {
+        co_await async_run_impl_();
+        co_return;
+    }
+
+    try {
+        co_await asio::co_spawn(
+            executor_,
+            [this]() -> asio::awaitable<void> {
+                co_await async_run_impl_();
+                co_return;
+            },
+            asio::use_awaitable);
+    } catch (...) {
+        // co_spawn 失败（例如资源不足）时，不应抛异常导致上层协程崩溃。
+    }
+}
+
+asio::awaitable<void> Session::async_run_impl_() {
     if (run_loop_active_) {
         co_return;
     }
@@ -186,7 +232,11 @@ asio::awaitable<void> Session::async_run() {
         ~Reset() { self->run_loop_active_ = false; }
     } reset{this};
 
-    const auto timeout = normalize_timeout(options_.poll_interval);
+    // HSMS：stop() 会主动取消底层读，因此 run loop 可使用“无超时等待”，避免空闲轮询。
+    // SECS-I：底层 Link/StateMachine 当前不支持跨线程 cancel，因此仍保留 poll_interval。
+    const auto timeout =
+        (backend_ == Backend::hsms) ? std::nullopt
+                                    : normalize_timeout(options_.poll_interval);
 
     while (!stop_requested_) {
         auto [ec, msg] = co_await async_receive_message_(timeout);
@@ -205,9 +255,27 @@ asio::awaitable<void> Session::async_run() {
 
 asio::awaitable<std::error_code>
 Session::async_poll_once(std::optional<secs::core::duration> timeout) {
-    using secs::core::errc;
-    using secs::core::make_error_code;
+    const auto ex = co_await asio::this_coro::executor;
+    if (ex == executor_) {
+        co_return co_await async_poll_once_impl_(timeout);
+    }
 
+    try {
+        co_return co_await asio::co_spawn(
+            executor_,
+            [this, timeout]() -> asio::awaitable<std::error_code> {
+                co_return co_await async_poll_once_impl_(timeout);
+            },
+            asio::use_awaitable);
+    } catch (const std::bad_alloc &) {
+        co_return make_error_code(errc::out_of_memory);
+    } catch (...) {
+        co_return make_error_code(errc::invalid_argument);
+    }
+}
+
+asio::awaitable<std::error_code>
+Session::async_poll_once_impl_(std::optional<secs::core::duration> timeout) {
     if (stop_requested_) {
         co_return make_error_code(errc::cancelled);
     }
@@ -226,6 +294,27 @@ Session::async_poll_once(std::optional<secs::core::duration> timeout) {
 }
 
 asio::awaitable<std::error_code> Session::async_send(
+    std::uint8_t stream, std::uint8_t function, secs::core::bytes_view body) {
+    const auto ex = co_await asio::this_coro::executor;
+    if (ex == executor_) {
+        co_return co_await async_send_impl_(stream, function, body);
+    }
+
+    try {
+        co_return co_await asio::co_spawn(
+            executor_,
+            [this, stream, function, body]() -> asio::awaitable<std::error_code> {
+                co_return co_await async_send_impl_(stream, function, body);
+            },
+            asio::use_awaitable);
+    } catch (const std::bad_alloc &) {
+        co_return make_error_code(errc::out_of_memory);
+    } catch (...) {
+        co_return make_error_code(errc::invalid_argument);
+    }
+}
+
+asio::awaitable<std::error_code> Session::async_send_impl_(
     std::uint8_t stream, std::uint8_t function, secs::core::bytes_view body) {
     if (!is_valid_stream(stream) || !is_primary_function(function)) {
         co_return make_error_code(errc::invalid_argument);
@@ -266,6 +355,34 @@ Session::async_request(std::uint8_t stream,
                        std::uint8_t function,
                        secs::core::bytes_view body,
                        std::optional<secs::core::duration> timeout) {
+    const auto ex = co_await asio::this_coro::executor;
+    if (ex == executor_) {
+        co_return co_await async_request_impl_(stream, function, body, timeout);
+    }
+
+    try {
+        co_return co_await asio::co_spawn(
+            executor_,
+            [this, stream, function, body, timeout]()
+                -> asio::awaitable<std::pair<std::error_code, DataMessage>> {
+                co_return co_await async_request_impl_(stream,
+                                                      function,
+                                                      body,
+                                                      timeout);
+            },
+            asio::use_awaitable);
+    } catch (const std::bad_alloc &) {
+        co_return std::pair{make_error_code(errc::out_of_memory), DataMessage{}};
+    } catch (...) {
+        co_return std::pair{make_error_code(errc::invalid_argument), DataMessage{}};
+    }
+}
+
+asio::awaitable<std::pair<std::error_code, DataMessage>>
+Session::async_request_impl_(std::uint8_t stream,
+                             std::uint8_t function,
+                             secs::core::bytes_view body,
+                             std::optional<secs::core::duration> timeout) {
     if (!is_valid_stream(stream) || !is_primary_function(function) ||
         !can_compute_secondary_function(function)) {
         co_return std::pair{make_error_code(errc::invalid_argument),

@@ -95,6 +95,29 @@ typedef struct secs_context secs_context_t;
  * 线程执行，并在调用线程等待结果。
  */
 secs_error_t secs_context_create(secs_context_t **out_ctx);
+
+/*
+ * 上下文创建参数（可选）。
+ *
+ * 约定：
+ * - 指针为 NULL：使用默认参数；
+ * - 字段为 0：表示“使用默认值”（便于 memset(0) 后只覆盖少数字段）。
+ */
+typedef struct secs_context_options {
+    size_t io_threads; /* io 线程数（默认 1） */
+} secs_context_options_t;
+
+static inline void
+secs_context_options_init_default(secs_context_options_t *out_opt) {
+    if (!out_opt) {
+        return;
+    }
+    out_opt->io_threads = 1;
+}
+
+/* 使用自定义参数创建上下文（不影响旧 API）。 */
+secs_error_t secs_context_create_with_options(secs_context_t **out_ctx,
+                                              const secs_context_options_t *opt);
 void secs_context_destroy(secs_context_t *ctx);
 
 /* ----------------------------- SECS-II：Item 与编解码

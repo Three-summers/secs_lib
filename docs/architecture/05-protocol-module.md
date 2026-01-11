@@ -272,8 +272,9 @@
 │  查找优先级：                                                       │
 │  ┌────────────────────────────────────────────────────────────┐    │
 │  │  1. 精确匹配 handlers_[(stream,function)]                   │    │
-│  │  2. 若无匹配，尝试 default_handler_                         │    │
-│  │  3. 均无，返回 nullopt                                      │    │
+│  │  2. stream-only fallback: stream_default_handlers_[stream]  │    │
+│  │  3. default_handler_                                        │    │
+│  │  4. 均无，返回 nullopt                                      │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -294,6 +295,12 @@
 │  │      // 处理 S1F1，返回响应体                               │    │
 │  │      vector<byte> response = ...;                           │    │
 │  │      co_return {error_code{}, response};                    │    │
+│  │  });                                                        │    │
+│  │                                                             │    │
+│  │  // 可选：注册 stream-only fallback（S1F*）                  │    │
+│  │  router.set_stream_default(1, [](const DataMessage& msg)    │    │
+│  │      -> awaitable<HandlerResult> {                          │    │
+│  │      co_return {make_error_code(errc::invalid_argument), {}};│   │
 │  │  });                                                        │    │
 │  │                                                             │    │
 │  │  // 注册默认处理器（处理未注册的消息）                      │    │
@@ -364,7 +371,8 @@
 │                                                                     │
 │  struct SessionOptions {                                            │
 │      duration t3{45s};             // 回复超时                      │
-│      duration poll_interval{10ms}; // 接收循环轮询间隔             │
+│      size_t max_pending_requests{256}; // HSMS pending 上限         │
+│      duration poll_interval{10ms}; // 接收循环轮询间隔（仅 SECS-I） │
 │      bool secs1_reverse_bit{false};// SECS-I R-bit 方向位          │
 │      DumpOptions dump{};         // 运行时报文 dump（调试用途）     │
 │  };                                                                 │
@@ -376,11 +384,10 @@
 │  │  超时返回 errc::timeout。                                   │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
-│  poll_interval（轮询间隔）：                                        │
+│  poll_interval（轮询间隔，仅 SECS-I）：                              │
 │  ┌────────────────────────────────────────────────────────────┐    │
-│  │  async_run() 接收循环中，                                   │    │
-│  │  若 async_receive 返回 timeout，继续循环。                  │    │
-│  │  用于定期检查 stop_requested_ 避免永久阻塞。                │    │
+│  │  - HSMS：stop() 会主动取消底层读，async_run 可使用无超时等待 │    │
+│  │  - SECS-I：底层不支持主动 cancel，需要轮询检查 stop         │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
 │  secs1_reverse_bit（R-bit）：                                       │
@@ -561,13 +568,15 @@
 │  主要用于 HSMS 后端的持续接收：                                     │
 │                                                                     │
 │  ┌────────────────────────────────────────────────────────────┐    │
+│  │  // timeout：HSMS=nullopt；SECS-I=poll_interval              │    │
+│  │  auto timeout = (backend==hsms) ? nullopt : poll_interval;  │    │
 │  │  while (!stop_requested_) {                                 │    │
-│  │      auto [ec, msg] = async_receive_message_(poll_interval);│    │
+│  │      auto [ec, msg] = async_receive_message_(timeout);      │    │
 │  │                                                             │    │
-│  │      if (ec == timeout) continue;  // 轮询检查 stop         │    │
+│  │      if (ec == timeout) continue;  // 仅 SECS-I 轮询路径     │    │
 │  │      if (ec) {                                              │    │
-│  │          cancel_all_pending_(ec);  // 错误时取消所有挂起    │    │
 │  │          stop_requested_ = true;                            │    │
+│  │          cancel_all_pending_(ec);  // 错误时取消所有挂起     │    │
 │  │          break;                                             │    │
 │  │      }                                                      │    │
 │  │                                                             │    │
@@ -701,7 +710,7 @@ for (;;) {
 │  │    注意事项：                                               │    │
 │  │    - 同一时刻只能有一个收发操作                             │    │
 │  │    - 并发调用会返回 invalid_argument                        │    │
-│  │    - 若需多线程访问，建议使用 strand 串行化                 │    │
+│  │    - protocol::Session 内部已使用 strand 收敛（仍需避免并发）│    │
 │  │                                                             │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
@@ -742,7 +751,7 @@ for (;;) {
 │  │  1. 取出所有 pending_ 项                                    │    │
 │  │  2. 设置每项的 ec = reason                                  │    │
 │  │  3. 调用 ready.cancel()                                     │    │
-│  │  4. 释放对应的 SystemBytes                                  │    │
+│  │  4. 唤醒等待者，由 async_request 协程释放 SystemBytes        │    │
 │  │                                                             │    │
 │  │  确保所有等待的 async_request 协程能及时返回                │    │
 │  └────────────────────────────────────────────────────────────┘    │

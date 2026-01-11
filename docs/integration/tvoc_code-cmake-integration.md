@@ -58,6 +58,7 @@ tvoc_code 这类交叉编译环境通常不允许联网，建议：
 - 或者由主工程显式指定外部路径：
   - `-DSECS_ASIO_ROOT=/path/to/asio/include`
   - `-DSECS_SPDLOG_ROOT=/path/to/spdlog/include`
+  - （可选）`-DSECS_SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_INFO`：降低编译期日志开销
 
 ### 1.4 旧运行库/嵌入式环境：静态链接 C++ 运行库（可选但常用）
 

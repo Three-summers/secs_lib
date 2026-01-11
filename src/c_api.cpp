@@ -75,8 +75,8 @@ struct secs_context final {
     asio::io_context ioc{};
     asio::executor_work_guard<asio::io_context::executor_type> work{
         asio::make_work_guard(ioc)};
-    std::thread io_thread{};
-    std::thread::id io_thread_id{};
+    std::vector<std::thread> io_threads{};
+    std::vector<std::thread::id> io_thread_ids{};
 };
 
 struct secs_ii_item final {
@@ -211,7 +211,16 @@ category_from_name(const char *name) noexcept {
 }
 
 [[nodiscard]] bool is_io_thread(const secs_context *ctx) noexcept {
-    return ctx && std::this_thread::get_id() == ctx->io_thread_id;
+    if (!ctx) {
+        return false;
+    }
+    const auto self = std::this_thread::get_id();
+    for (const auto tid : ctx->io_thread_ids) {
+        if (tid == self) {
+            return true;
+        }
+    }
+    return false;
 }
 
 template <class Result, class AwaitableFactory>
@@ -609,37 +618,81 @@ secs_error_t secs_log_set_level(secs_log_level_t level) {
 
 // ----------------------------- 上下文 -----------------------------
 
-secs_error_t secs_context_create(secs_context_t **out_ctx) {
+secs_error_t secs_context_create_with_options(secs_context_t **out_ctx,
+                                              const secs_context_options_t *opt) {
     return guard_error([&]() -> secs_error_t {
         if (!out_ctx) {
             return c_api_err(SECS_C_API_INVALID_ARGUMENT);
         }
         *out_ctx = nullptr;
 
-        auto *ctx = new (std::nothrow) secs_context{};
+        std::size_t io_threads = 1;
+        if (opt && opt->io_threads != 0) {
+            io_threads = opt->io_threads;
+        }
+        if (io_threads == 0) {
+            io_threads = 1;
+        }
+
+        std::unique_ptr<secs_context> ctx(new (std::nothrow) secs_context{});
         if (!ctx) {
             return c_api_err(SECS_C_API_OUT_OF_MEMORY);
         }
 
-        std::promise<void> started;
-        auto started_future = started.get_future();
-
         try {
-            ctx->io_thread =
-                std::thread([ctx, p = std::move(started)]() mutable {
-                    ctx->io_thread_id = std::this_thread::get_id();
-                    p.set_value();
-                    ctx->ioc.run();
-                });
+            ctx->io_threads.reserve(io_threads);
+            ctx->io_thread_ids.resize(io_threads);
+        } catch (const std::bad_alloc &) {
+            return c_api_err(SECS_C_API_OUT_OF_MEMORY);
         } catch (...) {
-            delete ctx;
             return c_api_err(SECS_C_API_EXCEPTION);
         }
 
-        started_future.wait();
-        *out_ctx = ctx;
+        std::vector<std::promise<void>> started;
+        std::vector<std::future<void>> started_futures;
+        try {
+            started.resize(io_threads);
+            started_futures.reserve(io_threads);
+            for (std::size_t i = 0; i < io_threads; ++i) {
+                started_futures.push_back(started[i].get_future());
+            }
+        } catch (const std::bad_alloc &) {
+            return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+        } catch (...) {
+            return c_api_err(SECS_C_API_EXCEPTION);
+        }
+
+        try {
+            for (std::size_t i = 0; i < io_threads; ++i) {
+                ctx->io_threads.emplace_back(
+                    [raw = ctx.get(), i, p = std::move(started[i])]() mutable {
+                        raw->io_thread_ids[i] = std::this_thread::get_id();
+                        p.set_value();
+                        raw->ioc.run();
+                    });
+            }
+        } catch (...) {
+            ctx->work.reset();
+            ctx->ioc.stop();
+            for (auto &t : ctx->io_threads) {
+                if (t.joinable()) {
+                    t.join();
+                }
+            }
+            return c_api_err(SECS_C_API_EXCEPTION);
+        }
+
+        for (auto &f : started_futures) {
+            f.wait();
+        }
+
+        *out_ctx = ctx.release();
         return ok();
     });
+}
+
+secs_error_t secs_context_create(secs_context_t **out_ctx) {
+    return secs_context_create_with_options(out_ctx, nullptr);
 }
 
 void secs_context_destroy(secs_context_t *ctx) {
@@ -651,8 +704,10 @@ void secs_context_destroy(secs_context_t *ctx) {
         ctx->work.reset();
         ctx->ioc.stop();
 
-        if (ctx->io_thread.joinable()) {
-            ctx->io_thread.join();
+        for (auto &t : ctx->io_threads) {
+            if (t.joinable()) {
+                t.join();
+            }
         }
         delete ctx;
     });

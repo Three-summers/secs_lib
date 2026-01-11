@@ -51,6 +51,10 @@ public:
 
     /**
      * @brief 通过 Stream/Function 获取消息
+     *
+     * 选择规则（用于处理“同一 (S,F) 出现多条定义”的情况）：
+     * - 若存在匿名消息（name 为空）：优先返回匿名定义（与历史行为一致）；
+     * - 否则：返回第一条匹配的命名消息。
      */
     [[nodiscard]] const MessageDef *
     get_message(std::uint8_t stream, std::uint8_t function) const noexcept;

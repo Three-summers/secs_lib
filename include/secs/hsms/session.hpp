@@ -27,6 +27,37 @@ enum class SessionState : std::uint8_t {
     selected = 2,
 };
 
+enum class ControlDirection : std::uint8_t {
+    rx = 0,
+    tx = 1,
+};
+
+/**
+ * @brief 控制消息观测事件（用于联调/统计/指标系统接入）。
+ *
+ * 说明：
+ * - 仅用于 HSMS 控制消息（SType!=data），数据消息不在此回调范围；
+ * - 本结构尽量保持“零解释”：header_byte2/3 原样透出（Select.rsp/Deselect.rsp
+ *   的 status、Reject.req 的 reason code 由上层自行解释）。
+ */
+struct ControlEvent final {
+    ControlDirection direction{ControlDirection::rx};
+    SessionState state{SessionState::disconnected};
+    SType s_type{SType::data};
+
+    std::uint16_t session_id{0};
+    std::uint32_t system_bytes{0};
+    std::uint8_t header_byte2{0};
+    std::uint8_t header_byte3{0};
+
+    // Reject.req：消息体可能携带“被拒绝消息”的 10B header（字节级回显）。
+    bool has_rejected_header{false};
+    Header rejected_header{};
+};
+
+using ControlEventFn =
+    void (*)(void *user, const ControlEvent &ev) noexcept;
+
 struct SessionOptions final {
     // HSMS-SS：data message 的 SessionID（Device ID，低 15 位有效）。
     // 控制消息（SELECT/LINKTEST/SEPARATE 等）SessionID 固定为 0xFFFF。
@@ -56,6 +87,12 @@ struct SessionOptions final {
     // - 主要用于限制并发 async_request_data/async_linktest 等事务数；
     // - 达到上限时，事务类 API 会快速失败，避免 pending_ 无界增长。
     std::size_t max_pending_requests{256};
+
+    // 控制消息观测回调（可选）：
+    // - 在 Session 内部收到/发送控制消息时触发；
+    // - 仅用于联调/统计，不建议在回调内执行阻塞或重入 Session API。
+    ControlEventFn on_control_event{nullptr};
+    void *on_control_event_user{nullptr};
 };
 
 /**
@@ -143,6 +180,8 @@ private:
     void set_selected_() noexcept;
     void set_not_selected_() noexcept;
     void on_disconnected_(std::error_code reason) noexcept;
+    void emit_control_event_(ControlDirection direction,
+                             const Message &msg) noexcept;
 
     void start_reader_();
     asio::awaitable<void> reader_loop_();

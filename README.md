@@ -142,6 +142,7 @@ secs_lib/
 │   ├── core/                   # 基础设施（byte/span、FixedBuffer、Event、error_code）
 │   ├── ii/                     # SECS-II（Item + 编解码）
 │   ├── hsms/                   # HSMS（Message/Connection/Session）
+│   ├── messages/               # 常用/标准消息类型（可选，from_item/to_item）
 │   ├── secs1/                  # SECS-I（Link/StateMachine/分包/超时）
 │   ├── protocol/               # 协议层（Session/Router/TypedHandler/SystemBytes）
 │   ├── sml/                    # SML（Lexer/Parser/Runtime/AST）
@@ -199,6 +200,13 @@ secs_lib/
 - 有网络：`cmake -S . -B build -DSECS_FETCH_SPDLOG=ON`
 - 无网络/内网：准备好 spdlog include 目录后 `-DSECS_SPDLOG_ROOT=...`
 - 子项目场景如果也想自动下载，可在主工程里设置：`set(SECS_FETCH_SPDLOG ON CACHE BOOL "" FORCE)` 再 `add_subdirectory(secs_lib)`
+
+另外：可通过 `SECS_SPDLOG_ACTIVE_LEVEL` 控制 **编译期** 日志级别（会剔除高于该级别的日志代码路径）：
+
+- 顶层构建默认：`SPDLOG_LEVEL_DEBUG`
+- 作为子项目引入默认：`SPDLOG_LEVEL_INFO`
+- 可选值：`SPDLOG_LEVEL_TRACE/DEBUG/INFO/WARN/ERROR/CRITICAL/OFF`
+- 示例：`cmake -S . -B build -DSECS_SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_WARN`
 
 ### Asio 获取策略与常见报错
 

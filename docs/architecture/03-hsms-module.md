@@ -260,7 +260,7 @@
 │                                                                     │
 │  1. TCP 分帧读取                                                    │
 │     ├── 读 4B 长度字段                                              │
-│     ├── 读 payload (Header + Body)                                  │
+│     ├── 先读 10B Header，再直读 Body 到 Message::body               │
 │     └── T8 超时控制                                                 │
 │                                                                     │
 │  2. 消息写入串行化                                                  │
@@ -467,6 +467,16 @@
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+### 5.2.1 控制消息观测（on_control_event）
+
+`hsms::SessionOptions` 提供可选回调 `on_control_event`，用于观测 HSMS 控制消息（`SType != data`）的收发事件，便于联调日志与指标系统接入。
+
+- 触发范围：仅控制消息（SELECT/DESELECT/LINKTEST/REJECT/SEPARATE 等），数据消息不触发
+- 方向：`ControlDirection::{rx, tx}`（接收/发送）
+- 字段：透出 `session_id/system_bytes/header_byte2/header_byte3`（字节级，不做语义解释）
+- Reject.req：当 body 恰好为 10B 时，`has_rejected_header=true` 且解析出 `rejected_header`
+- 注意：回调仅用于观测/统计；回调抛出的异常会被捕获并忽略，不影响会话可用性
+
 ### 5.3 Active 模式流程
 
 ```
@@ -539,6 +549,9 @@
 │                                                                     │
 │  reader_loop_ 控制消息处理：                                        │
 │  ┌────────────────────────────────────────────────────────────┐    │
+│  │  // 控制消息：先触发可选观测回调（on_control_event）         │    │
+│  │  emit_control_event(rx, msg);                               │    │
+│  │                                                             │    │
 │  │  switch (msg.s_type) {                                      │    │
 │  │      case select_req:                                       │    │
 │  │          // 被动端处理                                      │    │
@@ -562,6 +575,15 @@
 │  │                                                             │    │
 │  │      case separate_req:                                     │    │
 │  │          on_disconnected_()   // 立即断线                   │    │
+│  │          break;                                             │    │
+│  │                                                             │    │
+│  │      case reject_req:                                       │    │
+│  │          // Reject.req：不改变状态；仅用于联调观测           │    │
+│  │          break;                                             │    │
+│  │                                                             │    │
+│  │      default:                                               │    │
+│  │          // 未知控制类型：回 Reject.req(reason=1)            │    │
+│  │          send Reject.req                                    │    │
 │  │          break;                                             │    │
 │  │  }                                                          │    │
 │  └────────────────────────────────────────────────────────────┘    │

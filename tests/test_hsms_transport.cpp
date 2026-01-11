@@ -1157,7 +1157,7 @@ void test_session_precondition_and_stop_branches() {
     TEST_EXPECT(done.load());
 }
 
-void test_session_unknown_control_type_is_ignored() {
+void test_session_reject_req_triggers_control_event() {
     asio::io_context ioc;
 
     SessionOptions opt;
@@ -1166,7 +1166,24 @@ void test_session_unknown_control_type_is_ignored() {
     opt.t7 = 200ms;
     opt.t8 = 50ms;
 
-    Session server(ioc.get_executor(), opt);
+    std::atomic<std::uint32_t> server_rx_reject{0};
+    auto on_control = [](void *user,
+                         const secs::hsms::ControlEvent &ev) noexcept {
+        auto *cnt = static_cast<std::atomic<std::uint32_t> *>(user);
+        if (!cnt) {
+            return;
+        }
+        if (ev.direction == secs::hsms::ControlDirection::rx &&
+            ev.s_type == secs::hsms::SType::reject_req) {
+            cnt->fetch_add(1);
+        }
+    };
+
+    SessionOptions server_opt = opt;
+    server_opt.on_control_event = on_control;
+    server_opt.on_control_event_user = &server_rx_reject;
+
+    Session server(ioc.get_executor(), server_opt);
     Session client(ioc.get_executor(), opt);
 
     auto duplex = make_memory_duplex(ioc.get_executor());
@@ -1185,7 +1202,7 @@ void test_session_unknown_control_type_is_ignored() {
             auto ec = co_await client.async_open_active(std::move(client_conn));
             TEST_EXPECT_OK(ec);
 
-            // 发送 Reject.req（当前实现走“默认分支”，忽略）。
+            // 发送 Reject.req（不影响会话状态，但应触发 on_control_event 观测）。
             Message m;
             m.header.session_id = 0xFFFF;
             m.header.p_type = secs::hsms::kPTypeSecs2;
@@ -1200,6 +1217,159 @@ void test_session_unknown_control_type_is_ignored() {
 
             TEST_EXPECT(client.is_selected());
             TEST_EXPECT(server.is_selected());
+            TEST_EXPECT_EQ(server_rx_reject.load(), 1U);
+
+            client.stop();
+            server.stop();
+            done = true;
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(done.load());
+}
+
+void test_session_control_event_parses_rejected_header() {
+    asio::io_context ioc;
+
+    SessionOptions opt;
+    opt.session_id = 0x0001;
+    opt.t6 = 50ms;
+    opt.t7 = 200ms;
+    opt.t8 = 50ms;
+
+    struct Capture final {
+        std::atomic<bool> seen{false};
+        std::atomic<std::uint8_t> reason{0};
+        std::atomic<bool> has_rejected_header{false};
+
+        std::atomic<std::uint16_t> rej_session_id{0};
+        std::atomic<std::uint8_t> rej_header_byte2{0};
+        std::atomic<std::uint8_t> rej_header_byte3{0};
+        std::atomic<std::uint8_t> rej_p_type{0};
+        std::atomic<std::uint8_t> rej_s_type{0};
+        std::atomic<std::uint32_t> rej_system_bytes{0};
+    };
+
+    Capture cap{};
+    auto on_control = [](void *user,
+                         const secs::hsms::ControlEvent &ev) noexcept {
+        auto *c = static_cast<Capture *>(user);
+        if (!c) {
+            return;
+        }
+        if (ev.direction != secs::hsms::ControlDirection::rx ||
+            ev.s_type != secs::hsms::SType::reject_req) {
+            return;
+        }
+
+        c->reason.store(ev.header_byte2, std::memory_order_relaxed);
+        c->has_rejected_header.store(ev.has_rejected_header,
+                                     std::memory_order_relaxed);
+        if (ev.has_rejected_header) {
+            c->rej_session_id.store(ev.rejected_header.session_id,
+                                    std::memory_order_relaxed);
+            c->rej_header_byte2.store(ev.rejected_header.header_byte2,
+                                      std::memory_order_relaxed);
+            c->rej_header_byte3.store(ev.rejected_header.header_byte3,
+                                      std::memory_order_relaxed);
+            c->rej_p_type.store(ev.rejected_header.p_type,
+                                std::memory_order_relaxed);
+            c->rej_s_type.store(static_cast<std::uint8_t>(ev.rejected_header.s_type),
+                                std::memory_order_relaxed);
+            c->rej_system_bytes.store(ev.rejected_header.system_bytes,
+                                      std::memory_order_relaxed);
+        }
+        c->seen.store(true, std::memory_order_relaxed);
+    };
+
+    SessionOptions server_opt = opt;
+    server_opt.on_control_event = on_control;
+    server_opt.on_control_event_user = &cap;
+
+    Session server(ioc.get_executor(), server_opt);
+    Session client(ioc.get_executor(), opt);
+
+    auto duplex = make_memory_duplex(ioc.get_executor());
+    Connection client_conn(std::move(duplex.client_stream),
+                           ConnectionOptions{.t8 = opt.t8});
+    Connection server_conn(std::move(duplex.server_stream),
+                           ConnectionOptions{.t8 = opt.t8});
+
+    std::atomic<bool> done{false};
+    asio::co_spawn(
+        ioc, server.async_open_passive(std::move(server_conn)), asio::detached);
+
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            auto ec = co_await client.async_open_active(std::move(client_conn));
+            TEST_EXPECT_OK(ec);
+
+            // Reject.req 的 body：携带 10B 被拒绝消息的 header（字节级回显）。
+            secs::hsms::Header rejected{};
+            rejected.session_id = opt.session_id;
+            rejected.header_byte2 = 0x81; // W=1, Stream=1
+            rejected.header_byte3 = 0x01; // Function=1
+            rejected.p_type = secs::hsms::kPTypeSecs2;
+            rejected.s_type = secs::hsms::SType::data;
+            rejected.system_bytes = 0xAABBCCDD;
+
+            std::vector<byte> rejected_header_bytes;
+            rejected_header_bytes.reserve(10);
+            rejected_header_bytes.push_back(
+                static_cast<byte>((rejected.session_id >> 8U) & 0xFFU));
+            rejected_header_bytes.push_back(
+                static_cast<byte>(rejected.session_id & 0xFFU));
+            rejected_header_bytes.push_back(rejected.header_byte2);
+            rejected_header_bytes.push_back(rejected.header_byte3);
+            rejected_header_bytes.push_back(rejected.p_type);
+            rejected_header_bytes.push_back(static_cast<byte>(rejected.s_type));
+            rejected_header_bytes.push_back(
+                static_cast<byte>((rejected.system_bytes >> 24U) & 0xFFU));
+            rejected_header_bytes.push_back(
+                static_cast<byte>((rejected.system_bytes >> 16U) & 0xFFU));
+            rejected_header_bytes.push_back(
+                static_cast<byte>((rejected.system_bytes >> 8U) & 0xFFU));
+            rejected_header_bytes.push_back(
+                static_cast<byte>(rejected.system_bytes & 0xFFU));
+
+            Message m;
+            m.header.session_id = 0xFFFF;
+            m.header.header_byte2 = 3; // reason code（字节级，不做语义解释）
+            m.header.header_byte3 = 0;
+            m.header.p_type = secs::hsms::kPTypeSecs2;
+            m.header.s_type = secs::hsms::SType::reject_req;
+            m.header.system_bytes = client.allocate_system_bytes();
+            m.body = std::move(rejected_header_bytes);
+
+            ec = co_await client.async_send(m);
+            TEST_EXPECT_OK(ec);
+
+            asio::steady_timer t(ioc);
+            t.expires_after(5ms);
+            (void)co_await t.async_wait(asio::as_tuple(asio::use_awaitable));
+
+            TEST_EXPECT(client.is_selected());
+            TEST_EXPECT(server.is_selected());
+
+            TEST_EXPECT(cap.seen.load(std::memory_order_relaxed));
+            TEST_EXPECT_EQ(cap.reason.load(std::memory_order_relaxed), 3U);
+            TEST_EXPECT(cap.has_rejected_header.load(std::memory_order_relaxed));
+
+            TEST_EXPECT_EQ(cap.rej_session_id.load(std::memory_order_relaxed),
+                           opt.session_id);
+            TEST_EXPECT_EQ(cap.rej_header_byte2.load(std::memory_order_relaxed),
+                           0x81U);
+            TEST_EXPECT_EQ(cap.rej_header_byte3.load(std::memory_order_relaxed),
+                           0x01U);
+            TEST_EXPECT_EQ(cap.rej_p_type.load(std::memory_order_relaxed),
+                           secs::hsms::kPTypeSecs2);
+            TEST_EXPECT_EQ(cap.rej_s_type.load(std::memory_order_relaxed),
+                           static_cast<std::uint8_t>(secs::hsms::SType::data));
+            TEST_EXPECT_EQ(cap.rej_system_bytes.load(std::memory_order_relaxed),
+                           0xAABBCCDDU);
 
             client.stop();
             server.stop();
@@ -2210,6 +2380,8 @@ int main() {
     RUN_TEST(test_session_select_req_session_id_mismatch_disconnects);
     RUN_TEST(test_session_deselect_req_moves_to_not_selected);
     RUN_TEST(test_session_select_reject);
+    RUN_TEST(test_session_reject_req_triggers_control_event);
+    RUN_TEST(test_session_control_event_parses_rejected_header);
     RUN_TEST(test_session_open_passive_socket_overload_executes);
     RUN_TEST(test_session_control_response_type_mismatch_times_out);
     RUN_TEST(test_session_t6_timeout_on_select);
