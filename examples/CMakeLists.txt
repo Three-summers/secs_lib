@@ -46,6 +46,13 @@ if(UNIX)
   set_target_properties(c_api_protocol_loopback PROPERTIES LINKER_LANGUAGE CXX)
   target_compile_features(c_api_protocol_loopback PRIVATE c_std_11)
   list(APPEND _secs_example_targets c_api_protocol_loopback)
+
+  # C API（C ABI）CEID 示例：仿 TVOC_Secs_App（memory duplex + pthread）
+  add_executable(c_api_ceid_tvoc_style c_api_ceid_tvoc_style.c)
+  target_link_libraries(c_api_ceid_tvoc_style PRIVATE secs::c_api)
+  set_target_properties(c_api_ceid_tvoc_style PROPERTIES LINKER_LANGUAGE CXX)
+  target_compile_features(c_api_ceid_tvoc_style PRIVATE c_std_11)
+  list(APPEND _secs_example_targets c_api_ceid_tvoc_style)
 endif()
 
 # HSMS 服务器示例
@@ -99,6 +106,11 @@ list(APPEND _secs_example_targets protocol_custom_reply_example)
 add_executable(secs1_loopback secs1_loopback.cpp)
 target_link_libraries(secs1_loopback PRIVATE secs::protocol secs::core)
 list(APPEND _secs_example_targets secs1_loopback)
+
+# CEID 示例：仿 TVOC_Secs_App 的消息体结构（按 CEID 路由处理）
+add_executable(ceid_dispatcher_tvoc_style ceid_dispatcher_tvoc_style.cpp)
+target_link_libraries(ceid_dispatcher_tvoc_style PRIVATE secs::protocol secs::ii secs::utils secs::core)
+list(APPEND _secs_example_targets ceid_dispatcher_tvoc_style)
 
 # SMLX 主动发送示例（占位符渲染 + encode_message_body）
 add_executable(smlx_active_send_example smlx_active_send_example.cpp)

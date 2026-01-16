@@ -1,6 +1,6 @@
 # 使用示例
 
-> 文档更新：2026-01-08（Codex）
+> 文档更新：2026-01-16（Codex）
 
 ## 编译运行
 
@@ -23,6 +23,7 @@ cmake --build build --target examples
 ./build/examples/hsms_pipe_server [device_id]      # UNIX
 ./build/examples/hsms_pipe_client [device_id]      # UNIX
 ./build/examples/secs1_loopback
+./build/examples/ceid_dispatcher_tvoc_style        # CEID：仿 TVOC_Secs_App（MemoryLink）
 ./build/examples/smlx_active_send_example          # SMLX：占位符 + 主动发送（MemoryLink）
 ./build/examples/secs1_sml_peer --help             # Windows/POSIX（串口 SML 对端）
 ./build/examples/secs1_serial_server <tty_path>    # UNIX（POSIX termios）
@@ -38,6 +39,7 @@ cmake --build build --target examples
 
 # C API：协议层回环（memory duplex，无 socket 环境也可运行，仅 UNIX）
 ./build/examples/c_api_protocol_loopback
+./build/examples/c_api_ceid_tvoc_style             # C API CEID：仿 TVOC_Secs_App（仅 UNIX）
 ```
 
 ## HSMS 客户端/服务器示例
@@ -201,6 +203,27 @@ ctest --test-dir build -R hsms_pipe_examples --output-on-failure
 ```bash
 ./build/examples/c_api_protocol_loopback
 ```
+
+## CEID：仿 TVOC_Secs_App 的“简易处理层”示例（不引入 GEM）
+
+文件：
+- `ceid_dispatcher_tvoc_style.cpp`：C++（SECS-I MemoryLink），演示 `CeidDispatcher` 按 CEID 路由 + request/reply CEID 校验
+- `c_api_ceid_tvoc_style.c`：C（HSMS memory duplex），演示 C API 的 CEID dispatcher + 阻塞式 request/reply CEID 校验（仅 UNIX）
+
+对齐 TVOC 的“消息体形式”：
+- S6F11 体：`<L[3] <U2 DATAID> <U2 CEID> <...>>`
+- CEID：`0x5000`（U2）
+
+运行：
+
+```bash
+./build/examples/ceid_dispatcher_tvoc_style
+./build/examples/c_api_ceid_tvoc_style # UNIX
+```
+
+说明：
+- 两个示例都让 S6F11 使用 W=1，并返回 S6F12，以演示“请求/响应都带 CEID”的场景；
+- 若你的厂商协议 secondary 不携带 CEID：把示例中的 `verify_equal` 关闭即可。
 
 ## secs2_simple.cpp - SECS-II 编解码基础
 

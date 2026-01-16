@@ -58,6 +58,10 @@ add_executable(test_utils_helpers test_utils_helpers.cpp)
 target_link_libraries(test_utils_helpers PRIVATE secs_protocol)
 add_test(NAME utils_helpers COMMAND test_utils_helpers)
 
+add_executable(test_ceid_layer test_ceid_layer.cpp)
+target_link_libraries(test_ceid_layer PRIVATE secs_protocol)
+add_test(NAME ceid_layer COMMAND test_ceid_layer)
+
 add_executable(test_c_api_c test_c_api.c)
 target_link_libraries(test_c_api_c PRIVATE secs_c_api)
 # 该测试源码为 C，但链接必须走 C++ 链接器（底层实现为 C++20）。

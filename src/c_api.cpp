@@ -8,6 +8,7 @@
 #include "secs/hsms/session.hpp"
 #include "secs/ii/codec.hpp"
 #include "secs/ii/item.hpp"
+#include "secs/protocol/ceid_dispatcher.hpp"
 #include "secs/protocol/router.hpp"
 #include "secs/protocol/session.hpp"
 #include "secs/secs1/block.hpp"
@@ -31,6 +32,7 @@
 #include <cstring>
 #include <deque>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -118,6 +120,10 @@ struct protocol_state final {
 
 struct secs_protocol_session final {
     std::shared_ptr<protocol_state> state{};
+};
+
+struct secs_ceid_dispatcher final {
+    std::shared_ptr<secs::protocol::CeidDispatcher> dispatcher{};
 };
 
 namespace {
@@ -501,6 +507,53 @@ make_decode_limits(const secs_ii_decode_limits_t *limits) noexcept {
         out.max_total_bytes = limits->max_total_bytes;
     }
     return out;
+}
+
+[[nodiscard]] std::optional<std::uint32_t>
+extract_u32_scalar(const secs::ii::Item &item) noexcept {
+    if (auto *u1 = item.get_if<secs::ii::U1>()) {
+        if (u1->values.size() == 1) {
+            return u1->values[0];
+        }
+        return std::nullopt;
+    }
+    if (auto *u2 = item.get_if<secs::ii::U2>()) {
+        if (u2->values.size() == 1) {
+            return u2->values[0];
+        }
+        return std::nullopt;
+    }
+    if (auto *u4 = item.get_if<secs::ii::U4>()) {
+        if (u4->values.size() == 1) {
+            return u4->values[0];
+        }
+        return std::nullopt;
+    }
+    if (auto *u8 = item.get_if<secs::ii::U8>()) {
+        if (u8->values.size() == 1) {
+            const auto v = u8->values[0];
+            if (v <= static_cast<std::uint64_t>(
+                         std::numeric_limits<std::uint32_t>::max())) {
+                return static_cast<std::uint32_t>(v);
+            }
+        }
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<std::uint32_t>
+extract_u32_from_list_path(const secs::ii::Item &root,
+                           const std::vector<std::size_t> &path) noexcept {
+    const secs::ii::Item *cur = &root;
+    for (const auto idx : path) {
+        auto *list = cur->get_if<secs::ii::List>();
+        if (!list || idx >= list->size()) {
+            return std::nullopt;
+        }
+        cur = &(*list)[idx];
+    }
+    return extract_u32_scalar(*cur);
 }
 
 [[nodiscard]] secs::hsms::SessionOptions
@@ -2076,6 +2129,229 @@ secs_error_t secs_protocol_session_set_handler(secs_protocol_session_t *sess,
     });
 }
 
+secs_error_t secs_ceid_dispatcher_create_list_path(
+    const size_t *indices,
+    size_t indices_n,
+    const secs_ii_decode_limits_t *decode_limits,
+    int strict_consumed,
+    secs_ceid_dispatcher_t **out_disp) {
+    return guard_error([&]() -> secs_error_t {
+        if (!out_disp) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        if (!indices && indices_n != 0) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+
+        std::vector<std::size_t> path;
+        path.reserve(indices_n);
+        for (std::size_t i = 0; i < indices_n; ++i) {
+            path.push_back(indices[i]);
+        }
+
+        secs::protocol::CeidDispatcher::DecodeOptions opt{};
+        opt.limits = make_decode_limits(decode_limits);
+        opt.strict_consumed = (strict_consumed != 0);
+
+        auto extractor =
+            [path = std::move(path)](
+                const secs::protocol::DataMessage &,
+                const secs::ii::Item &body)
+                -> std::optional<secs::protocol::CeidDispatcher::Ceid> {
+            const auto ceid = extract_u32_from_list_path(body, path);
+            if (!ceid.has_value()) {
+                return std::nullopt;
+            }
+            return static_cast<secs::protocol::CeidDispatcher::Ceid>(
+                ceid.value());
+        };
+
+        auto dispatcher = std::make_shared<secs::protocol::CeidDispatcher>(
+            std::move(extractor), opt);
+
+        auto handle = std::make_unique<secs_ceid_dispatcher>();
+        handle->dispatcher = std::move(dispatcher);
+        *out_disp = handle.release();
+        return ok();
+    });
+}
+
+void secs_ceid_dispatcher_destroy(secs_ceid_dispatcher_t *disp) {
+    guard_void([&]() { delete disp; });
+}
+
+secs_error_t secs_ceid_dispatcher_set_handler(secs_ceid_dispatcher_t *disp,
+                                              uint32_t ceid,
+                                              secs_ceid_handler_fn cb,
+                                              void *user_data) {
+    return guard_error([&]() -> secs_error_t {
+        if (!disp || !disp->dispatcher || !cb) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+
+        auto handler =
+            [cb, user_data](secs::protocol::CeidDispatcher::Ceid c,
+                            const secs::ii::Item &,
+                            const secs::protocol::DataMessage &msg)
+            -> asio::awaitable<secs::protocol::HandlerResult> {
+            uint8_t *out_body = nullptr;
+            size_t out_n = 0;
+            try {
+                secs_data_message_view_t view{};
+                view.stream = msg.stream;
+                view.function = msg.function;
+                view.w_bit = msg.w_bit ? 1 : 0;
+                view.system_bytes = msg.system_bytes;
+                view.body =
+                    reinterpret_cast<const uint8_t *>(msg.body.data());
+                view.body_n = msg.body.size();
+
+                secs_error_t cec =
+                    cb(user_data, static_cast<uint32_t>(c), &view, &out_body, &out_n);
+                if (!secs_error_is_ok(cec)) {
+                    if (out_body) {
+                        secs_free(out_body);
+                    }
+                    co_return secs::protocol::HandlerResult{
+                        make_error_code(errc::invalid_argument), {}};
+                }
+                if (!out_body && out_n != 0) {
+                    co_return secs::protocol::HandlerResult{
+                        make_error_code(errc::invalid_argument), {}};
+                }
+
+                std::vector<byte> rsp;
+                rsp.resize(out_n);
+                if (out_n != 0) {
+                    std::memcpy(rsp.data(), out_body, out_n);
+                }
+                if (out_body) {
+                    secs_free(out_body);
+                }
+                co_return secs::protocol::HandlerResult{std::error_code{},
+                                                        std::move(rsp)};
+            } catch (...) {
+                if (out_body) {
+                    secs_free(out_body);
+                }
+                co_return secs::protocol::HandlerResult{
+                    make_error_code(errc::invalid_argument), {}};
+            }
+        };
+
+        disp->dispatcher->set(
+            static_cast<secs::protocol::CeidDispatcher::Ceid>(ceid),
+            std::move(handler));
+        return ok();
+    });
+}
+
+secs_error_t secs_ceid_dispatcher_set_default_handler(secs_ceid_dispatcher_t *disp,
+                                                      secs_ceid_handler_fn cb,
+                                                      void *user_data) {
+    return guard_error([&]() -> secs_error_t {
+        if (!disp || !disp->dispatcher || !cb) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+
+        auto handler =
+            [cb, user_data](secs::protocol::CeidDispatcher::Ceid c,
+                            const secs::ii::Item &,
+                            const secs::protocol::DataMessage &msg)
+            -> asio::awaitable<secs::protocol::HandlerResult> {
+            uint8_t *out_body = nullptr;
+            size_t out_n = 0;
+            try {
+                secs_data_message_view_t view{};
+                view.stream = msg.stream;
+                view.function = msg.function;
+                view.w_bit = msg.w_bit ? 1 : 0;
+                view.system_bytes = msg.system_bytes;
+                view.body =
+                    reinterpret_cast<const uint8_t *>(msg.body.data());
+                view.body_n = msg.body.size();
+
+                secs_error_t cec =
+                    cb(user_data, static_cast<uint32_t>(c), &view, &out_body, &out_n);
+                if (!secs_error_is_ok(cec)) {
+                    if (out_body) {
+                        secs_free(out_body);
+                    }
+                    co_return secs::protocol::HandlerResult{
+                        make_error_code(errc::invalid_argument), {}};
+                }
+                if (!out_body && out_n != 0) {
+                    co_return secs::protocol::HandlerResult{
+                        make_error_code(errc::invalid_argument), {}};
+                }
+
+                std::vector<byte> rsp;
+                rsp.resize(out_n);
+                if (out_n != 0) {
+                    std::memcpy(rsp.data(), out_body, out_n);
+                }
+                if (out_body) {
+                    secs_free(out_body);
+                }
+                co_return secs::protocol::HandlerResult{std::error_code{},
+                                                        std::move(rsp)};
+            } catch (...) {
+                if (out_body) {
+                    secs_free(out_body);
+                }
+                co_return secs::protocol::HandlerResult{
+                    make_error_code(errc::invalid_argument), {}};
+            }
+        };
+
+        disp->dispatcher->set_default(std::move(handler));
+        return ok();
+    });
+}
+
+secs_error_t secs_ceid_dispatcher_clear_default_handler(
+    secs_ceid_dispatcher_t *disp) {
+    return guard_error([&]() -> secs_error_t {
+        if (!disp || !disp->dispatcher) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        disp->dispatcher->clear_default();
+        return ok();
+    });
+}
+
+secs_error_t secs_ceid_dispatcher_erase_handler(secs_ceid_dispatcher_t *disp,
+                                                uint32_t ceid) {
+    return guard_error([&]() -> secs_error_t {
+        if (!disp || !disp->dispatcher) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        disp->dispatcher->erase(
+            static_cast<secs::protocol::CeidDispatcher::Ceid>(ceid));
+        return ok();
+    });
+}
+
+secs_error_t secs_protocol_session_set_ceid_dispatcher(
+    secs_protocol_session_t *sess,
+    uint8_t stream,
+    uint8_t function,
+    secs_ceid_dispatcher_t *disp) {
+    return guard_error([&]() -> secs_error_t {
+        if (!sess || !sess->state || !sess->state->sess || !disp ||
+            !disp->dispatcher) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+
+        secs::protocol::register_ceid_dispatcher(
+            sess->state->sess->router(),
+            stream,
+            function,
+            disp->dispatcher);
+        return ok();
+    });
+}
+
 secs_error_t
 secs_protocol_session_set_default_handler(secs_protocol_session_t *sess,
                                           secs_protocol_handler_fn cb,
@@ -2307,5 +2583,149 @@ secs_error_t secs_protocol_session_request(secs_protocol_session_t *sess,
         if (result.first)
             return from_error_code(result.first);
         return fill_protocol_out_message(result.second, out_reply);
+    });
+}
+
+secs_error_t secs_protocol_session_request_with_ceid_list_path(
+    secs_protocol_session_t *sess,
+    uint8_t stream,
+    uint8_t function,
+    const uint8_t *body_bytes,
+    size_t body_n,
+    uint32_t timeout_ms,
+    const size_t *ceid_indices,
+    size_t ceid_indices_n,
+    const secs_ii_decode_limits_t *decode_limits,
+    int verify_equal,
+    secs_data_message_t *out_reply,
+    int *out_has_request_ceid,
+    uint32_t *out_request_ceid,
+    int *out_has_reply_ceid,
+    uint32_t *out_reply_ceid) {
+    return guard_error([&]() -> secs_error_t {
+        if (!sess || !sess->state || !sess->state->ctx || !sess->state->sess ||
+            !out_reply) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        if (!body_bytes && body_n != 0) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        if (!ceid_indices && ceid_indices_n != 0) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+
+        // 统一清空输出，避免调用方复用结构体时残留旧数据。
+        secs_data_message_free(out_reply);
+
+        if (out_has_request_ceid) {
+            *out_has_request_ceid = 0;
+        }
+        if (out_request_ceid) {
+            *out_request_ceid = 0;
+        }
+        if (out_has_reply_ceid) {
+            *out_has_reply_ceid = 0;
+        }
+        if (out_reply_ceid) {
+            *out_reply_ceid = 0;
+        }
+
+        std::vector<std::size_t> path;
+        path.reserve(ceid_indices_n);
+        for (std::size_t i = 0; i < ceid_indices_n; ++i) {
+            path.push_back(ceid_indices[i]);
+        }
+
+        const auto limits = make_decode_limits(decode_limits);
+
+        std::optional<std::uint32_t> request_ceid;
+        if (body_n != 0) {
+            secs::ii::Item item{secs::ii::List{}};
+            std::size_t consumed = 0;
+            const auto dec_ec =
+                secs::ii::decode_one(bytes_view{reinterpret_cast<const byte *>(body_bytes),
+                                                body_n},
+                                     item,
+                                     consumed,
+                                     limits);
+            if (dec_ec) {
+                return from_error_code(dec_ec);
+            }
+            request_ceid = extract_u32_from_list_path(item, path);
+        }
+
+        if (request_ceid.has_value()) {
+            if (out_has_request_ceid) {
+                *out_has_request_ceid = 1;
+            }
+            if (out_request_ceid) {
+                *out_request_ceid = request_ceid.value();
+            }
+        } else {
+            if (verify_equal != 0) {
+                return from_error_code(make_error_code(errc::invalid_argument));
+            }
+        }
+
+        using Result = std::pair<std::error_code, secs::protocol::DataMessage>;
+        Result result{};
+
+        auto state = sess->state;
+        auto bridge = run_blocking<Result>(
+            state->ctx,
+            [state,
+             stream,
+             function,
+             body = bytes_view{reinterpret_cast<const byte *>(body_bytes), body_n},
+             timeout = ms_to_optional_duration(timeout_ms)]() -> asio::awaitable<Result> {
+                co_return co_await state->sess->async_request(
+                    stream, function, body, timeout);
+            },
+            result);
+        if (!secs_error_is_ok(bridge)) {
+            return bridge;
+        }
+        if (result.first) {
+            return from_error_code(result.first);
+        }
+
+        // 即便后续 CEID 校验失败，也把 reply 原样带回（便于排查）。
+        const auto fill_ec = fill_protocol_out_message(result.second, out_reply);
+        if (!secs_error_is_ok(fill_ec)) {
+            return fill_ec;
+        }
+
+        std::optional<std::uint32_t> reply_ceid;
+        if (!result.second.body.empty()) {
+            secs::ii::Item item{secs::ii::List{}};
+            std::size_t consumed = 0;
+            const auto dec_ec = secs::ii::decode_one(
+                bytes_view{result.second.body.data(), result.second.body.size()},
+                item,
+                consumed,
+                limits);
+            if (dec_ec) {
+                return from_error_code(dec_ec);
+            }
+            reply_ceid = extract_u32_from_list_path(item, path);
+        }
+
+        if (reply_ceid.has_value()) {
+            if (out_has_reply_ceid) {
+                *out_has_reply_ceid = 1;
+            }
+            if (out_reply_ceid) {
+                *out_reply_ceid = reply_ceid.value();
+            }
+        }
+
+        if (verify_equal != 0) {
+            if (!request_ceid.has_value() || !reply_ceid.has_value() ||
+                reply_ceid.value() != request_ceid.value()) {
+                return from_error_code(make_error_code(errc::invalid_argument));
+            }
+        }
+
+        return ok();
     });
 }

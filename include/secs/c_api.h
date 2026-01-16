@@ -521,6 +521,102 @@ typedef secs_error_t (*secs_protocol_handler_fn)(
     uint8_t **out_body,
     size_t *out_body_n);
 
+/* ----------------------------- CEID：简易处理层（不引入 GEM）
+ * ----------------------------- */
+
+typedef struct secs_ceid_dispatcher secs_ceid_dispatcher_t;
+
+/*
+ * CEID handler 回调：
+ * - 在库内部 io 线程调用；
+ * - ceid 为库从 request body 解码并按“路径”提取出的值；
+ * - 如果 request.w_bit==1，库会自动把回调返回的 body 作为 secondary body 回给对端；
+ * - 回调返回 OK 表示成功；非 OK 表示拒绝处理（库将不回包）。
+ *
+ * 重要：out_body 必须使用 `secs_malloc()` 分配（库会在复制后调用 secs_free 释放）。
+ */
+typedef secs_error_t (*secs_ceid_handler_fn)(void *user_data,
+                                            uint32_t ceid,
+                                            const secs_data_message_view_t *request,
+                                            uint8_t **out_body,
+                                            size_t *out_body_n);
+
+/*
+ * 创建一个 CEID dispatcher（基于 list path 提取 CEID）。
+ *
+ * 提取规则：
+ * - 先把 request.body 解码为一个 SECS-II Item；
+ * - 从 root 开始，按 indices[0..n) 逐级向下取 List 的子元素；
+ * - 取到目标 Item 后，要求其为 U1/U2/U4/U8 的“单值标量”（U8 需不溢出 uint32）。
+ *
+ * 参数：
+ * - indices/indices_n：CEID 在 List 中的位置路径；例如 S6F11-like
+ *   的 <L <DATAID> <CEID> ...> 可传 indices={1}, indices_n=1。
+ *   若 indices_n==0，则表示 root 本身就是 CEID 标量。
+ * - decode_limits：用于 decode_one 的资源限制；NULL 表示使用库默认限制。
+ * - strict_consumed：非 0 时要求 consumed==body_n，否则返回 invalid_argument。
+ */
+secs_error_t secs_ceid_dispatcher_create_list_path(
+    const size_t *indices,
+    size_t indices_n,
+    const secs_ii_decode_limits_t *decode_limits,
+    int strict_consumed,
+    secs_ceid_dispatcher_t **out_disp);
+
+void secs_ceid_dispatcher_destroy(secs_ceid_dispatcher_t *disp);
+
+secs_error_t secs_ceid_dispatcher_set_handler(secs_ceid_dispatcher_t *disp,
+                                              uint32_t ceid,
+                                              secs_ceid_handler_fn cb,
+                                              void *user_data);
+
+secs_error_t secs_ceid_dispatcher_set_default_handler(secs_ceid_dispatcher_t *disp,
+                                                      secs_ceid_handler_fn cb,
+                                                      void *user_data);
+
+secs_error_t
+secs_ceid_dispatcher_clear_default_handler(secs_ceid_dispatcher_t *disp);
+
+secs_error_t secs_ceid_dispatcher_erase_handler(secs_ceid_dispatcher_t *disp,
+                                                uint32_t ceid);
+
+/*
+ * 将 CEID dispatcher 挂到 protocol session 的 (stream,function) 上。
+ *
+ * 注意：该函数等价于为 (stream,function) 设置一个 handler；
+ * 如需移除可调用 secs_protocol_session_erase_handler(sess, stream, function)。
+ */
+secs_error_t secs_protocol_session_set_ceid_dispatcher(secs_protocol_session_t *sess,
+                                                       uint8_t stream,
+                                                       uint8_t function,
+                                                       secs_ceid_dispatcher_t *disp);
+
+/*
+ * 阻塞式 helper：request/reply 均带 CEID 时，提取并（可选）校验一致性。
+ *
+ * 行为：
+ * - 发送 request（W=1）并等待 reply（secondary）；
+ * - 若 body 非空，则解码为 Item 并按 list path 提取 CEID；
+ * - verify_equal!=0 时：要求 request/reply 的 CEID 均存在且相等，否则返回 invalid_argument；
+ * - 即便校验失败，只要收包成功，out_reply 仍会被填充（便于排查）。
+ */
+secs_error_t secs_protocol_session_request_with_ceid_list_path(
+    secs_protocol_session_t *sess,
+    uint8_t stream,
+    uint8_t function,
+    const uint8_t *body_bytes,
+    size_t body_n,
+    uint32_t timeout_ms,
+    const size_t *ceid_indices,
+    size_t ceid_indices_n,
+    const secs_ii_decode_limits_t *decode_limits,
+    int verify_equal,
+    secs_data_message_t *out_reply,
+    int *out_has_request_ceid,
+    uint32_t *out_request_ceid,
+    int *out_has_reply_ceid,
+    uint32_t *out_reply_ceid);
+
 /*
  * 从 HSMS 创建协议层会话。
  *

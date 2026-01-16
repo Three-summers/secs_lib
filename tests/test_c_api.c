@@ -1536,6 +1536,172 @@ server_handler_empty(void *user_data,
     return ok;
 }
 
+struct ceid_handler_ud {
+    atomic_int *called;
+    atomic_int *last_ceid;
+    const char *tag;
+    int32_t ceid_delta;
+};
+
+static secs_error_t
+ceid_dispatcher_reply_list_handler(void *user_data,
+                                  uint32_t ceid,
+                                  const secs_data_message_view_t *request,
+                                  uint8_t **out_body,
+                                  size_t *out_body_n) {
+    (void)request;
+    struct ceid_handler_ud *ud = (struct ceid_handler_ud *)user_data;
+
+    if (ud && ud->called) {
+        (void)atomic_fetch_add(ud->called, 1);
+    }
+    if (ud && ud->last_ceid) {
+        atomic_store(ud->last_ceid, (int)ceid);
+    }
+
+    const char *tag = (ud && ud->tag) ? ud->tag : "ACK";
+
+    /* 默认回显 request CEID；可选 delta 用于构造“CEID 不一致”场景 */
+    uint32_t reply_ceid = ceid;
+    if (ud && ud->ceid_delta != 0) {
+        int64_t tmp = (int64_t)ceid + (int64_t)ud->ceid_delta;
+        if (tmp < 0) {
+            tmp = 0;
+        }
+        if (tmp > (int64_t)UINT32_MAX) {
+            tmp = (int64_t)UINT32_MAX;
+        }
+        reply_ceid = (uint32_t)tmp;
+    }
+
+    *out_body = NULL;
+    *out_body_n = 0;
+
+    secs_ii_item_t *body = NULL;
+    secs_ii_item_t *dataid_item = NULL;
+    secs_ii_item_t *ceid_item = NULL;
+    secs_ii_item_t *tag_item = NULL;
+    secs_ii_item_t *empty_list = NULL;
+
+    secs_error_t err = secs_ii_item_create_list(&body);
+    if (err.value != 0) {
+        return err;
+    }
+
+    /* <L <U4 DATAID> <U4 CEID> <A TAG> <L>> */
+    {
+        uint32_t dataid = 1;
+        err = secs_ii_item_create_u4(&dataid, 1, &dataid_item);
+        if (err.value != 0) {
+            goto cleanup;
+        }
+
+        err = secs_ii_item_create_u4(&reply_ceid, 1, &ceid_item);
+        if (err.value != 0) {
+            goto cleanup;
+        }
+
+        err = secs_ii_item_create_ascii(tag, strlen(tag), &tag_item);
+        if (err.value != 0) {
+            goto cleanup;
+        }
+
+        err = secs_ii_item_create_list(&empty_list);
+        if (err.value != 0) {
+            goto cleanup;
+        }
+
+        err = secs_ii_item_list_append(body, dataid_item);
+        if (err.value != 0) {
+            goto cleanup;
+        }
+        err = secs_ii_item_list_append(body, ceid_item);
+        if (err.value != 0) {
+            goto cleanup;
+        }
+        err = secs_ii_item_list_append(body, tag_item);
+        if (err.value != 0) {
+            goto cleanup;
+        }
+        err = secs_ii_item_list_append(body, empty_list);
+        if (err.value != 0) {
+            goto cleanup;
+        }
+    }
+
+    err = secs_ii_encode(body, out_body, out_body_n);
+
+cleanup:
+    secs_ii_item_destroy(dataid_item);
+    secs_ii_item_destroy(ceid_item);
+    secs_ii_item_destroy(tag_item);
+    secs_ii_item_destroy(empty_list);
+    secs_ii_item_destroy(body);
+    return err;
+}
+
+static secs_error_t build_ceid_request_body(uint32_t ceid,
+                                            uint8_t **out_body,
+                                            size_t *out_body_n) {
+    if (!out_body || !out_body_n) {
+        secs_error_t err;
+        err.value = (int)SECS_C_API_INVALID_ARGUMENT;
+        err.category = "secs.c_api";
+        return err;
+    }
+
+    *out_body = NULL;
+    *out_body_n = 0;
+
+    secs_ii_item_t *body = NULL;
+    secs_ii_item_t *dataid_item = NULL;
+    secs_ii_item_t *ceid_item = NULL;
+    secs_ii_item_t *empty_list = NULL;
+
+    secs_error_t err = secs_ii_item_create_list(&body);
+    if (err.value != 0) {
+        return err;
+    }
+
+    {
+        uint32_t dataid = 1;
+        err = secs_ii_item_create_u4(&dataid, 1, &dataid_item);
+        if (err.value != 0) {
+            goto cleanup;
+        }
+        err = secs_ii_item_create_u4(&ceid, 1, &ceid_item);
+        if (err.value != 0) {
+            goto cleanup;
+        }
+        err = secs_ii_item_create_list(&empty_list);
+        if (err.value != 0) {
+            goto cleanup;
+        }
+
+        err = secs_ii_item_list_append(body, dataid_item);
+        if (err.value != 0) {
+            goto cleanup;
+        }
+        err = secs_ii_item_list_append(body, ceid_item);
+        if (err.value != 0) {
+            goto cleanup;
+        }
+        err = secs_ii_item_list_append(body, empty_list);
+        if (err.value != 0) {
+            goto cleanup;
+        }
+    }
+
+    err = secs_ii_encode(body, out_body, out_body_n);
+
+cleanup:
+    secs_ii_item_destroy(dataid_item);
+    secs_ii_item_destroy(ceid_item);
+    secs_ii_item_destroy(empty_list);
+    secs_ii_item_destroy(body);
+    return err;
+}
+
 struct hsms_req_args {
     secs_hsms_session_t *server;
     secs_error_t recv_err;
@@ -2052,6 +2218,240 @@ static void test_hsms_protocol_loopback(void) {
         }
 
         secs_data_message_free(&reply);
+    }
+
+    /* CEID dispatcher：按 CEID 分发 handler + request/reply CEID 校验 helper */
+    {
+        const size_t ceid_path[1] = {1}; /* <L <DATAID> <CEID> ...> */
+
+        secs_ceid_dispatcher_t *cd = NULL;
+        expect_ok("secs_ceid_dispatcher_create_list_path",
+                  secs_ceid_dispatcher_create_list_path(
+                      ceid_path, 1, NULL, 1, &cd));
+
+        atomic_int called_exact;
+        atomic_int last_exact;
+        atomic_init(&called_exact, 0);
+        atomic_init(&last_exact, 0);
+        struct ceid_handler_ud exact_ud;
+        exact_ud.called = &called_exact;
+        exact_ud.last_ceid = &last_exact;
+        exact_ud.tag = "ACK";
+        exact_ud.ceid_delta = 0;
+
+        atomic_int called_default;
+        atomic_int last_default;
+        atomic_init(&called_default, 0);
+        atomic_init(&last_default, 0);
+        struct ceid_handler_ud default_ud;
+        default_ud.called = &called_default;
+        default_ud.last_ceid = &last_default;
+        default_ud.tag = "DEFAULT";
+        default_ud.ceid_delta = 0;
+
+        atomic_int called_mismatch;
+        atomic_int last_mismatch;
+        atomic_init(&called_mismatch, 0);
+        atomic_init(&last_mismatch, 0);
+        struct ceid_handler_ud mismatch_ud;
+        mismatch_ud.called = &called_mismatch;
+        mismatch_ud.last_ceid = &last_mismatch;
+        mismatch_ud.tag = "MISMATCH";
+        mismatch_ud.ceid_delta = 1;
+
+        expect_ok("secs_ceid_dispatcher_set_handler(100)",
+                  secs_ceid_dispatcher_set_handler(
+                      cd, 100, ceid_dispatcher_reply_list_handler, &exact_ud));
+        expect_ok("secs_ceid_dispatcher_set_handler(777)",
+                  secs_ceid_dispatcher_set_handler(
+                      cd,
+                      777,
+                      ceid_dispatcher_reply_list_handler,
+                      &mismatch_ud));
+        expect_ok("secs_ceid_dispatcher_set_default_handler",
+                  secs_ceid_dispatcher_set_default_handler(
+                      cd, ceid_dispatcher_reply_list_handler, &default_ud));
+        expect_ok("secs_protocol_session_set_ceid_dispatcher",
+                  secs_protocol_session_set_ceid_dispatcher(
+                      server_proto, 6, 11, cd));
+
+        /* 1) 命中 CEID=100 */
+        {
+            uint8_t *req = NULL;
+            size_t req_n = 0;
+            expect_ok("build_ceid_request_body(100)",
+                      build_ceid_request_body(100, &req, &req_n));
+
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            expect_ok("secs_protocol_session_request(ceid=100)",
+                      secs_protocol_session_request(
+                          client_proto, 6, 11, req, req_n, 1000, &reply));
+
+            if (atomic_load(&called_exact) != 1 ||
+                atomic_load(&last_exact) != 100) {
+                fprintf(stderr, "FAIL: CEID exact handler not called as expected\n");
+                ++g_failures;
+            }
+
+            /* 解码回应并验证 tag */
+            {
+                size_t consumed = 0;
+                secs_ii_item_t *root = NULL;
+                expect_ok("secs_ii_decode_one(reply)",
+                          secs_ii_decode_one(
+                              reply.body, reply.body_n, &consumed, &root));
+                secs_ii_item_t *tag_item = NULL;
+                expect_ok("secs_ii_item_list_get(tag)",
+                          secs_ii_item_list_get(root, 2, &tag_item));
+                const char *ptr = NULL;
+                size_t n = 0;
+                expect_ok("secs_ii_item_ascii_view(tag)",
+                          secs_ii_item_ascii_view(tag_item, &ptr, &n));
+                if (n != 3u || memcmp(ptr, "ACK", 3u) != 0) {
+                    fprintf(stderr, "FAIL: CEID reply tag mismatch (ACK)\n");
+                    ++g_failures;
+                }
+                secs_ii_item_destroy(tag_item);
+                secs_ii_item_destroy(root);
+            }
+
+            secs_data_message_free(&reply);
+            secs_free(req);
+        }
+
+        /* 2) 未注册 CEID：走 default */
+        {
+            uint8_t *req = NULL;
+            size_t req_n = 0;
+            expect_ok("build_ceid_request_body(123)",
+                      build_ceid_request_body(123, &req, &req_n));
+
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            expect_ok("secs_protocol_session_request(ceid=123)",
+                      secs_protocol_session_request(
+                          client_proto, 6, 11, req, req_n, 1000, &reply));
+
+            if (atomic_load(&called_default) != 1 ||
+                atomic_load(&last_default) != 123) {
+                fprintf(stderr, "FAIL: CEID default handler not called as expected\n");
+                ++g_failures;
+            }
+
+            {
+                size_t consumed = 0;
+                secs_ii_item_t *root = NULL;
+                expect_ok("secs_ii_decode_one(reply default)",
+                          secs_ii_decode_one(
+                              reply.body, reply.body_n, &consumed, &root));
+                secs_ii_item_t *tag_item = NULL;
+                expect_ok("secs_ii_item_list_get(tag default)",
+                          secs_ii_item_list_get(root, 2, &tag_item));
+                const char *ptr = NULL;
+                size_t n = 0;
+                expect_ok("secs_ii_item_ascii_view(tag default)",
+                          secs_ii_item_ascii_view(tag_item, &ptr, &n));
+                if (n != 7u || memcmp(ptr, "DEFAULT", 7u) != 0) {
+                    fprintf(stderr, "FAIL: CEID reply tag mismatch (DEFAULT)\n");
+                    ++g_failures;
+                }
+                secs_ii_item_destroy(tag_item);
+                secs_ii_item_destroy(root);
+            }
+
+            secs_data_message_free(&reply);
+            secs_free(req);
+        }
+
+        /* 3) request/reply CEID 校验：成功 */
+        {
+            uint8_t *req = NULL;
+            size_t req_n = 0;
+            expect_ok("build_ceid_request_body(100) for verify",
+                      build_ceid_request_body(100, &req, &req_n));
+
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            int has_req = 0;
+            uint32_t req_ceid = 0;
+            int has_rep = 0;
+            uint32_t rep_ceid = 0;
+
+            expect_ok("secs_protocol_session_request_with_ceid_list_path(ok)",
+                      secs_protocol_session_request_with_ceid_list_path(
+                          client_proto,
+                          6,
+                          11,
+                          req,
+                          req_n,
+                          1000,
+                          ceid_path,
+                          1,
+                          NULL,
+                          1,
+                          &reply,
+                          &has_req,
+                          &req_ceid,
+                          &has_rep,
+                          &rep_ceid));
+
+            if (!has_req || req_ceid != 100u || !has_rep || rep_ceid != 100u) {
+                fprintf(stderr, "FAIL: CEID verify values mismatch\n");
+                ++g_failures;
+            }
+
+            secs_data_message_free(&reply);
+            secs_free(req);
+        }
+
+        /* 4) request/reply CEID 校验：不一致应返回错误，但仍带回 reply/ceid */
+        {
+            uint8_t *req = NULL;
+            size_t req_n = 0;
+            expect_ok("build_ceid_request_body(777) for mismatch",
+                      build_ceid_request_body(777, &req, &req_n));
+
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            int has_req = 0;
+            uint32_t req_ceid = 0;
+            int has_rep = 0;
+            uint32_t rep_ceid = 0;
+
+            secs_error_t err = secs_protocol_session_request_with_ceid_list_path(
+                client_proto,
+                6,
+                11,
+                req,
+                req_n,
+                1000,
+                ceid_path,
+                1,
+                NULL,
+                1,
+                &reply,
+                &has_req,
+                &req_ceid,
+                &has_rep,
+                &rep_ceid);
+            expect_err("secs_protocol_session_request_with_ceid_list_path(mismatch)",
+                       err);
+            if (err.value != 4) {
+                failf("ceid mismatch expected secs.core invalid_argument", err);
+            }
+            if (!has_req || req_ceid != 777u || !has_rep || rep_ceid != 778u) {
+                fprintf(stderr, "FAIL: CEID mismatch outputs not populated\n");
+                ++g_failures;
+            }
+
+            secs_data_message_free(&reply);
+            secs_free(req);
+        }
+
+        expect_ok("secs_protocol_session_erase_handler(ceid dispatcher)",
+                  secs_protocol_session_erase_handler(server_proto, 6, 11));
+        secs_ceid_dispatcher_destroy(cd);
     }
 
     /* 反向验证：server 也可以主动发起 data primary（双方均可主动发送） */
