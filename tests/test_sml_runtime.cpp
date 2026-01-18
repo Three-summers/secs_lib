@@ -501,6 +501,32 @@ if (S2F21[0][0]==<U1 7>) ok.
     TEST_EXPECT(!result.traces[0].detail.empty());
 }
 
+void test_match_response_deep_path_indexing_out_of_bounds() {
+    secs::sml::Runtime rt;
+    const char *source = R"(
+if (S2F21[0][1]==<U1 7>) ok.
+)";
+
+    auto ec = rt.load(source);
+    TEST_EXPECT_OK(ec);
+
+    secs::sml::RenderContext ctx;
+
+    // root[0] 是 List，但 root[0][1] 越界。
+    const auto body = secs::ii::Item::list({
+        secs::ii::Item::list({
+            secs::ii::Item::u1({7}),
+        }),
+    });
+
+    const auto result = rt.match_response_with_trace(2, 21, body, ctx);
+    TEST_EXPECT(!result.response_name.has_value());
+    TEST_EXPECT_EQ(result.traces.size(), 1u);
+    TEST_EXPECT_EQ(result.traces[0].reason,
+                   secs::sml::MatchFailureReason::list_index_out_of_bounds);
+    TEST_EXPECT(!result.traces[0].detail.empty());
+}
+
 void test_match_response_with_capture_pattern() {
     secs::sml::Runtime rt;
     const char *source = R"(
@@ -571,6 +597,280 @@ if (S2F21 <L [2] <U2 $CAP_A> <L $CAP_B>>) r0.
                 secs::ii::Item::list({secs::ii::Item::u2({0x1001})}));
 }
 
+void test_match_response_with_capture_pattern_various_types() {
+    secs::sml::Runtime rt;
+    const char *source = R"(
+if (S1F1 <A $CAP_A>) r_ascii.
+if (S1F3 <B 0x01 0x02>) r_bin.
+if (S1F5 <Boolean 0 1 0>) r_bool.
+if (S1F7 <I2 -1 2>) r_i2.
+if (S1F9 <U4 0x10000000>) r_u4.
+if (S1F11 <F4 1.0>) r_f4.
+if (S1F13 <F8 1.0>) r_f8.
+if (S1F15 <L [2] <U1 1> <U1 2>>) r_list.
+if (S1F17 <L [2] $CAP_L>) r_cap_list.
+)";
+
+    auto ec = rt.load(source);
+    TEST_EXPECT_OK(ec);
+
+    // ASCII + capture
+    {
+        secs::sml::RenderContext cap;
+        const auto body = secs::ii::Item::ascii("hello");
+        const auto rsp = rt.match_response_with_capture(1, 1, body, cap);
+        TEST_EXPECT(rsp.has_value());
+        TEST_EXPECT_EQ(*rsp, "r_ascii");
+        const auto *v = cap.get("CAP_A");
+        TEST_EXPECT(v != nullptr);
+        const auto *a = v->get_if<secs::ii::ASCII>();
+        TEST_EXPECT(a != nullptr);
+        TEST_EXPECT_EQ(a->value, "hello");
+    }
+
+    // Binary literal match
+    {
+        secs::sml::RenderContext cap;
+        const auto body = secs::ii::Item::binary(
+            std::vector<secs::ii::byte>{static_cast<secs::ii::byte>(1),
+                                        static_cast<secs::ii::byte>(2)});
+        const auto rsp = rt.match_response_with_capture(1, 3, body, cap);
+        TEST_EXPECT(rsp.has_value());
+        TEST_EXPECT_EQ(*rsp, "r_bin");
+        TEST_EXPECT(cap.get("NO_SUCH") == nullptr);
+    }
+
+    // Boolean literal match
+    {
+        secs::sml::RenderContext cap;
+        const auto body = secs::ii::Item::boolean(
+            std::vector<bool>{false, true, false});
+        const auto rsp = rt.match_response_with_capture(1, 5, body, cap);
+        TEST_EXPECT(rsp.has_value());
+        TEST_EXPECT_EQ(*rsp, "r_bool");
+    }
+
+    // Signed
+    {
+        secs::sml::RenderContext cap;
+        const auto body =
+            secs::ii::Item::i2(std::vector<std::int16_t>{-1, 2});
+        const auto rsp = rt.match_response_with_capture(1, 7, body, cap);
+        TEST_EXPECT(rsp.has_value());
+        TEST_EXPECT_EQ(*rsp, "r_i2");
+    }
+
+    // Unsigned
+    {
+        secs::sml::RenderContext cap;
+        const auto body =
+            secs::ii::Item::u4(std::vector<std::uint32_t>{0x10000000u});
+        const auto rsp = rt.match_response_with_capture(1, 9, body, cap);
+        TEST_EXPECT(rsp.has_value());
+        TEST_EXPECT_EQ(*rsp, "r_u4");
+    }
+
+    // Float tolerance (F4): abs diff <= 0.0001
+    {
+        secs::sml::RenderContext cap;
+        const auto body = secs::ii::Item::f4(std::vector<float>{1.00005f});
+        const auto rsp = rt.match_response_with_capture(1, 11, body, cap);
+        TEST_EXPECT(rsp.has_value());
+        TEST_EXPECT_EQ(*rsp, "r_f4");
+    }
+    {
+        secs::sml::RenderContext cap;
+        const auto body = secs::ii::Item::f4(std::vector<float>{1.0002f});
+        const auto rsp = rt.match_response_with_capture(1, 11, body, cap);
+        TEST_EXPECT(!rsp.has_value());
+    }
+
+    // Float tolerance (F8)
+    {
+        secs::sml::RenderContext cap;
+        const auto body = secs::ii::Item::f8(std::vector<double>{1.00005});
+        const auto rsp = rt.match_response_with_capture(1, 13, body, cap);
+        TEST_EXPECT(rsp.has_value());
+        TEST_EXPECT_EQ(*rsp, "r_f8");
+    }
+    {
+        secs::sml::RenderContext cap;
+        const auto body = secs::ii::Item::f8(std::vector<double>{1.0002});
+        const auto rsp = rt.match_response_with_capture(1, 13, body, cap);
+        TEST_EXPECT(!rsp.has_value());
+    }
+
+    // List structure match
+    {
+        secs::sml::RenderContext cap;
+        const auto body = secs::ii::Item::list({
+            secs::ii::Item::u1({1}),
+            secs::ii::Item::u1({2}),
+        });
+        const auto rsp = rt.match_response_with_capture(1, 15, body, cap);
+        TEST_EXPECT(rsp.has_value());
+        TEST_EXPECT_EQ(*rsp, "r_list");
+    }
+    {
+        secs::sml::RenderContext cap;
+        const auto body = secs::ii::Item::list({
+            secs::ii::Item::u1({1}),
+            secs::ii::Item::u1({2}),
+            secs::ii::Item::u1({3}),
+        });
+        const auto rsp = rt.match_response_with_capture(1, 15, body, cap);
+        TEST_EXPECT(!rsp.has_value());
+    }
+
+    // List capture (captures the whole list item)
+    {
+        secs::sml::RenderContext cap;
+        const auto body = secs::ii::Item::list({
+            secs::ii::Item::u1({1}),
+            secs::ii::Item::u1({2}),
+        });
+        const auto rsp = rt.match_response_with_capture(1, 17, body, cap);
+        TEST_EXPECT(rsp.has_value());
+        TEST_EXPECT_EQ(*rsp, "r_cap_list");
+
+        const auto *v = cap.get("CAP_L");
+        TEST_EXPECT(v != nullptr);
+        const auto *l = v->get_if<secs::ii::List>();
+        TEST_EXPECT(l != nullptr);
+        TEST_EXPECT_EQ(l->size(), 2u);
+    }
+}
+
+void test_match_response_with_capture_pattern_capture_and_mismatch_branches() {
+    secs::sml::Runtime rt;
+    const char *source = R"(
+if (S1F21 <I1 $CAP>) r_i1.
+if (S1F22 <I2 $CAP>) r_i2.
+if (S1F23 <I4 $CAP>) r_i4.
+if (S1F24 <I8 $CAP>) r_i8.
+if (S1F25 <U1 $CAP>) r_u1.
+if (S1F26 <U2 $CAP>) r_u2.
+if (S1F27 <U4 $CAP>) r_u4.
+if (S1F28 <U8 $CAP>) r_u8.
+if (S1F29 <B $CAP>) r_bin.
+if (S1F30 <Boolean $CAP>) r_bool.
+if (S1F31 <F4 $CAP>) r_f4.
+if (S1F32 <F8 $CAP>) r_f8.
+)";
+
+    auto ec = rt.load(source);
+    TEST_EXPECT_OK(ec);
+
+    // 逐类型覆盖：capture 分支 + 类型不匹配分支。
+    {
+        secs::sml::RenderContext cap;
+        const auto rsp = rt.match_response_with_capture(
+            1, 21, secs::ii::Item::i1(std::vector<std::int8_t>{-1}), cap);
+        TEST_EXPECT(rsp.has_value());
+        TEST_EXPECT_EQ(*rsp, "r_i1");
+        TEST_EXPECT(cap.get("CAP")->get_if<secs::ii::I1>() != nullptr);
+    }
+    {
+        secs::sml::RenderContext cap;
+        const auto rsp = rt.match_response_with_capture(
+            1, 22, secs::ii::Item::i2(std::vector<std::int16_t>{-2}), cap);
+        TEST_EXPECT(rsp.has_value());
+        TEST_EXPECT_EQ(*rsp, "r_i2");
+        TEST_EXPECT(cap.get("CAP")->get_if<secs::ii::I2>() != nullptr);
+    }
+    {
+        secs::sml::RenderContext cap;
+        const auto rsp = rt.match_response_with_capture(
+            1, 23, secs::ii::Item::i4(std::vector<std::int32_t>{-3}), cap);
+        TEST_EXPECT(rsp.has_value());
+        TEST_EXPECT_EQ(*rsp, "r_i4");
+        TEST_EXPECT(cap.get("CAP")->get_if<secs::ii::I4>() != nullptr);
+    }
+    {
+        secs::sml::RenderContext cap;
+        const auto rsp = rt.match_response_with_capture(
+            1, 24, secs::ii::Item::i8(std::vector<std::int64_t>{-4}), cap);
+        TEST_EXPECT(rsp.has_value());
+        TEST_EXPECT_EQ(*rsp, "r_i8");
+        TEST_EXPECT(cap.get("CAP")->get_if<secs::ii::I8>() != nullptr);
+    }
+    {
+        secs::sml::RenderContext cap;
+        const auto rsp = rt.match_response_with_capture(
+            1, 25, secs::ii::Item::u1(std::vector<std::uint8_t>{1}), cap);
+        TEST_EXPECT(rsp.has_value());
+        TEST_EXPECT_EQ(*rsp, "r_u1");
+        TEST_EXPECT(cap.get("CAP")->get_if<secs::ii::U1>() != nullptr);
+    }
+    {
+        secs::sml::RenderContext cap;
+        const auto rsp = rt.match_response_with_capture(
+            1, 26, secs::ii::Item::u2(std::vector<std::uint16_t>{2}), cap);
+        TEST_EXPECT(rsp.has_value());
+        TEST_EXPECT_EQ(*rsp, "r_u2");
+        TEST_EXPECT(cap.get("CAP")->get_if<secs::ii::U2>() != nullptr);
+    }
+    {
+        secs::sml::RenderContext cap;
+        const auto rsp = rt.match_response_with_capture(
+            1, 27, secs::ii::Item::u4(std::vector<std::uint32_t>{3}), cap);
+        TEST_EXPECT(rsp.has_value());
+        TEST_EXPECT_EQ(*rsp, "r_u4");
+        TEST_EXPECT(cap.get("CAP")->get_if<secs::ii::U4>() != nullptr);
+    }
+    {
+        secs::sml::RenderContext cap;
+        const auto rsp = rt.match_response_with_capture(
+            1, 28, secs::ii::Item::u8(std::vector<std::uint64_t>{4}), cap);
+        TEST_EXPECT(rsp.has_value());
+        TEST_EXPECT_EQ(*rsp, "r_u8");
+        TEST_EXPECT(cap.get("CAP")->get_if<secs::ii::U8>() != nullptr);
+    }
+    {
+        secs::sml::RenderContext cap;
+        const auto body = secs::ii::Item::binary(
+            std::vector<secs::ii::byte>{static_cast<secs::ii::byte>(1)});
+        const auto rsp = rt.match_response_with_capture(1, 29, body, cap);
+        TEST_EXPECT(rsp.has_value());
+        TEST_EXPECT_EQ(*rsp, "r_bin");
+        TEST_EXPECT(cap.get("CAP")->get_if<secs::ii::Binary>() != nullptr);
+    }
+    {
+        secs::sml::RenderContext cap;
+        const auto rsp = rt.match_response_with_capture(
+            1, 30, secs::ii::Item::boolean(std::vector<bool>{true}), cap);
+        TEST_EXPECT(rsp.has_value());
+        TEST_EXPECT_EQ(*rsp, "r_bool");
+        TEST_EXPECT(cap.get("CAP")->get_if<secs::ii::Boolean>() != nullptr);
+    }
+    {
+        secs::sml::RenderContext cap;
+        const auto rsp = rt.match_response_with_capture(
+            1, 31, secs::ii::Item::f4(std::vector<float>{1.5f}), cap);
+        TEST_EXPECT(rsp.has_value());
+        TEST_EXPECT_EQ(*rsp, "r_f4");
+        TEST_EXPECT(cap.get("CAP")->get_if<secs::ii::F4>() != nullptr);
+    }
+    {
+        secs::sml::RenderContext cap;
+        const auto rsp = rt.match_response_with_capture(
+            1, 32, secs::ii::Item::f8(std::vector<double>{2.5}), cap);
+        TEST_EXPECT(rsp.has_value());
+        TEST_EXPECT_EQ(*rsp, "r_f8");
+        TEST_EXPECT(cap.get("CAP")->get_if<secs::ii::F8>() != nullptr);
+    }
+
+    // 类型不匹配：对各类 pattern 传入 ASCII，让 match_pattern() 走 !v 分支。
+    {
+        for (std::uint8_t f = 21; f <= 32; ++f) {
+            secs::sml::RenderContext cap;
+            const auto rsp = rt.match_response_with_capture(
+                1, f, secs::ii::Item::ascii("x"), cap);
+            TEST_EXPECT(!rsp.has_value());
+        }
+    }
+}
+
 } // namespace
 
 int main() {
@@ -591,6 +891,9 @@ int main() {
     test_items_equal_float_tolerance();
     test_match_response_deep_path_indexing_selection();
     test_match_response_deep_path_indexing_not_a_list();
+    test_match_response_deep_path_indexing_out_of_bounds();
     test_match_response_with_capture_pattern();
+    test_match_response_with_capture_pattern_various_types();
+    test_match_response_with_capture_pattern_capture_and_mismatch_branches();
     return secs::tests::run_and_report();
 }

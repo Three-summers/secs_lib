@@ -155,13 +155,14 @@
 │                                                                     │
 │  格式：if (条件) 响应消息名.                                        │
 │                                                                     │
-│  条件格式：消息名[(n)|[i]][==<期望值>]                              │
+│  条件格式：消息名[(n)|[i][j]...][==<期望值> | <pattern>]            │
 │  ┌────────────────────────────────────────────────────────────┐    │
 │  │  - 消息名  : 触发消息的名称或 SxFy                          │    │
 │  │  - (n)     : 可选，1-based 先序遍历编号（包含根节点）         │    │
-│  │  - [i]     : 可选，0-based List 数组下标（第 i 个子元素）     │    │
-│  │  - ==<值>  : 可选，指定期望的元素值                         │    │
-│  │  - 约束    : (n) 与 [i] 互斥，最多出现一次                   │    │
+│  │  - [i][j]… : 可选，0-based List 深层路径索引（可重复）         │    │
+│  │  - ==<值>  : 可选，指定“被选中元素”的期望值（允许占位符）     │    │
+│  │  - <pattern>: 可选，结构匹配/数据捕获（不带 ==，支持 $NAME）   │    │
+│  │  - 约束    : (n) 与 [i][j]… 互斥；==<...> 与 <pattern> 互斥     │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
 │  示例：                                                             │
@@ -174,6 +175,12 @@
 │  │                                                             │    │
 │  │  // 0-based List 下标（更贴近日常“数组取第 N 个元素”）        │    │
 │  │  if (S2F21[1]==<U1 1>) ack.                                  │    │
+│  │                                                             │    │
+│  │  // 深层路径索引（0-based）：root[1][2]                      │    │
+│  │  if (S6F11[1][2]==<A "Alarm">) handle_alarm.                 │    │
+│  │                                                             │    │
+│  │  // 结构匹配 + Data Capture（不带 ==）                       │    │
+│  │  if (S6F11 <L [3] <U4 $DATAID> <U4 $CEID> <L $RPTLIST>>) on_event. │    │
 │  │                                                             │    │
 │  │  // 使用消息名引用（需要先定义 request 消息）               │    │
 │  │  if (request(3)==<A "START">) start_response.               │    │
@@ -193,6 +200,9 @@
 │  │  [i] List 下标（0-based，仅对“根节点为 List”的消息体生效）： │    │
 │  │    [0] -> <A "a">                                           │    │
 │  │    [1] -> <L <U1 1> <U1 2>>                                 │    │
+│  │                                                             │    │
+│  │  [i][j] 深层路径索引：                                       │    │
+│  │    [1][0] -> <U1 1>（先选 root[1]，再选其[0]）               │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -200,8 +210,10 @@
 
 说明（当前实现）：
 
-- `(n)` 语法保持完全向后兼容；新增的 `[i]` 是对 List 的 0-based 下标访问，两者互斥。
-- 条件期望值 `==<...>` 与消息模板一样支持占位符；匹配时由 `RenderContext` 提供变量并渲染后再比较。
+- `(n)` 语法保持完全向后兼容；`[i]` 仍为 0-based，下标语法升级为可链式 `[i][j]...`（与 `(n)` 互斥）。
+- `==<...>` 与消息模板一样支持占位符；匹配时由 `RenderContext` 提供变量并渲染后再比较。
+- 兼容语义：`==<...>` 仅在指定了 `(n)` 或 `[i][j]...` 选中元素时生效；若要匹配整个消息体，建议使用 `<pattern>`（或写成 `(1)==<...>`）。
+- `<pattern>` 用于结构匹配与 Data Capture（`$NAME`）；捕获结果可通过 `Runtime::match_response_with_capture()`（以及 C API 对应函数）获得。
 
 ### 2.4 定时规则语法
 
@@ -676,8 +688,10 @@
 │  struct Condition {                                                 │
 │      string message_name;            // 触发消息名或 SxFy           │
 │      optional<size_t> index;         // (n) 1-based 先序遍历编号     │
-│      optional<size_t> list_index;    // [i] 0-based List 下标（互斥）│
+│      optional<size_t> list_index;    // [i] 0-based List 下标（兼容字段）│
+│      vector<size_t> list_path;       // [i][j]... 0-based 深层路径索引│
 │      optional<TemplateItem> expected;// ==<...> 期望值（允许占位符） │
+│      optional<PatternItem> pattern;  // <pattern> 结构匹配/捕获（$NAME）│
 │  };                                                                 │
 │                                                                     │
 │  struct TimerRule {                                                 │
@@ -690,8 +704,9 @@
 
 补充说明：
 
-- `TemplateItem` / `VarRef` 等模板类型定义见 `include/secs/sml/ast.hpp`；渲染逻辑见 `include/secs/sml/render.hpp` 与 `src/sml/render.cpp`。
-- `MessageDef.item` 与 `Condition.expected` 共享同一份模板表示，均允许占位符；运行时会用 `RenderContext` 渲染模板（发送时渲染消息体，匹配时渲染条件期望值）。
+- `TemplateItem` / `VarRef` / `PatternItem` / `CaptureVar` 等类型定义见 `include/secs/sml/ast.hpp`。
+- `MessageDef.item` 与 `Condition.expected` 共享 `TemplateItem`（允许占位符）；运行时会用 `RenderContext` 渲染模板（发送时渲染消息体，匹配时渲染 `==<...>` 期望值）。
+- `Condition.pattern` 使用 `PatternItem`：用于结构匹配与 Data Capture（`$NAME`），捕获结果写入 `RenderContext` 并通过 `match_response_with_capture()` 暴露给上层。
 
 ### 6.2 AST 示例
 
@@ -854,6 +869,10 @@
 │  │                                                             │    │
 │  │  optional<string> match_response(stream, function, item, ctx)│    │
 │  │      // 需要条件期望值占位符时使用该重载                      │    │
+│  │                                                             │    │
+│  │  optional<string> match_response_with_capture(stream, function,│   │
+│  │                                       item, ctx, out_captures)│   │
+│  │      // 结构匹配 <pattern> + Data Capture（$NAME）            │   │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
 │  match_condition() 匹配逻辑：                                       │
@@ -862,13 +881,20 @@
 │  │     - 若条件是 SxFy 格式，直接比较 stream/function          │    │
 │  │     - 否则按消息名查找，比较其 stream/function              │    │
 │  │                                                             │    │
-│  │  2. 若有索引和期望值，检查 Item：                           │    │
-│  │     - 仅当根节点为 List 时允许索引匹配                      │    │
-│  │     - (n)：先序遍历找到第 N 个元素（1-based）               │    │
-│  │     - [i]：选择根 List 的第 i 个子元素（0-based）           │    │
-│  │     - 期望值先用 ctx 渲染（支持占位符），再 items_equal()    │    │
+│  │  2. 选择元素（可选）：                                      │    │
+│  │     - (n)：先序遍历找到第 N 个元素（1-based，含根节点）      │    │
+│  │     - [i][j]...：0-based List 深层路径索引（逐层选择 child）  │    │
 │  │                                                             │    │
-│  │  3. 全部检查通过则返回 true。                               │    │
+│  │  3. 期望值匹配（旧语义）：                                  │    │
+│  │     - 仅当指定了 (n) 或 [i][j]... 选中元素时，才对 `==<...>`  │    │
+│  │       做比较（保持向后兼容）                                 │    │
+│  │     - 期望值先用 ctx 渲染（支持占位符），再 items_equal()     │    │
+│  │                                                             │    │
+│  │  4. 结构匹配/捕获（新语义）：                                │    │
+│  │     - `cond.pattern` 存在时，用 <pattern> 对目标 Item 做匹配  │    │
+│  │     - `$NAME` 会将匹配到的 Item 捕获到 out_captures（如提供） │    │
+│  │                                                             │    │
+│  │  5. 全部检查通过则返回 true。                               │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
 │  先序遍历查找：find_preorder_nth(root, n)                           │

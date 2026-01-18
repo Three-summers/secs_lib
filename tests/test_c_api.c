@@ -581,6 +581,220 @@ static void test_invalid_argument_fast_fail(void) {
                    secs_sml_render_context_set(rctx, NULL, tmp));
         expect_err("secs_sml_render_context_set(NULL value)",
                    secs_sml_render_context_set(rctx, "X", NULL));
+
+        /* RenderContext 便捷 setter：减少样板代码 & 覆盖 C API 新增符号 */
+        expect_err("secs_sml_render_context_set_ascii(NULL ctx)",
+                   secs_sml_render_context_set_ascii(NULL, "X", "x"));
+        expect_err("secs_sml_render_context_set_ascii(NULL name)",
+                   secs_sml_render_context_set_ascii(rctx, NULL, "x"));
+        expect_err("secs_sml_render_context_set_ascii(NULL value)",
+                   secs_sml_render_context_set_ascii(rctx, "X", NULL));
+
+        expect_err("secs_sml_render_context_set_binary(NULL bytes,n>0)",
+                   secs_sml_render_context_set_binary(rctx, "B", NULL, 1));
+        expect_err("secs_sml_render_context_set_boolean(bad value01)",
+                   secs_sml_render_context_set_boolean(rctx, "BOOL", 2));
+
+        /* ASCII */
+        expect_ok("secs_sml_render_context_set_ascii(ASCI)",
+                  secs_sml_render_context_set_ascii(rctx, "ASCI", "hi"));
+        {
+            secs_ii_item_t *out = NULL;
+            expect_ok("secs_sml_render_context_get(ASCI)",
+                      secs_sml_render_context_get(rctx, "ASCI", &out));
+            const char *p = NULL;
+            size_t n = 0;
+            expect_ok("secs_ii_item_ascii_view(ASCI)",
+                      secs_ii_item_ascii_view(out, &p, &n));
+            if (!p || n != 2 || memcmp(p, "hi", 2) != 0) {
+                fprintf(stderr, "FAIL: RenderContext ASCI mismatch\n");
+                ++g_failures;
+            }
+            secs_ii_item_destroy(out);
+        }
+
+        /* Binary */
+        expect_ok("secs_sml_render_context_set_binary(BIN)",
+                  secs_sml_render_context_set_binary(
+                      rctx, "BIN", (const uint8_t *)"\x01\x02", 2));
+        {
+            secs_ii_item_t *out = NULL;
+            expect_ok("secs_sml_render_context_get(BIN)",
+                      secs_sml_render_context_get(rctx, "BIN", &out));
+            const uint8_t *p = NULL;
+            size_t n = 0;
+            expect_ok("secs_ii_item_binary_view(BIN)",
+                      secs_ii_item_binary_view(out, &p, &n));
+            if (!p || n != 2 || p[0] != 1 || p[1] != 2) {
+                fprintf(stderr, "FAIL: RenderContext BIN mismatch\n");
+                ++g_failures;
+            }
+            secs_ii_item_destroy(out);
+        }
+
+        /* Boolean */
+        expect_ok("secs_sml_render_context_set_boolean(BOOL)",
+                  secs_sml_render_context_set_boolean(rctx, "BOOL", 1));
+        {
+            secs_ii_item_t *out = NULL;
+            expect_ok("secs_sml_render_context_get(BOOL)",
+                      secs_sml_render_context_get(rctx, "BOOL", &out));
+            uint8_t *p = NULL;
+            size_t n = 0;
+            expect_ok("secs_ii_item_boolean_copy(BOOL)",
+                      secs_ii_item_boolean_copy(out, &p, &n));
+            if (!p || n != 1 || p[0] != 1) {
+                fprintf(stderr, "FAIL: RenderContext BOOL mismatch\n");
+                ++g_failures;
+            }
+            secs_free(p);
+            secs_ii_item_destroy(out);
+        }
+
+        /* I1/I2/I4/I8 */
+        expect_ok("secs_sml_render_context_set_i1(I1)",
+                  secs_sml_render_context_set_i1(rctx, "I1", (int8_t)-3));
+        expect_ok("secs_sml_render_context_set_i2(I2)",
+                  secs_sml_render_context_set_i2(rctx, "I2", (int16_t)-300));
+        expect_ok("secs_sml_render_context_set_i4(I4)",
+                  secs_sml_render_context_set_i4(rctx, "I4", (int32_t)-123456));
+        expect_ok("secs_sml_render_context_set_i8(I8)",
+                  secs_sml_render_context_set_i8(rctx, "I8", (int64_t)-1234567890));
+        {
+            secs_ii_item_t *out = NULL;
+            const int8_t *p1 = NULL;
+            const int16_t *p2 = NULL;
+            const int32_t *p4 = NULL;
+            const int64_t *p8 = NULL;
+            size_t n = 0;
+
+            expect_ok("secs_sml_render_context_get(I1)",
+                      secs_sml_render_context_get(rctx, "I1", &out));
+            expect_ok("secs_ii_item_i1_view(I1)", secs_ii_item_i1_view(out, &p1, &n));
+            if (!p1 || n != 1 || p1[0] != (int8_t)-3) {
+                fprintf(stderr, "FAIL: RenderContext I1 mismatch\n");
+                ++g_failures;
+            }
+            secs_ii_item_destroy(out);
+
+            out = NULL;
+            expect_ok("secs_sml_render_context_get(I2)",
+                      secs_sml_render_context_get(rctx, "I2", &out));
+            expect_ok("secs_ii_item_i2_view(I2)", secs_ii_item_i2_view(out, &p2, &n));
+            if (!p2 || n != 1 || p2[0] != (int16_t)-300) {
+                fprintf(stderr, "FAIL: RenderContext I2 mismatch\n");
+                ++g_failures;
+            }
+            secs_ii_item_destroy(out);
+
+            out = NULL;
+            expect_ok("secs_sml_render_context_get(I4)",
+                      secs_sml_render_context_get(rctx, "I4", &out));
+            expect_ok("secs_ii_item_i4_view(I4)", secs_ii_item_i4_view(out, &p4, &n));
+            if (!p4 || n != 1 || p4[0] != (int32_t)-123456) {
+                fprintf(stderr, "FAIL: RenderContext I4 mismatch\n");
+                ++g_failures;
+            }
+            secs_ii_item_destroy(out);
+
+            out = NULL;
+            expect_ok("secs_sml_render_context_get(I8)",
+                      secs_sml_render_context_get(rctx, "I8", &out));
+            expect_ok("secs_ii_item_i8_view(I8)", secs_ii_item_i8_view(out, &p8, &n));
+            if (!p8 || n != 1 || p8[0] != (int64_t)-1234567890) {
+                fprintf(stderr, "FAIL: RenderContext I8 mismatch\n");
+                ++g_failures;
+            }
+            secs_ii_item_destroy(out);
+        }
+
+        /* U1/U2/U4/U8 */
+        expect_ok("secs_sml_render_context_set_u1(U1)",
+                  secs_sml_render_context_set_u1(rctx, "U1", (uint8_t)3));
+        expect_ok("secs_sml_render_context_set_u2(U2)",
+                  secs_sml_render_context_set_u2(rctx, "U2", (uint16_t)300));
+        expect_ok("secs_sml_render_context_set_u4(U4)",
+                  secs_sml_render_context_set_u4(rctx, "U4", (uint32_t)123456));
+        expect_ok("secs_sml_render_context_set_u8(U8)",
+                  secs_sml_render_context_set_u8(rctx, "U8", (uint64_t)1234567890));
+        {
+            secs_ii_item_t *out = NULL;
+            const uint8_t *p1 = NULL;
+            const uint16_t *p2 = NULL;
+            const uint32_t *p4 = NULL;
+            const uint64_t *p8 = NULL;
+            size_t n = 0;
+
+            expect_ok("secs_sml_render_context_get(U1)",
+                      secs_sml_render_context_get(rctx, "U1", &out));
+            expect_ok("secs_ii_item_u1_view(U1)", secs_ii_item_u1_view(out, &p1, &n));
+            if (!p1 || n != 1 || p1[0] != (uint8_t)3) {
+                fprintf(stderr, "FAIL: RenderContext U1 mismatch\n");
+                ++g_failures;
+            }
+            secs_ii_item_destroy(out);
+
+            out = NULL;
+            expect_ok("secs_sml_render_context_get(U2)",
+                      secs_sml_render_context_get(rctx, "U2", &out));
+            expect_ok("secs_ii_item_u2_view(U2)", secs_ii_item_u2_view(out, &p2, &n));
+            if (!p2 || n != 1 || p2[0] != (uint16_t)300) {
+                fprintf(stderr, "FAIL: RenderContext U2 mismatch\n");
+                ++g_failures;
+            }
+            secs_ii_item_destroy(out);
+
+            out = NULL;
+            expect_ok("secs_sml_render_context_get(U4)",
+                      secs_sml_render_context_get(rctx, "U4", &out));
+            expect_ok("secs_ii_item_u4_view(U4)", secs_ii_item_u4_view(out, &p4, &n));
+            if (!p4 || n != 1 || p4[0] != (uint32_t)123456) {
+                fprintf(stderr, "FAIL: RenderContext U4 mismatch\n");
+                ++g_failures;
+            }
+            secs_ii_item_destroy(out);
+
+            out = NULL;
+            expect_ok("secs_sml_render_context_get(U8)",
+                      secs_sml_render_context_get(rctx, "U8", &out));
+            expect_ok("secs_ii_item_u8_view(U8)", secs_ii_item_u8_view(out, &p8, &n));
+            if (!p8 || n != 1 || p8[0] != (uint64_t)1234567890) {
+                fprintf(stderr, "FAIL: RenderContext U8 mismatch\n");
+                ++g_failures;
+            }
+            secs_ii_item_destroy(out);
+        }
+
+        /* F4/F8 */
+        expect_ok("secs_sml_render_context_set_f4(F4)",
+                  secs_sml_render_context_set_f4(rctx, "F4", 1.25f));
+        expect_ok("secs_sml_render_context_set_f8(F8)",
+                  secs_sml_render_context_set_f8(rctx, "F8", 1.25));
+        {
+            secs_ii_item_t *out = NULL;
+            const float *pf4 = NULL;
+            const double *pf8 = NULL;
+            size_t n = 0;
+
+            expect_ok("secs_sml_render_context_get(F4)",
+                      secs_sml_render_context_get(rctx, "F4", &out));
+            expect_ok("secs_ii_item_f4_view(F4)", secs_ii_item_f4_view(out, &pf4, &n));
+            if (!pf4 || n != 1 || pf4[0] != 1.25f) {
+                fprintf(stderr, "FAIL: RenderContext F4 mismatch\n");
+                ++g_failures;
+            }
+            secs_ii_item_destroy(out);
+
+            out = NULL;
+            expect_ok("secs_sml_render_context_get(F8)",
+                      secs_sml_render_context_get(rctx, "F8", &out));
+            expect_ok("secs_ii_item_f8_view(F8)", secs_ii_item_f8_view(out, &pf8, &n));
+            if (!pf8 || n != 1 || pf8[0] != 1.25) {
+                fprintf(stderr, "FAIL: RenderContext F8 mismatch\n");
+                ++g_failures;
+            }
+            secs_ii_item_destroy(out);
+        }
         secs_ii_item_destroy(tmp);
         secs_sml_render_context_destroy(rctx);
 
@@ -1374,6 +1588,449 @@ static void test_ii_all_types_and_views(void) {
         expect_err("secs_ii_item_list_get(non-list)",
                    secs_ii_item_list_get(ascii, 0, &child));
         secs_ii_item_destroy(ascii);
+    }
+}
+
+static void test_ii_list_builder_helpers(void) {
+    /* Phase2：List Builder helpers（append_* / append_take） */
+    secs_ii_item_t *list = NULL;
+    expect_ok("secs_ii_item_create_list(builder)",
+              secs_ii_item_create_list(&list));
+
+    /* 参数校验：list==NULL / 非 List */
+    {
+        secs_ii_item_t *ascii = NULL;
+        expect_ok("secs_ii_item_create_ascii(non-list for append)",
+                  secs_ii_item_create_ascii("X", 1, &ascii));
+        expect_err("secs_ii_item_list_append_u2(NULL list)",
+                   secs_ii_item_list_append_u2(NULL, 1));
+        expect_err("secs_ii_item_list_append_u2(non-list)",
+                   secs_ii_item_list_append_u2(ascii, 1));
+        secs_ii_item_destroy(ascii);
+    }
+
+    /* append_take：应 destroy 并把指针置空 */
+    {
+        expect_err("secs_ii_item_list_append_take(NULL io_elem)",
+                   secs_ii_item_list_append_take(list, NULL));
+        secs_ii_item_t *null_elem = NULL;
+        expect_err("secs_ii_item_list_append_take(*io_elem==NULL)",
+                   secs_ii_item_list_append_take(list, &null_elem));
+
+        secs_ii_item_t *tmp = NULL;
+        expect_ok("secs_ii_item_create_ascii(tmp)",
+                  secs_ii_item_create_ascii("hi", 2, &tmp));
+        expect_ok("secs_ii_item_list_append_take(ascii)",
+                  secs_ii_item_list_append_take(list, &tmp));
+        if (tmp != NULL) {
+            fprintf(stderr, "FAIL: append_take should NULL-out tmp\n");
+            ++g_failures;
+            secs_ii_item_destroy(tmp);
+        }
+
+        size_t n = 0;
+        expect_ok("secs_ii_item_list_size(builder after take)",
+                  secs_ii_item_list_size(list, &n));
+        if (n != 1u) {
+            fprintf(stderr, "FAIL: builder list size after take\n");
+            ++g_failures;
+        }
+
+        secs_ii_item_t *child = NULL;
+        expect_ok("secs_ii_item_list_get(builder[0])",
+                  secs_ii_item_list_get(list, 0, &child));
+        const char *p = NULL;
+        size_t pn = 0;
+        expect_ok("secs_ii_item_ascii_view(builder[0])",
+                  secs_ii_item_ascii_view(child, &p, &pn));
+        if (!p || pn != 2u || memcmp(p, "hi", 2) != 0) {
+            fprintf(stderr, "FAIL: builder[0] ascii mismatch\n");
+            ++g_failures;
+        }
+        secs_ii_item_destroy(child);
+    }
+
+    /* 其它 append_*：覆盖每个新符号至少一次 */
+    expect_err("secs_ii_item_list_append_ascii(NULL value)",
+               secs_ii_item_list_append_ascii(list, NULL));
+    expect_ok("secs_ii_item_list_append_ascii(\"A\")",
+              secs_ii_item_list_append_ascii(list, "A"));
+
+    {
+        const char bytes3[3] = {'B', '\0', 'C'};
+        expect_ok("secs_ii_item_list_append_ascii_n(B\\0C)",
+                  secs_ii_item_list_append_ascii_n(list, bytes3, 3));
+    }
+    expect_ok("secs_ii_item_list_append_ascii_n(empty)",
+              secs_ii_item_list_append_ascii_n(list, NULL, 0));
+
+    {
+        const uint8_t bin[2] = {1u, 2u};
+        expect_ok("secs_ii_item_list_append_binary",
+                  secs_ii_item_list_append_binary(list, bin, 2));
+    }
+    expect_ok("secs_ii_item_list_append_binary(empty)",
+              secs_ii_item_list_append_binary(list, NULL, 0));
+
+    expect_err("secs_ii_item_list_append_boolean(bad value01)",
+               secs_ii_item_list_append_boolean(list, 2));
+    expect_ok("secs_ii_item_list_append_boolean(1)",
+              secs_ii_item_list_append_boolean(list, 1));
+
+    {
+        const uint8_t bad01[2] = {0u, 2u};
+        expect_err("secs_ii_item_list_append_boolean_values(bad)",
+                   secs_ii_item_list_append_boolean_values(list, bad01, 2));
+    }
+    expect_ok("secs_ii_item_list_append_boolean_values(empty)",
+              secs_ii_item_list_append_boolean_values(list, NULL, 0));
+
+    expect_ok("secs_ii_item_list_append_i1",
+              secs_ii_item_list_append_i1(list, (int8_t)-1));
+    expect_ok("secs_ii_item_list_append_i2",
+              secs_ii_item_list_append_i2(list, (int16_t)-2));
+    expect_ok("secs_ii_item_list_append_i4",
+              secs_ii_item_list_append_i4(list, (int32_t)-3));
+    expect_ok("secs_ii_item_list_append_i8",
+              secs_ii_item_list_append_i8(list, (int64_t)-4));
+    expect_ok("secs_ii_item_list_append_u1",
+              secs_ii_item_list_append_u1(list, (uint8_t)5));
+    expect_ok("secs_ii_item_list_append_u2",
+              secs_ii_item_list_append_u2(list, (uint16_t)6));
+    expect_ok("secs_ii_item_list_append_u4",
+              secs_ii_item_list_append_u4(list, (uint32_t)7));
+    expect_ok("secs_ii_item_list_append_u8",
+              secs_ii_item_list_append_u8(list, (uint64_t)8));
+    expect_ok("secs_ii_item_list_append_f4",
+              secs_ii_item_list_append_f4(list, 1.25f));
+    expect_ok("secs_ii_item_list_append_f8",
+              secs_ii_item_list_append_f8(list, -2.5));
+
+    {
+        const int8_t v[1] = {-9};
+        expect_ok("secs_ii_item_list_append_i1_values",
+                  secs_ii_item_list_append_i1_values(list, v, 1));
+    }
+    {
+        const int16_t v[1] = {-10};
+        expect_ok("secs_ii_item_list_append_i2_values",
+                  secs_ii_item_list_append_i2_values(list, v, 1));
+    }
+    {
+        const int32_t v[1] = {-11};
+        expect_ok("secs_ii_item_list_append_i4_values",
+                  secs_ii_item_list_append_i4_values(list, v, 1));
+    }
+    {
+        const int64_t v[1] = {-12};
+        expect_ok("secs_ii_item_list_append_i8_values",
+                  secs_ii_item_list_append_i8_values(list, v, 1));
+    }
+    {
+        const uint8_t v[1] = {13u};
+        expect_ok("secs_ii_item_list_append_u1_values",
+                  secs_ii_item_list_append_u1_values(list, v, 1));
+    }
+    {
+        const uint16_t v[1] = {14u};
+        expect_ok("secs_ii_item_list_append_u2_values",
+                  secs_ii_item_list_append_u2_values(list, v, 1));
+    }
+    {
+        const uint32_t v[1] = {15u};
+        expect_ok("secs_ii_item_list_append_u4_values",
+                  secs_ii_item_list_append_u4_values(list, v, 1));
+    }
+    {
+        const uint64_t v[1] = {16u};
+        expect_ok("secs_ii_item_list_append_u8_values",
+                  secs_ii_item_list_append_u8_values(list, v, 1));
+    }
+    {
+        const float v[1] = {2.0f};
+        expect_ok("secs_ii_item_list_append_f4_values",
+                  secs_ii_item_list_append_f4_values(list, v, 1));
+    }
+    {
+        const double v[1] = {3.0};
+        expect_ok("secs_ii_item_list_append_f8_values",
+                  secs_ii_item_list_append_f8_values(list, v, 1));
+    }
+
+    secs_ii_item_destroy(list);
+}
+
+static void test_ii_extraction_helpers(void) {
+    /* Phase3：at_path / get_ascii_at helpers */
+
+    /* get_ascii_at：成功/越界/类型不匹配 */
+    {
+        secs_ii_item_t *list = NULL;
+        expect_ok("secs_ii_item_create_list(get_ascii_at)",
+                  secs_ii_item_create_list(&list));
+        expect_ok("secs_ii_item_list_append_ascii(get_ascii_at)",
+                  secs_ii_item_list_append_ascii(list, "X"));
+
+        const char *p = NULL;
+        size_t n = 0;
+        expect_ok("secs_ii_item_get_ascii_at(ok)",
+                  secs_ii_item_get_ascii_at(list, 0, &p, &n));
+        if (!p || n != 1u || memcmp(p, "X", 1) != 0) {
+            fprintf(stderr, "FAIL: get_ascii_at payload mismatch\n");
+            ++g_failures;
+        }
+
+        expect_err("secs_ii_item_get_ascii_at(oob)",
+                   secs_ii_item_get_ascii_at(list, 1, &p, &n));
+
+        expect_ok("secs_ii_item_list_append_u2(type mismatch)",
+                  secs_ii_item_list_append_u2(list, 1));
+        expect_err("secs_ii_item_get_ascii_at(type mismatch)",
+                   secs_ii_item_get_ascii_at(list, 1, &p, &n));
+
+        secs_ii_item_destroy(list);
+    }
+
+    /* depth==0：各类型 view/get */
+#define TEST_NUMERIC_AT_PATH(tag, c_type, create_fn, view_at_fn, get_at_fn, v0) \
+    do {                                                                       \
+        secs_ii_item_t *item = NULL;                                           \
+        const c_type in = (c_type)(v0);                                        \
+        expect_ok(#create_fn "(scalar)", create_fn(&in, 1, &item));            \
+        const c_type *p = NULL;                                                \
+        size_t n = 0;                                                          \
+        expect_ok(#view_at_fn "(depth0)", view_at_fn(item, &p, &n, 0));        \
+        if (!p || n != 1u || p[0] != in) {                                     \
+            fprintf(stderr, "FAIL: " #tag " view_at_path mismatch\n");         \
+            ++g_failures;                                                      \
+        }                                                                      \
+        c_type out = 0;                                                        \
+        expect_ok(#get_at_fn "(depth0)", get_at_fn(item, &out, 0));            \
+        if (out != in) {                                                       \
+            fprintf(stderr, "FAIL: " #tag " get_at_path mismatch\n");          \
+            ++g_failures;                                                      \
+        }                                                                      \
+        secs_ii_item_destroy(item);                                            \
+    } while (0)
+
+    TEST_NUMERIC_AT_PATH(i1,
+                         int8_t,
+                         secs_ii_item_create_i1,
+                         secs_ii_item_i1_view_at_path,
+                         secs_ii_item_get_i1_at_path,
+                         -3);
+    TEST_NUMERIC_AT_PATH(i2,
+                         int16_t,
+                         secs_ii_item_create_i2,
+                         secs_ii_item_i2_view_at_path,
+                         secs_ii_item_get_i2_at_path,
+                         -300);
+    TEST_NUMERIC_AT_PATH(i4,
+                         int32_t,
+                         secs_ii_item_create_i4,
+                         secs_ii_item_i4_view_at_path,
+                         secs_ii_item_get_i4_at_path,
+                         -123456);
+    TEST_NUMERIC_AT_PATH(i8,
+                         int64_t,
+                         secs_ii_item_create_i8,
+                         secs_ii_item_i8_view_at_path,
+                         secs_ii_item_get_i8_at_path,
+                         -1234567890);
+    TEST_NUMERIC_AT_PATH(u1,
+                         uint8_t,
+                         secs_ii_item_create_u1,
+                         secs_ii_item_u1_view_at_path,
+                         secs_ii_item_get_u1_at_path,
+                         7);
+    /* U2：get 函数名不同 */
+    {
+        secs_ii_item_t *item = NULL;
+        const uint16_t in = 9u;
+        expect_ok("secs_ii_item_create_u2(depth0)",
+                  secs_ii_item_create_u2(&in, 1, &item));
+        const uint16_t *p = NULL;
+        size_t n = 0;
+        expect_ok("secs_ii_item_u2_view_at_path(depth0)",
+                  secs_ii_item_u2_view_at_path(item, &p, &n, 0));
+        if (!p || n != 1u || p[0] != in) {
+            fprintf(stderr, "FAIL: u2 view_at_path mismatch\n");
+            ++g_failures;
+        }
+        uint16_t out = 0;
+        expect_ok("secs_ii_item_get_u2_at_path(depth0)",
+                  secs_ii_item_get_u2_at_path(item, &out, 0));
+        if (out != in) {
+            fprintf(stderr, "FAIL: u2 get_at_path mismatch\n");
+            ++g_failures;
+        }
+        secs_ii_item_destroy(item);
+    }
+    TEST_NUMERIC_AT_PATH(u4,
+                         uint32_t,
+                         secs_ii_item_create_u4,
+                         secs_ii_item_u4_view_at_path,
+                         secs_ii_item_get_u4_at_path,
+                         12345);
+    TEST_NUMERIC_AT_PATH(u8,
+                         uint64_t,
+                         secs_ii_item_create_u8,
+                         secs_ii_item_u8_view_at_path,
+                         secs_ii_item_get_u8_at_path,
+                         123456);
+    TEST_NUMERIC_AT_PATH(f4,
+                         float,
+                         secs_ii_item_create_f4,
+                         secs_ii_item_f4_view_at_path,
+                         secs_ii_item_get_f4_at_path,
+                         0.5f);
+    TEST_NUMERIC_AT_PATH(f8,
+                         double,
+                         secs_ii_item_create_f8,
+                         secs_ii_item_f8_view_at_path,
+                         secs_ii_item_get_f8_at_path,
+                         -2.5);
+
+#undef TEST_NUMERIC_AT_PATH
+
+    /* ASCII/Binary view_at_path(depth0) */
+    {
+        secs_ii_item_t *a = NULL;
+        expect_ok("secs_ii_item_create_ascii(depth0)",
+                  secs_ii_item_create_ascii("hi", 2, &a));
+        const char *p = NULL;
+        size_t n = 0;
+        expect_ok("secs_ii_item_ascii_view_at_path(depth0)",
+                  secs_ii_item_ascii_view_at_path(a, &p, &n, 0));
+        if (!p || n != 2u || memcmp(p, "hi", 2) != 0) {
+            fprintf(stderr, "FAIL: ascii_view_at_path mismatch\n");
+            ++g_failures;
+        }
+        /* type mismatch */
+        {
+            const uint8_t *bp = NULL;
+            size_t bn = 0;
+            expect_err("secs_ii_item_binary_view_at_path(type mismatch)",
+                       secs_ii_item_binary_view_at_path(a, &bp, &bn, 0));
+        }
+        secs_ii_item_destroy(a);
+    }
+    {
+        const uint8_t in[2] = {1u, 2u};
+        secs_ii_item_t *b = NULL;
+        expect_ok("secs_ii_item_create_binary(depth0)",
+                  secs_ii_item_create_binary(in, 2, &b));
+        const uint8_t *p = NULL;
+        size_t n = 0;
+        expect_ok("secs_ii_item_binary_view_at_path(depth0)",
+                  secs_ii_item_binary_view_at_path(b, &p, &n, 0));
+        if (!p || n != 2u || p[0] != 1u || p[1] != 2u) {
+            fprintf(stderr, "FAIL: binary_view_at_path mismatch\n");
+            ++g_failures;
+        }
+        secs_ii_item_destroy(b);
+    }
+
+    /* Boolean：copy_at_path + get_boolean_at_path */
+    {
+        const uint8_t in01[2] = {0u, 1u};
+        secs_ii_item_t *b = NULL;
+        expect_ok("secs_ii_item_create_boolean(depth0)",
+                  secs_ii_item_create_boolean(in01, 2, &b));
+        uint8_t *out01 = NULL;
+        size_t out_n = 0;
+        expect_ok("secs_ii_item_boolean_copy_at_path(depth0)",
+                  secs_ii_item_boolean_copy_at_path(b, &out01, &out_n, 0));
+        if (!out01 || out_n != 2u || out01[0] != 0u || out01[1] != 1u) {
+            fprintf(stderr, "FAIL: boolean_copy_at_path mismatch\n");
+            ++g_failures;
+        }
+        secs_free(out01);
+        secs_ii_item_destroy(b);
+    }
+    {
+        const uint8_t in01 = 1u;
+        secs_ii_item_t *b = NULL;
+        expect_ok("secs_ii_item_create_boolean(scalar)",
+                  secs_ii_item_create_boolean(&in01, 1, &b));
+        uint8_t out = 0;
+        expect_ok("secs_ii_item_get_boolean_at_path(depth0)",
+                  secs_ii_item_get_boolean_at_path(b, &out, 0));
+        if (out != 1u) {
+            fprintf(stderr, "FAIL: get_boolean_at_path mismatch\n");
+            ++g_failures;
+        }
+        secs_ii_item_destroy(b);
+    }
+
+    /* depth>0：路径提取成功/越界/中间非 List */
+    {
+        secs_ii_item_t *root = NULL;
+        secs_ii_item_t *inner = NULL;
+        expect_ok("secs_ii_item_create_list(path root)",
+                  secs_ii_item_create_list(&root));
+        expect_ok("secs_ii_item_create_list(path inner)",
+                  secs_ii_item_create_list(&inner));
+        expect_ok("secs_ii_item_list_append_u4(inner)",
+                  secs_ii_item_list_append_u4(inner, 42u));
+        expect_ok("secs_ii_item_list_append_take(root, inner)",
+                  secs_ii_item_list_append_take(root, &inner));
+
+        uint32_t out = 0;
+        expect_ok("secs_ii_item_get_u4_at_path(depth2)",
+                  secs_ii_item_get_u4_at_path(root,
+                                              &out,
+                                              2,
+                                              (size_t)0,
+                                              (size_t)0));
+        if (out != 42u) {
+            fprintf(stderr, "FAIL: get_u4_at_path(depth2) mismatch\n");
+            ++g_failures;
+        }
+
+        expect_err("secs_ii_item_get_u4_at_path(oob)",
+                   secs_ii_item_get_u4_at_path(root,
+                                               &out,
+                                               2,
+                                               (size_t)0,
+                                               (size_t)99));
+
+        /* 中间非 List：root 为 U4，但 depth>0 */
+        {
+            secs_ii_item_t *u4 = NULL;
+            const uint32_t v = 1u;
+            expect_ok("secs_ii_item_create_u4(non-list root)",
+                      secs_ii_item_create_u4(&v, 1, &u4));
+            expect_err("secs_ii_item_get_u4_at_path(non-list root)",
+                       secs_ii_item_get_u4_at_path(u4, &out, 1, (size_t)0));
+            secs_ii_item_destroy(u4);
+        }
+
+        secs_ii_item_destroy(root);
+    }
+
+    /* 标量长度!=1：get_* 应报错 */
+    {
+        const uint32_t v[2] = {1u, 2u};
+        secs_ii_item_t *u4 = NULL;
+        expect_ok("secs_ii_item_create_u4(n==2)",
+                  secs_ii_item_create_u4(v, 2, &u4));
+        uint32_t out = 0;
+        expect_err("secs_ii_item_get_u4_at_path(len!=1)",
+                   secs_ii_item_get_u4_at_path(u4, &out, 0));
+        secs_ii_item_destroy(u4);
+    }
+
+    /* 参数校验：out 指针为空 */
+    {
+        const uint16_t v = 1u;
+        secs_ii_item_t *u2 = NULL;
+        expect_ok("secs_ii_item_create_u2(for null-out)",
+                  secs_ii_item_create_u2(&v, 1, &u2));
+        size_t n = 0;
+        expect_err("secs_ii_item_u2_view_at_path(NULL out_ptr)",
+                   secs_ii_item_u2_view_at_path(u2, NULL, &n, 0));
+        secs_ii_item_destroy(u2);
     }
 }
 
@@ -3892,6 +4549,8 @@ int main(void) {
     test_hsms_session_create_v2_smoke();
     test_ii_encode_decode_and_malicious();
     test_ii_all_types_and_views();
+    test_ii_list_builder_helpers();
+    test_ii_extraction_helpers();
     test_sml_runtime_basic();
     test_sml_runtime_placeholders();
     test_sml_render_context_lifecycle();

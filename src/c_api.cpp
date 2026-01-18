@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstdarg>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -1057,6 +1058,167 @@ secs_error_t secs_ii_item_list_append(secs_ii_item_t *list,
     });
 }
 
+// ----------------------------- SECS-II：List 构建便捷 API（P1）
+// -----------------------------
+
+namespace {
+
+[[nodiscard]] secs_error_t ii_list_push(secs_ii_item_t *list,
+                                        secs::ii::Item elem) noexcept {
+    if (!list) {
+        return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+    }
+    auto *l = list->item.get_if<secs::ii::List>();
+    if (!l) {
+        return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+    }
+    l->push_back(std::move(elem));
+    return ok();
+}
+
+} // namespace
+
+secs_error_t secs_ii_item_list_append_take(secs_ii_item_t *list,
+                                           secs_ii_item_t **io_elem) {
+    return guard_error([&]() -> secs_error_t {
+        if (!io_elem || !*io_elem) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+
+        // take 语义：确保无论成功/失败/抛异常都能销毁并置空。
+        std::unique_ptr<secs_ii_item_t, void (*)(secs_ii_item_t *)> owned(
+            *io_elem, secs_ii_item_destroy);
+        *io_elem = nullptr;
+
+        if (!list) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        auto *l = list->item.get_if<secs::ii::List>();
+        if (!l) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        l->push_back(owned->item);
+        return ok();
+    });
+}
+
+secs_error_t secs_ii_item_list_append_ascii(secs_ii_item_t *list,
+                                            const char *value) {
+    return guard_error([&]() -> secs_error_t {
+        if (!value) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        return ii_list_push(list, secs::ii::Item::ascii(std::string(value)));
+    });
+}
+
+secs_error_t secs_ii_item_list_append_ascii_n(secs_ii_item_t *list,
+                                              const char *bytes,
+                                              size_t n) {
+    return guard_error([&]() -> secs_error_t {
+        if (!bytes && n != 0) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        std::string s;
+        if (n != 0) {
+            s.assign(bytes, bytes + n);
+        }
+        return ii_list_push(list, secs::ii::Item::ascii(std::move(s)));
+    });
+}
+
+secs_error_t secs_ii_item_list_append_binary(secs_ii_item_t *list,
+                                             const uint8_t *bytes,
+                                             size_t n) {
+    return guard_error([&]() -> secs_error_t {
+        if (!bytes && n != 0) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        return ii_list_push(list,
+                            secs::ii::Item::binary(bytes_to_vec(bytes, n)));
+    });
+}
+
+secs_error_t secs_ii_item_list_append_boolean(secs_ii_item_t *list,
+                                              uint8_t value01) {
+    return guard_error([&]() -> secs_error_t {
+        if (value01 != 0 && value01 != 1) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        std::vector<bool> v;
+        v.push_back(value01 != 0);
+        return ii_list_push(list, secs::ii::Item::boolean(std::move(v)));
+    });
+}
+
+secs_error_t secs_ii_item_list_append_boolean_values(secs_ii_item_t *list,
+                                                     const uint8_t *values01,
+                                                     size_t n) {
+    return guard_error([&]() -> secs_error_t {
+        if (!values01 && n != 0) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        std::vector<bool> v;
+        v.reserve(n);
+        for (size_t i = 0; i < n; ++i) {
+            if (values01[i] != 0 && values01[i] != 1) {
+                return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+            }
+            v.push_back(values01[i] != 0);
+        }
+        return ii_list_push(list, secs::ii::Item::boolean(std::move(v)));
+    });
+}
+
+#define SECS_II_LIST_APPEND_SCALAR_IMPL(c_type, fn_suffix, make_item)            \
+    secs_error_t secs_ii_item_list_append_##fn_suffix(secs_ii_item_t *list,      \
+                                                      c_type value) {           \
+        return guard_error([&]() -> secs_error_t {                               \
+            return ii_list_push(list, make_item({value}));                       \
+        });                                                                      \
+    }
+
+SECS_II_LIST_APPEND_SCALAR_IMPL(int8_t, i1, secs::ii::Item::i1)
+SECS_II_LIST_APPEND_SCALAR_IMPL(int16_t, i2, secs::ii::Item::i2)
+SECS_II_LIST_APPEND_SCALAR_IMPL(int32_t, i4, secs::ii::Item::i4)
+SECS_II_LIST_APPEND_SCALAR_IMPL(int64_t, i8, secs::ii::Item::i8)
+SECS_II_LIST_APPEND_SCALAR_IMPL(uint8_t, u1, secs::ii::Item::u1)
+SECS_II_LIST_APPEND_SCALAR_IMPL(uint16_t, u2, secs::ii::Item::u2)
+SECS_II_LIST_APPEND_SCALAR_IMPL(uint32_t, u4, secs::ii::Item::u4)
+SECS_II_LIST_APPEND_SCALAR_IMPL(uint64_t, u8, secs::ii::Item::u8)
+SECS_II_LIST_APPEND_SCALAR_IMPL(float, f4, secs::ii::Item::f4)
+SECS_II_LIST_APPEND_SCALAR_IMPL(double, f8, secs::ii::Item::f8)
+
+#undef SECS_II_LIST_APPEND_SCALAR_IMPL
+
+#define SECS_II_LIST_APPEND_VALUES_IMPL(c_type, fn_suffix, make_item)            \
+    secs_error_t secs_ii_item_list_append_##fn_suffix##_values(                  \
+        secs_ii_item_t *list, const c_type *values, size_t n) {                  \
+        return guard_error([&]() -> secs_error_t {                               \
+            if (!values && n != 0) {                                             \
+                return c_api_err(SECS_C_API_INVALID_ARGUMENT);                   \
+            }                                                                    \
+            std::vector<c_type> out;                                             \
+            if (n != 0) {                                                        \
+                out.assign(values, values + n);                                  \
+            }                                                                    \
+            return ii_list_push(list, make_item(std::move(out)));                \
+        });                                                                      \
+    }
+
+SECS_II_LIST_APPEND_VALUES_IMPL(int8_t, i1, secs::ii::Item::i1)
+SECS_II_LIST_APPEND_VALUES_IMPL(int16_t, i2, secs::ii::Item::i2)
+SECS_II_LIST_APPEND_VALUES_IMPL(int32_t, i4, secs::ii::Item::i4)
+SECS_II_LIST_APPEND_VALUES_IMPL(int64_t, i8, secs::ii::Item::i8)
+SECS_II_LIST_APPEND_VALUES_IMPL(uint8_t, u1, secs::ii::Item::u1)
+SECS_II_LIST_APPEND_VALUES_IMPL(uint16_t, u2, secs::ii::Item::u2)
+SECS_II_LIST_APPEND_VALUES_IMPL(uint32_t, u4, secs::ii::Item::u4)
+SECS_II_LIST_APPEND_VALUES_IMPL(uint64_t, u8, secs::ii::Item::u8)
+SECS_II_LIST_APPEND_VALUES_IMPL(float, f4, secs::ii::Item::f4)
+SECS_II_LIST_APPEND_VALUES_IMPL(double, f8, secs::ii::Item::f8)
+
+#undef SECS_II_LIST_APPEND_VALUES_IMPL
+
 secs_error_t secs_ii_item_ascii_view(const secs_ii_item_t *item,
                                      const char **out_ptr,
                                      size_t *out_n) {
@@ -1139,6 +1301,332 @@ SECS_II_VIEW_IMPL(float, secs::ii::F4, f4)
 SECS_II_VIEW_IMPL(double, secs::ii::F8, f8)
 
 #undef SECS_II_VIEW_IMPL
+
+// ----------------------------- SECS-II：提取便捷 API（P1）
+// -----------------------------
+
+namespace {
+
+[[nodiscard]] const secs::ii::Item *
+ii_item_at_path_va(const secs_ii_item_t *root,
+                   size_t depth,
+                   va_list *ap,
+                   secs_error_t &out_err) noexcept {
+    if (!root) {
+        out_err = c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        return nullptr;
+    }
+    if (!ap) {
+        out_err = c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        return nullptr;
+    }
+
+    const secs::ii::Item *cur = &root->item;
+    for (size_t i = 0; i < depth; ++i) {
+        const size_t idx = va_arg(*ap, size_t);
+        const auto *list = cur->get_if<secs::ii::List>();
+        if (!list) {
+            out_err = c_api_err(SECS_C_API_INVALID_ARGUMENT);
+            return nullptr;
+        }
+        if (idx >= list->size()) {
+            out_err = c_api_err(SECS_C_API_INVALID_ARGUMENT);
+            return nullptr;
+        }
+        cur = &(*list)[idx];
+    }
+
+    out_err = ok();
+    return cur;
+}
+
+} // namespace
+
+secs_error_t secs_ii_item_get_ascii_at(const secs_ii_item_t *list,
+                                       size_t index,
+                                       const char **out_ptr,
+                                       size_t *out_n) {
+    return guard_error([&]() -> secs_error_t {
+        if (!list || !out_ptr || !out_n) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_ptr = nullptr;
+        *out_n = 0;
+
+        const auto *l = list->item.get_if<secs::ii::List>();
+        if (!l) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        if (index >= l->size()) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        const auto *a = (*l)[index].get_if<secs::ii::ASCII>();
+        if (!a) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_ptr = a->value.data();
+        *out_n = a->value.size();
+        return ok();
+    });
+}
+
+// ---- view_*_at_path ---------------------------------------------------------
+
+secs_error_t secs_ii_item_ascii_view_at_path(const secs_ii_item_t *root,
+                                             const char **out_ptr,
+                                             size_t *out_n,
+                                             size_t depth,
+                                             ...) {
+    if (!root || !out_ptr || !out_n) {
+        return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+    }
+    *out_ptr = nullptr;
+    *out_n = 0;
+
+    va_list ap;
+    va_start(ap, depth);
+    const auto ret = guard_error([&]() -> secs_error_t {
+        secs_error_t err = ok();
+        const auto *item = ii_item_at_path_va(root, depth, &ap, err);
+        if (!secs_error_is_ok(err) || !item) {
+            return err;
+        }
+
+        const auto *a = item->get_if<secs::ii::ASCII>();
+        if (!a) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_ptr = a->value.data();
+        *out_n = a->value.size();
+        return ok();
+    });
+    va_end(ap);
+    return ret;
+}
+
+secs_error_t secs_ii_item_binary_view_at_path(const secs_ii_item_t *root,
+                                              const uint8_t **out_ptr,
+                                              size_t *out_n,
+                                              size_t depth,
+                                              ...) {
+    if (!root || !out_ptr || !out_n) {
+        return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+    }
+    *out_ptr = nullptr;
+    *out_n = 0;
+
+    va_list ap;
+    va_start(ap, depth);
+    const auto ret = guard_error([&]() -> secs_error_t {
+        secs_error_t err = ok();
+        const auto *item = ii_item_at_path_va(root, depth, &ap, err);
+        if (!secs_error_is_ok(err) || !item) {
+            return err;
+        }
+
+        const auto *b = item->get_if<secs::ii::Binary>();
+        if (!b) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_ptr = reinterpret_cast<const uint8_t *>(b->value.data());
+        *out_n = b->value.size();
+        return ok();
+    });
+    va_end(ap);
+    return ret;
+}
+
+secs_error_t secs_ii_item_boolean_copy_at_path(const secs_ii_item_t *root,
+                                               uint8_t **out_values01,
+                                               size_t *out_n,
+                                               size_t depth,
+                                               ...) {
+    if (!root || !out_values01 || !out_n) {
+        return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+    }
+    *out_values01 = nullptr;
+    *out_n = 0;
+
+    va_list ap;
+    va_start(ap, depth);
+    const auto ret = guard_error([&]() -> secs_error_t {
+        secs_error_t err = ok();
+        const auto *item = ii_item_at_path_va(root, depth, &ap, err);
+        if (!secs_error_is_ok(err) || !item) {
+            return err;
+        }
+
+        const auto *v = item->get_if<secs::ii::Boolean>();
+        if (!v) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        if (v->values.empty()) {
+            return ok();
+        }
+
+        auto *buf = static_cast<uint8_t *>(secs_malloc(v->values.size()));
+        if (!buf) {
+            return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+        }
+        for (size_t i = 0; i < v->values.size(); ++i) {
+            buf[i] = v->values[i] ? 1u : 0u;
+        }
+        *out_values01 = buf;
+        *out_n = v->values.size();
+        return ok();
+    });
+    va_end(ap);
+    return ret;
+}
+
+#define SECS_II_VIEW_AT_PATH_IMPL(c_type, cpp_type, tag)                         \
+    secs_error_t secs_ii_item_##tag##_view_at_path(                              \
+        const secs_ii_item_t *root,                                              \
+        const c_type **out_ptr,                                                  \
+        size_t *out_n,                                                           \
+        size_t depth,                                                            \
+        ...) {                                                                   \
+        if (!root || !out_ptr || !out_n) {                                       \
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);                       \
+        }                                                                        \
+        *out_ptr = nullptr;                                                      \
+        *out_n = 0;                                                              \
+                                                                                \
+        va_list ap;                                                              \
+        va_start(ap, depth);                                                     \
+        const auto ret = guard_error([&]() -> secs_error_t {                      \
+            secs_error_t err = ok();                                             \
+            const auto *item = ii_item_at_path_va(root, depth, &ap, err);        \
+            if (!secs_error_is_ok(err) || !item) {                               \
+                return err;                                                      \
+            }                                                                    \
+                                                                                \
+            const auto *v = item->get_if<cpp_type>();                            \
+            if (!v) {                                                            \
+                return c_api_err(SECS_C_API_INVALID_ARGUMENT);                   \
+            }                                                                    \
+            *out_ptr = reinterpret_cast<const c_type *>(v->values.data());       \
+            *out_n = v->values.size();                                           \
+            return ok();                                                         \
+        });                                                                      \
+        va_end(ap);                                                              \
+        return ret;                                                              \
+    }
+
+SECS_II_VIEW_AT_PATH_IMPL(int8_t, secs::ii::I1, i1)
+SECS_II_VIEW_AT_PATH_IMPL(int16_t, secs::ii::I2, i2)
+SECS_II_VIEW_AT_PATH_IMPL(int32_t, secs::ii::I4, i4)
+SECS_II_VIEW_AT_PATH_IMPL(int64_t, secs::ii::I8, i8)
+SECS_II_VIEW_AT_PATH_IMPL(uint8_t, secs::ii::U1, u1)
+SECS_II_VIEW_AT_PATH_IMPL(uint16_t, secs::ii::U2, u2)
+SECS_II_VIEW_AT_PATH_IMPL(uint32_t, secs::ii::U4, u4)
+SECS_II_VIEW_AT_PATH_IMPL(uint64_t, secs::ii::U8, u8)
+SECS_II_VIEW_AT_PATH_IMPL(float, secs::ii::F4, f4)
+SECS_II_VIEW_AT_PATH_IMPL(double, secs::ii::F8, f8)
+
+#undef SECS_II_VIEW_AT_PATH_IMPL
+
+// ---- get_*_at_path（标量） ---------------------------------------------------
+
+secs_error_t secs_ii_item_get_u2_at_path(const secs_ii_item_t *root,
+                                        uint16_t *out_val,
+                                        size_t depth,
+                                        ...) {
+    if (!root || !out_val) {
+        return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+    }
+    *out_val = 0;
+
+    va_list ap;
+    va_start(ap, depth);
+    const auto ret = guard_error([&]() -> secs_error_t {
+        secs_error_t err = ok();
+        const auto *item = ii_item_at_path_va(root, depth, &ap, err);
+        if (!secs_error_is_ok(err) || !item) {
+            return err;
+        }
+
+        const auto *u2 = item->get_if<secs::ii::U2>();
+        if (!u2 || u2->values.size() != 1) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_val = u2->values[0];
+        return ok();
+    });
+    va_end(ap);
+    return ret;
+}
+
+#define SECS_II_GET_SCALAR_AT_PATH_IMPL(c_type, cpp_type, tag, convert_expr)     \
+    secs_error_t secs_ii_item_get_##tag##_at_path(const secs_ii_item_t *root,    \
+                                                  c_type *out_val,              \
+                                                  size_t depth,                 \
+                                                  ...) {                        \
+        if (!root || !out_val) {                                                 \
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);                       \
+        }                                                                        \
+        *out_val = {};                                                           \
+                                                                                \
+        va_list ap;                                                              \
+        va_start(ap, depth);                                                     \
+        const auto ret = guard_error([&]() -> secs_error_t {                      \
+            secs_error_t err = ok();                                             \
+            const auto *item = ii_item_at_path_va(root, depth, &ap, err);        \
+            if (!secs_error_is_ok(err) || !item) {                               \
+                return err;                                                      \
+            }                                                                    \
+                                                                                \
+            const auto *v = item->get_if<cpp_type>();                            \
+            if (!v || v->values.size() != 1) {                                   \
+                return c_api_err(SECS_C_API_INVALID_ARGUMENT);                   \
+            }                                                                    \
+            *out_val = (convert_expr);                                           \
+            return ok();                                                         \
+        });                                                                      \
+        va_end(ap);                                                              \
+        return ret;                                                              \
+    }
+
+SECS_II_GET_SCALAR_AT_PATH_IMPL(int8_t, secs::ii::I1, i1, v->values[0])
+SECS_II_GET_SCALAR_AT_PATH_IMPL(int16_t, secs::ii::I2, i2, v->values[0])
+SECS_II_GET_SCALAR_AT_PATH_IMPL(int32_t, secs::ii::I4, i4, v->values[0])
+SECS_II_GET_SCALAR_AT_PATH_IMPL(int64_t, secs::ii::I8, i8, v->values[0])
+SECS_II_GET_SCALAR_AT_PATH_IMPL(uint8_t, secs::ii::U1, u1, v->values[0])
+SECS_II_GET_SCALAR_AT_PATH_IMPL(uint32_t, secs::ii::U4, u4, v->values[0])
+SECS_II_GET_SCALAR_AT_PATH_IMPL(uint64_t, secs::ii::U8, u8, v->values[0])
+SECS_II_GET_SCALAR_AT_PATH_IMPL(float, secs::ii::F4, f4, v->values[0])
+SECS_II_GET_SCALAR_AT_PATH_IMPL(double, secs::ii::F8, f8, v->values[0])
+
+#undef SECS_II_GET_SCALAR_AT_PATH_IMPL
+
+secs_error_t secs_ii_item_get_boolean_at_path(const secs_ii_item_t *root,
+                                             uint8_t *out_val01,
+                                             size_t depth,
+                                             ...) {
+    if (!root || !out_val01) {
+        return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+    }
+    *out_val01 = 0;
+
+    va_list ap;
+    va_start(ap, depth);
+    const auto ret = guard_error([&]() -> secs_error_t {
+        secs_error_t err = ok();
+        const auto *item = ii_item_at_path_va(root, depth, &ap, err);
+        if (!secs_error_is_ok(err) || !item) {
+            return err;
+        }
+
+        const auto *v = item->get_if<secs::ii::Boolean>();
+        if (!v || v->values.size() != 1) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_val01 = v->values[0] ? 1u : 0u;
+        return ok();
+    });
+    va_end(ap);
+    return ret;
+}
 
 secs_error_t
 secs_ii_encode(const secs_ii_item_t *item, uint8_t **out_bytes, size_t *out_n) {
@@ -1415,6 +1903,287 @@ secs_error_t secs_sml_render_context_set(secs_sml_render_context_t *ctx,
         }
         ctx->ctx.set(std::string{name}, value->item);
         return ok();
+    });
+}
+
+secs_error_t secs_sml_render_context_set_ascii(secs_sml_render_context_t *ctx,
+                                               const char *name,
+                                               const char *value) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !name || !value) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+
+        secs_ii_item_t *tmp = nullptr;
+        const auto err =
+            secs_ii_item_create_ascii(value, std::strlen(value), &tmp);
+        if (!secs_error_is_ok(err)) {
+            secs_ii_item_destroy(tmp);
+            return err;
+        }
+
+        const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
+        secs_ii_item_destroy(tmp);
+        return set_err;
+    });
+}
+
+secs_error_t secs_sml_render_context_set_binary(secs_sml_render_context_t *ctx,
+                                                const char *name,
+                                                const uint8_t *bytes,
+                                                size_t n) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !name) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        if (!bytes && n != 0) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+
+        secs_ii_item_t *tmp = nullptr;
+        const auto err = secs_ii_item_create_binary(bytes, n, &tmp);
+        if (!secs_error_is_ok(err)) {
+            secs_ii_item_destroy(tmp);
+            return err;
+        }
+
+        const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
+        secs_ii_item_destroy(tmp);
+        return set_err;
+    });
+}
+
+secs_error_t secs_sml_render_context_set_boolean(secs_sml_render_context_t *ctx,
+                                                 const char *name,
+                                                 uint8_t value01) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !name) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        if (value01 != 0 && value01 != 1) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+
+        secs_ii_item_t *tmp = nullptr;
+        const auto err = secs_ii_item_create_boolean(&value01, 1, &tmp);
+        if (!secs_error_is_ok(err)) {
+            secs_ii_item_destroy(tmp);
+            return err;
+        }
+
+        const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
+        secs_ii_item_destroy(tmp);
+        return set_err;
+    });
+}
+
+secs_error_t secs_sml_render_context_set_i1(secs_sml_render_context_t *ctx,
+                                            const char *name,
+                                            int8_t value) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !name) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+
+        secs_ii_item_t *tmp = nullptr;
+        const auto err = secs_ii_item_create_i1(&value, 1, &tmp);
+        if (!secs_error_is_ok(err)) {
+            secs_ii_item_destroy(tmp);
+            return err;
+        }
+
+        const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
+        secs_ii_item_destroy(tmp);
+        return set_err;
+    });
+}
+
+secs_error_t secs_sml_render_context_set_i2(secs_sml_render_context_t *ctx,
+                                            const char *name,
+                                            int16_t value) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !name) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+
+        secs_ii_item_t *tmp = nullptr;
+        const auto err = secs_ii_item_create_i2(&value, 1, &tmp);
+        if (!secs_error_is_ok(err)) {
+            secs_ii_item_destroy(tmp);
+            return err;
+        }
+
+        const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
+        secs_ii_item_destroy(tmp);
+        return set_err;
+    });
+}
+
+secs_error_t secs_sml_render_context_set_i4(secs_sml_render_context_t *ctx,
+                                            const char *name,
+                                            int32_t value) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !name) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+
+        secs_ii_item_t *tmp = nullptr;
+        const auto err = secs_ii_item_create_i4(&value, 1, &tmp);
+        if (!secs_error_is_ok(err)) {
+            secs_ii_item_destroy(tmp);
+            return err;
+        }
+
+        const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
+        secs_ii_item_destroy(tmp);
+        return set_err;
+    });
+}
+
+secs_error_t secs_sml_render_context_set_i8(secs_sml_render_context_t *ctx,
+                                            const char *name,
+                                            int64_t value) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !name) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+
+        secs_ii_item_t *tmp = nullptr;
+        const auto err = secs_ii_item_create_i8(&value, 1, &tmp);
+        if (!secs_error_is_ok(err)) {
+            secs_ii_item_destroy(tmp);
+            return err;
+        }
+
+        const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
+        secs_ii_item_destroy(tmp);
+        return set_err;
+    });
+}
+
+secs_error_t secs_sml_render_context_set_u1(secs_sml_render_context_t *ctx,
+                                            const char *name,
+                                            uint8_t value) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !name) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+
+        secs_ii_item_t *tmp = nullptr;
+        const auto err = secs_ii_item_create_u1(&value, 1, &tmp);
+        if (!secs_error_is_ok(err)) {
+            secs_ii_item_destroy(tmp);
+            return err;
+        }
+
+        const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
+        secs_ii_item_destroy(tmp);
+        return set_err;
+    });
+}
+
+secs_error_t secs_sml_render_context_set_u2(secs_sml_render_context_t *ctx,
+                                            const char *name,
+                                            uint16_t value) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !name) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+
+        secs_ii_item_t *tmp = nullptr;
+        const auto err = secs_ii_item_create_u2(&value, 1, &tmp);
+        if (!secs_error_is_ok(err)) {
+            secs_ii_item_destroy(tmp);
+            return err;
+        }
+
+        const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
+        secs_ii_item_destroy(tmp);
+        return set_err;
+    });
+}
+
+secs_error_t secs_sml_render_context_set_u4(secs_sml_render_context_t *ctx,
+                                            const char *name,
+                                            uint32_t value) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !name) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+
+        secs_ii_item_t *tmp = nullptr;
+        const auto err = secs_ii_item_create_u4(&value, 1, &tmp);
+        if (!secs_error_is_ok(err)) {
+            secs_ii_item_destroy(tmp);
+            return err;
+        }
+
+        const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
+        secs_ii_item_destroy(tmp);
+        return set_err;
+    });
+}
+
+secs_error_t secs_sml_render_context_set_u8(secs_sml_render_context_t *ctx,
+                                            const char *name,
+                                            uint64_t value) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !name) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+
+        secs_ii_item_t *tmp = nullptr;
+        const auto err = secs_ii_item_create_u8(&value, 1, &tmp);
+        if (!secs_error_is_ok(err)) {
+            secs_ii_item_destroy(tmp);
+            return err;
+        }
+
+        const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
+        secs_ii_item_destroy(tmp);
+        return set_err;
+    });
+}
+
+secs_error_t secs_sml_render_context_set_f4(secs_sml_render_context_t *ctx,
+                                            const char *name,
+                                            float value) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !name) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+
+        secs_ii_item_t *tmp = nullptr;
+        const auto err = secs_ii_item_create_f4(&value, 1, &tmp);
+        if (!secs_error_is_ok(err)) {
+            secs_ii_item_destroy(tmp);
+            return err;
+        }
+
+        const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
+        secs_ii_item_destroy(tmp);
+        return set_err;
+    });
+}
+
+secs_error_t secs_sml_render_context_set_f8(secs_sml_render_context_t *ctx,
+                                            const char *name,
+                                            double value) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !name) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+
+        secs_ii_item_t *tmp = nullptr;
+        const auto err = secs_ii_item_create_f8(&value, 1, &tmp);
+        if (!secs_error_is_ok(err)) {
+            secs_ii_item_destroy(tmp);
+            return err;
+        }
+
+        const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
+        secs_ii_item_destroy(tmp);
+        return set_err;
     });
 }
 

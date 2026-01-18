@@ -133,45 +133,30 @@ static int encode_s6f11_body(uint16_t dataid,
     *out_body = NULL;
     *out_body_n = 0;
 
-    secs_error_t err;
+    secs_error_t err = ok();
     secs_ii_item_t *root = NULL;
-    secs_ii_item_t *tmp = NULL;
+    secs_ii_item_t *params = NULL;
     uint8_t *bytes = NULL;
     size_t bytes_n = 0;
 
+    /* 使用 Phase2：List Builder helpers 构建 <L <U2 DATAID> <U2 CEID> <L ...params>> */
     if (!secs_error_is_ok(err = secs_ii_item_create_list(&root))) {
         goto cleanup;
     }
+    if (!secs_error_is_ok(err = secs_ii_item_list_append_u2(root, dataid))) {
+        goto cleanup;
+    }
+    if (!secs_error_is_ok(err = secs_ii_item_list_append_u2(root, ceid))) {
+        goto cleanup;
+    }
 
-    /* <U2 DATAID> */
-    if (!secs_error_is_ok(err = secs_ii_item_create_u2(&dataid, 1, &tmp))) {
+    /* params（本示例为空 List） */
+    if (!secs_error_is_ok(err = secs_ii_item_create_list(&params))) {
         goto cleanup;
     }
-    if (!secs_error_is_ok(err = secs_ii_item_list_append(root, tmp))) {
+    if (!secs_error_is_ok(err = secs_ii_item_list_append_take(root, &params))) {
         goto cleanup;
     }
-    secs_ii_item_destroy(tmp);
-    tmp = NULL;
-
-    /* <U2 CEID> */
-    if (!secs_error_is_ok(err = secs_ii_item_create_u2(&ceid, 1, &tmp))) {
-        goto cleanup;
-    }
-    if (!secs_error_is_ok(err = secs_ii_item_list_append(root, tmp))) {
-        goto cleanup;
-    }
-    secs_ii_item_destroy(tmp);
-    tmp = NULL;
-
-    /* <L> params（本示例为空） */
-    if (!secs_error_is_ok(err = secs_ii_item_create_list(&tmp))) {
-        goto cleanup;
-    }
-    if (!secs_error_is_ok(err = secs_ii_item_list_append(root, tmp))) {
-        goto cleanup;
-    }
-    secs_ii_item_destroy(tmp);
-    tmp = NULL;
 
     if (!secs_error_is_ok(err = secs_ii_encode(root, &bytes, &bytes_n))) {
         goto cleanup;
@@ -183,58 +168,10 @@ static int encode_s6f11_body(uint16_t dataid,
     bytes_n = 0;
 
 cleanup:
-    secs_ii_item_destroy(tmp);
+    secs_ii_item_destroy(params); /* 仅当 append_take 失败时才可能非 NULL */
     secs_ii_item_destroy(root);
     secs_free(bytes);
     return ensure_ok("encode_s6f11_body", err);
-}
-
-static int decode_u2_at_list_index(const uint8_t *body,
-                                   size_t body_n,
-                                   size_t index,
-                                   uint16_t *out_value) {
-    *out_value = 0;
-
-    if (!body && body_n != 0) {
-        return 0;
-    }
-
-    size_t consumed = 0;
-    secs_ii_item_t *root = NULL;
-    secs_error_t err = secs_ii_decode_one(body, body_n, &consumed, &root);
-    if (!ensure_ok("secs_ii_decode_one", err)) {
-        secs_ii_item_destroy(root);
-        return 0;
-    }
-
-    secs_ii_item_t *child = NULL;
-    if (!ensure_ok("secs_ii_item_list_get",
-                   secs_ii_item_list_get(root, index, &child))) {
-        secs_ii_item_destroy(child);
-        secs_ii_item_destroy(root);
-        return 0;
-    }
-
-    const uint16_t *p = NULL;
-    size_t n = 0;
-    if (!ensure_ok("secs_ii_item_u2_view", secs_ii_item_u2_view(child, &p, &n))) {
-        secs_ii_item_destroy(child);
-        secs_ii_item_destroy(root);
-        return 0;
-    }
-    if (!p || n != 1u) {
-        fprintf(stderr,
-                "[失败] decode_u2_at_list_index: expected U2 scalar at index=%zu\n",
-                index);
-        secs_ii_item_destroy(child);
-        secs_ii_item_destroy(root);
-        return 0;
-    }
-
-    *out_value = p[0];
-    secs_ii_item_destroy(child);
-    secs_ii_item_destroy(root);
-    return 1;
 }
 
 /* ========== Pretty print：用于演示解码结果 ========== */
@@ -348,78 +285,6 @@ static void print_item(const secs_ii_item_t *item, int indent) {
     printf("<type=%d>\n", (int)ty);
 }
 
-/* ========== RenderContext：变量注入辅助 ========== */
-
-static int ctx_set_u1(secs_sml_render_context_t *ctx,
-                      const char *name,
-                      uint8_t v) {
-    secs_ii_item_t *item = NULL;
-    secs_error_t err = secs_ii_item_create_u1(&v, 1, &item);
-    if (!secs_error_is_ok(err)) {
-        secs_ii_item_destroy(item);
-        return ensure_ok("secs_ii_item_create_u1", err);
-    }
-    err = secs_sml_render_context_set(ctx, name, item);
-    secs_ii_item_destroy(item);
-    return ensure_ok("secs_sml_render_context_set(u1)", err);
-}
-
-static int ctx_set_u2(secs_sml_render_context_t *ctx,
-                      const char *name,
-                      uint16_t v) {
-    secs_ii_item_t *item = NULL;
-    secs_error_t err = secs_ii_item_create_u2(&v, 1, &item);
-    if (!secs_error_is_ok(err)) {
-        secs_ii_item_destroy(item);
-        return ensure_ok("secs_ii_item_create_u2", err);
-    }
-    err = secs_sml_render_context_set(ctx, name, item);
-    secs_ii_item_destroy(item);
-    return ensure_ok("secs_sml_render_context_set(u2)", err);
-}
-
-static int ctx_set_u4(secs_sml_render_context_t *ctx,
-                      const char *name,
-                      uint32_t v) {
-    secs_ii_item_t *item = NULL;
-    secs_error_t err = secs_ii_item_create_u4(&v, 1, &item);
-    if (!secs_error_is_ok(err)) {
-        secs_ii_item_destroy(item);
-        return ensure_ok("secs_ii_item_create_u4", err);
-    }
-    err = secs_sml_render_context_set(ctx, name, item);
-    secs_ii_item_destroy(item);
-    return ensure_ok("secs_sml_render_context_set(u4)", err);
-}
-
-static int ctx_set_f4(secs_sml_render_context_t *ctx,
-                      const char *name,
-                      float v) {
-    secs_ii_item_t *item = NULL;
-    secs_error_t err = secs_ii_item_create_f4(&v, 1, &item);
-    if (!secs_error_is_ok(err)) {
-        secs_ii_item_destroy(item);
-        return ensure_ok("secs_ii_item_create_f4", err);
-    }
-    err = secs_sml_render_context_set(ctx, name, item);
-    secs_ii_item_destroy(item);
-    return ensure_ok("secs_sml_render_context_set(f4)", err);
-}
-
-static int ctx_set_ascii(secs_sml_render_context_t *ctx,
-                         const char *name,
-                         const char *s) {
-    secs_ii_item_t *item = NULL;
-    secs_error_t err = secs_ii_item_create_ascii(s, strlen(s), &item);
-    if (!secs_error_is_ok(err)) {
-        secs_ii_item_destroy(item);
-        return ensure_ok("secs_ii_item_create_ascii", err);
-    }
-    err = secs_sml_render_context_set(ctx, name, item);
-    secs_ii_item_destroy(item);
-    return ensure_ok("secs_sml_render_context_set(ascii)", err);
-}
-
 struct device_data {
     const char *device_name;
     uint8_t status_code;
@@ -446,53 +311,87 @@ static int fill_context_for_response(const char *response_name,
     }
 
     if (strcmp(response_name, "status_response") == 0) {
-        if (!ctx_set_ascii(ctx, "DEVICE_NAME", data->device_name)) {
+        if (!ensure_ok("secs_sml_render_context_set_ascii(DEVICE_NAME)",
+                       secs_sml_render_context_set_ascii(ctx,
+                                                         "DEVICE_NAME",
+                                                         data->device_name))) {
             return 0;
         }
-        if (!ctx_set_u1(ctx, "STATUS_CODE", data->status_code)) {
+        if (!ensure_ok(
+                "secs_sml_render_context_set_u1(STATUS_CODE)",
+                secs_sml_render_context_set_u1(ctx, "STATUS_CODE", data->status_code))) {
             return 0;
         }
-        if (!ctx_set_u4(ctx, "UPTIME_SECONDS", data->uptime_seconds)) {
+        if (!ensure_ok("secs_sml_render_context_set_u4(UPTIME_SECONDS)",
+                       secs_sml_render_context_set_u4(ctx,
+                                                      "UPTIME_SECONDS",
+                                                      data->uptime_seconds))) {
             return 0;
         }
         return 1;
     }
 
     if (strcmp(response_name, "temperature_response") == 0) {
-        if (!ctx_set_f4(ctx, "TEMP_SENSOR_1", data->temp1) ||
-            !ctx_set_f4(ctx, "TEMP_SENSOR_2", data->temp2) ||
-            !ctx_set_f4(ctx, "TEMP_SENSOR_3", data->temp3)) {
+        if (!ensure_ok(
+                "secs_sml_render_context_set_f4(TEMP_SENSOR_1)",
+                secs_sml_render_context_set_f4(ctx, "TEMP_SENSOR_1", data->temp1)) ||
+            !ensure_ok(
+                "secs_sml_render_context_set_f4(TEMP_SENSOR_2)",
+                secs_sml_render_context_set_f4(ctx, "TEMP_SENSOR_2", data->temp2)) ||
+            !ensure_ok(
+                "secs_sml_render_context_set_f4(TEMP_SENSOR_3)",
+                secs_sml_render_context_set_f4(ctx, "TEMP_SENSOR_3", data->temp3))) {
             return 0;
         }
         float avg = (data->temp1 + data->temp2 + data->temp3) / 3.0f;
-        if (!ctx_set_f4(ctx, "TEMP_AVG", avg)) {
+        if (!ensure_ok("secs_sml_render_context_set_f4(TEMP_AVG)",
+                       secs_sml_render_context_set_f4(ctx, "TEMP_AVG", avg))) {
             return 0;
         }
         return 1;
     }
 
     if (strcmp(response_name, "alarm_response") == 0) {
-        if (!ctx_set_u2(ctx, "ALARM_COUNT", data->alarm_count)) {
+        if (!ensure_ok("secs_sml_render_context_set_u2(ALARM_COUNT)",
+                       secs_sml_render_context_set_u2(ctx,
+                                                      "ALARM_COUNT",
+                                                      data->alarm_count))) {
             return 0;
         }
-        if (!ctx_set_ascii(ctx, "ALARM_MSG_1", data->alarm_msg_1) ||
-            !ctx_set_ascii(ctx, "ALARM_MSG_2", data->alarm_msg_2)) {
+        if (!ensure_ok("secs_sml_render_context_set_ascii(ALARM_MSG_1)",
+                       secs_sml_render_context_set_ascii(ctx,
+                                                         "ALARM_MSG_1",
+                                                         data->alarm_msg_1)) ||
+            !ensure_ok("secs_sml_render_context_set_ascii(ALARM_MSG_2)",
+                       secs_sml_render_context_set_ascii(ctx,
+                                                         "ALARM_MSG_2",
+                                                         data->alarm_msg_2))) {
             return 0;
         }
         return 1;
     }
 
     if (strcmp(response_name, "production_response") == 0) {
-        if (!ctx_set_u4(ctx, "TOTAL_COUNT", data->total_count) ||
-            !ctx_set_u4(ctx, "GOOD_COUNT", data->good_count) ||
-            !ctx_set_u4(ctx, "BAD_COUNT", data->bad_count)) {
+        if (!ensure_ok("secs_sml_render_context_set_u4(TOTAL_COUNT)",
+                       secs_sml_render_context_set_u4(ctx,
+                                                      "TOTAL_COUNT",
+                                                      data->total_count)) ||
+            !ensure_ok("secs_sml_render_context_set_u4(GOOD_COUNT)",
+                       secs_sml_render_context_set_u4(ctx,
+                                                      "GOOD_COUNT",
+                                                      data->good_count)) ||
+            !ensure_ok("secs_sml_render_context_set_u4(BAD_COUNT)",
+                       secs_sml_render_context_set_u4(ctx,
+                                                      "BAD_COUNT",
+                                                      data->bad_count))) {
             return 0;
         }
         float yield = (data->total_count == 0u)
                           ? 0.0f
                           : ((float)data->good_count / (float)data->total_count) *
                                 100.0f;
-        if (!ctx_set_f4(ctx, "YIELD_RATE", yield)) {
+        if (!ensure_ok("secs_sml_render_context_set_f4(YIELD_RATE)",
+                       secs_sml_render_context_set_f4(ctx, "YIELD_RATE", yield))) {
             return 0;
         }
         return 1;
@@ -881,47 +780,59 @@ int main(void) {
             ++failures;
         }
 
-        /* 轻量校验：<L <U2 DATAID> <U2 CEID> <...>> */
-        {
-            uint16_t got_dataid = 0;
-            uint16_t got_ceid = 0;
-            if (!decode_u2_at_list_index(reply.body, reply.body_n, 0, &got_dataid) ||
-                !decode_u2_at_list_index(reply.body, reply.body_n, 1, &got_ceid)) {
-                fprintf(stderr, "[Host] ERROR: cannot extract DATAID/CEID from reply\n");
-                ++failures;
-            } else {
-                if (got_dataid != dataid) {
-                    fprintf(stderr,
-                            "[Host] ERROR: DATAID mismatch: expected=%u got=%u\n",
-                            (unsigned)dataid,
-                            (unsigned)got_dataid);
-                    ++failures;
-                }
-                if (got_ceid != ceid) {
-                    fprintf(stderr,
-                            "[Host] ERROR: CEID mismatch: expected=0x%04X got=0x%04X\n",
-                            (unsigned)ceid,
-                            (unsigned)got_ceid);
-                    ++failures;
-                }
-            }
-        }
-
-        /* 打印解码内容（演示） */
+        /* 轻量校验 + 打印：只解码一次，再用 Phase3 的 at_path helpers 提取字段 */
         if (reply.body && reply.body_n != 0) {
             size_t consumed = 0;
             secs_ii_item_t *decoded = NULL;
-            if (ensure_ok("secs_ii_decode_one(reply)",
-                          secs_ii_decode_one(reply.body,
-                                             reply.body_n,
-                                             &consumed,
-                                             &decoded))) {
+            if (!ensure_ok("secs_ii_decode_one(reply)",
+                           secs_ii_decode_one(reply.body,
+                                              reply.body_n,
+                                              &consumed,
+                                              &decoded))) {
+                secs_ii_item_destroy(decoded);
+                ++failures;
+            } else {
+                /* 轻量校验：<L <U2 DATAID> <U2 CEID> <...>> */
+                uint16_t got_dataid = 0;
+                uint16_t got_ceid = 0;
+                if (!ensure_ok("secs_ii_item_get_u2_at_path(DATAID)",
+                               secs_ii_item_get_u2_at_path(decoded,
+                                                           &got_dataid,
+                                                           1,
+                                                           (size_t)0)) ||
+                    !ensure_ok("secs_ii_item_get_u2_at_path(CEID)",
+                               secs_ii_item_get_u2_at_path(decoded,
+                                                           &got_ceid,
+                                                           1,
+                                                           (size_t)1))) {
+                    fprintf(stderr,
+                            "[Host] ERROR: cannot extract DATAID/CEID from reply\n");
+                    ++failures;
+                } else {
+                    if (got_dataid != dataid) {
+                        fprintf(stderr,
+                                "[Host] ERROR: DATAID mismatch: expected=%u got=%u\n",
+                                (unsigned)dataid,
+                                (unsigned)got_dataid);
+                        ++failures;
+                    }
+                    if (got_ceid != ceid) {
+                        fprintf(stderr,
+                                "[Host] ERROR: CEID mismatch: expected=0x%04X got=0x%04X\n",
+                                (unsigned)ceid,
+                                (unsigned)got_ceid);
+                        ++failures;
+                    }
+                }
+
+                /* 打印解码内容（演示） */
                 printf("[Host] Response body:\n");
                 print_item(decoded, 1);
                 secs_ii_item_destroy(decoded);
-            } else {
-                ++failures;
             }
+        } else {
+            fprintf(stderr, "[Host] ERROR: empty reply body\n");
+            ++failures;
         }
         printf("\n");
         secs_data_message_free(&reply);

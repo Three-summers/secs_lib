@@ -1,7 +1,7 @@
 # C API 易用性改进计划 (C API Usability Improvement Plan)
 
 > 文档创建日期：2026-01-18
-> 状态：提案 (Proposal)
+> 状态：P0/P1 已实现；P2 提案 (Partially Implemented)
 
 本文档基于对当前 `secs_c_api` 的审查以及 `examples/c_api_sml_ceid_complete.c` 的痛点分析，旨在提出一套切实可行的改进方案，使 C API 的开发体验接近 C++，降低使用门槛。
 
@@ -30,17 +30,29 @@
 
 **改进方案**：引入“直通式” Setter，内部自动处理 Item 的创建与生命周期。
 
-**新增 API 签名**：
+**已实现 API（`include/secs/c_api.h`）**：
 ```c
 /* 便捷注入函数：成功返回 SECS_OK (0)，失败返回错误码 */
-SECS_API secs_error_t secs_sml_ctx_set_ascii(secs_sml_render_context_t* ctx, const char* name, const char* value);
-SECS_API secs_error_t secs_sml_ctx_set_u1(secs_sml_render_context_t* ctx, const char* name, uint8_t value);
-SECS_API secs_error_t secs_sml_ctx_set_u2(secs_sml_render_context_t* ctx, const char* name, uint16_t value);
-SECS_API secs_error_t secs_sml_ctx_set_u4(secs_sml_render_context_t* ctx, const char* name, uint32_t value);
-SECS_API secs_error_t secs_sml_ctx_set_i4(secs_sml_render_context_t* ctx, const char* name, int32_t value);
-SECS_API secs_error_t secs_sml_ctx_set_f4(secs_sml_render_context_t* ctx, const char* name, float value);
-SECS_API secs_error_t secs_sml_ctx_set_f8(secs_sml_render_context_t* ctx, const char* name, double value);
-// ... 其他类型同理
+secs_error_t secs_sml_render_context_set_ascii(secs_sml_render_context_t* ctx,
+                                               const char* name,
+                                               const char* value);
+secs_error_t secs_sml_render_context_set_binary(secs_sml_render_context_t* ctx,
+                                                const char* name,
+                                                const uint8_t* bytes,
+                                                size_t n);
+secs_error_t secs_sml_render_context_set_boolean(secs_sml_render_context_t* ctx,
+                                                 const char* name,
+                                                 uint8_t value01);
+secs_error_t secs_sml_render_context_set_i1(secs_sml_render_context_t* ctx, const char* name, int8_t value);
+secs_error_t secs_sml_render_context_set_i2(secs_sml_render_context_t* ctx, const char* name, int16_t value);
+secs_error_t secs_sml_render_context_set_i4(secs_sml_render_context_t* ctx, const char* name, int32_t value);
+secs_error_t secs_sml_render_context_set_i8(secs_sml_render_context_t* ctx, const char* name, int64_t value);
+secs_error_t secs_sml_render_context_set_u1(secs_sml_render_context_t* ctx, const char* name, uint8_t value);
+secs_error_t secs_sml_render_context_set_u2(secs_sml_render_context_t* ctx, const char* name, uint16_t value);
+secs_error_t secs_sml_render_context_set_u4(secs_sml_render_context_t* ctx, const char* name, uint32_t value);
+secs_error_t secs_sml_render_context_set_u8(secs_sml_render_context_t* ctx, const char* name, uint64_t value);
+secs_error_t secs_sml_render_context_set_f4(secs_sml_render_context_t* ctx, const char* name, float value);
+secs_error_t secs_sml_render_context_set_f8(secs_sml_render_context_t* ctx, const char* name, double value);
 ```
 
 **对比效果**：
@@ -52,7 +64,7 @@ secs_sml_render_context_set(ctx, "ID", tmp);
 secs_ii_item_destroy(tmp);
 
 // [After]
-secs_sml_ctx_set_u2(ctx, "ID", val);
+secs_sml_render_context_set_u2(ctx, "ID", val);
 ```
 
 ### 3.2 Phase 2: 列表构建便捷化 (List Builder Helpers) [P1]
@@ -61,14 +73,22 @@ secs_sml_ctx_set_u2(ctx, "ID", val);
 
 **改进方案**：提供“值语义”的 Append 函数。
 
-**新增 API 签名**：
+**已实现 API（`include/secs/c_api.h`）**：
 ```c
-/* 直接向 List 追加值，内部负责创建 Item */
-SECS_API secs_error_t secs_ii_list_append_ascii(secs_ii_item_t* list, const char* value);
-SECS_API secs_ii_list_append_u2(secs_ii_item_t* list, uint16_t value);
-SECS_API secs_ii_list_append_f4(secs_ii_item_t* list, float value);
-/* 追加一个新的空 List 并返回其指针（所有权归父 List，用户无需 destroy） */
-SECS_API secs_error_t secs_ii_list_append_new_list(secs_ii_item_t* parent, secs_ii_item_t** out_child);
+/* 将 *io_elem 追加到 list（内部拷贝），随后自动 destroy 并将 *io_elem 置空 */
+secs_error_t secs_ii_item_list_append_take(secs_ii_item_t* list, secs_ii_item_t** io_elem);
+
+/* 直接向 List 追加“字面量值/数组值”，内部负责创建临时 Item 并 append */
+secs_error_t secs_ii_item_list_append_ascii(secs_ii_item_t* list, const char* value);
+secs_error_t secs_ii_item_list_append_ascii_n(secs_ii_item_t* list, const char* bytes, size_t n);
+secs_error_t secs_ii_item_list_append_binary(secs_ii_item_t* list, const uint8_t* bytes, size_t n);
+secs_error_t secs_ii_item_list_append_boolean(secs_ii_item_t* list, uint8_t value01);
+secs_error_t secs_ii_item_list_append_boolean_values(secs_ii_item_t* list, const uint8_t* values01, size_t n);
+
+secs_error_t secs_ii_item_list_append_u2(secs_ii_item_t* list, uint16_t value);
+secs_error_t secs_ii_item_list_append_u2_values(secs_ii_item_t* list, const uint16_t* values, size_t n);
+
+/* 其它标量/数组版本见 c_api.h（i1/i2/i4/i8/u1/u4/u8/f4/f8 等） */
 ```
 
 ### 3.3 Phase 3: 数据提取便捷化 (Extraction Helpers) [P1]
@@ -77,17 +97,32 @@ SECS_API secs_error_t secs_ii_list_append_new_list(secs_ii_item_t* parent, secs_
 
 **改进方案**：提供基于路径/索引的强类型 Getter。
 
-**新增 API 签名**：
+**已实现 API（`include/secs/c_api.h`）**：
 ```c
-/* 直接获取指定路径的 U2 值
- * 参数: root, out_val, path_depth, ...indices
- * 示例: get_u2(root, &val, 2, 0, 1) // 获取 root[0][1]
- */
-SECS_API secs_error_t secs_ii_get_u2_at_path(const secs_ii_item_t* root, uint16_t* out_val, size_t depth, ...);
+/* 简化版：获取单层 List 下标的 ASCII 值（指针生命周期由 list 持有） */
+secs_error_t secs_ii_item_get_ascii_at(const secs_ii_item_t* list,
+                                       size_t index,
+                                       const char** out_ptr,
+                                       size_t* out_n);
 
-/* 简化版：获取单层 List 下标的值 */
-SECS_API secs_error_t secs_ii_get_ascii_at(const secs_ii_item_t* list, size_t index, const char** out_str, size_t* out_len);
+/* 基于 0-based List 路径索引提取数据（不创建中间 Item 句柄） */
+secs_error_t secs_ii_item_get_u2_at_path(const secs_ii_item_t* root,
+                                        uint16_t* out_val,
+                                        size_t depth,
+                                        ...);
+
+secs_error_t secs_ii_item_u2_view_at_path(const secs_ii_item_t* root,
+                                         const uint16_t** out_ptr,
+                                         size_t* out_n,
+                                         size_t depth,
+                                         ...);
+
+/* 其它类型的 view/get 版本见 c_api.h（ascii/binary/boolean/i1/i2/i4/i8/u1/u4/u8/f4/f8 等） */
 ```
+
+注意：
+
+- at_path 系列的 `...indices` 约定为 `size_t`（例如常量建议写成 `(size_t)0`），否则在 C 的 varargs 下可能触发未定义行为。
 
 ### 3.4 Phase 4: 粘性错误上下文 (Sticky Error Context) [P2]
 
@@ -116,6 +151,11 @@ if (secs_sml_ctx_get_last_error(ctx) != SECS_OK) {
 1.  **需求最迫切**：SML 的核心就是变量注入，这部分代码在业务逻辑中占比最高。
 2.  **实现成本低**：只需对现有 API 进行简单的包装。
 3.  **收益立竿见影**：能立即简化 `examples/c_api_sml_ceid_complete.c` 中的大部分代码。
+
+已完成落地：
+
+- `secs_sml_render_context_set_*()` 便捷注入函数已在 C API 中提供，并已用于重写后的 `examples/c_api_sml_ceid_complete.c`。
+- Phase 2（List Builder）与 Phase 3（Extraction Helpers）已在 C API 中提供，并已用于重写后的 `examples/c_api_sml_ceid_complete.c`。
 
 ## 5. 验收标准
 

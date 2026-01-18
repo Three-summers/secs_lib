@@ -116,6 +116,22 @@ void test_lexer_keywords() {
     TEST_EXPECT(result.tokens[4].is(TokenType::KwL));
 }
 
+void test_lexer_capture_identifier() {
+    Lexer lexer(R"(if (S2F21 <U2 $CAP_A>) r0.)");
+    auto result = lexer.tokenize();
+
+    TEST_EXPECT(!result.ec);
+
+    bool found_capture = false;
+    for (const auto &tok : result.tokens) {
+        if (tok.is(TokenType::Identifier) && tok.value == "$CAP_A") {
+            found_capture = true;
+            break;
+        }
+    }
+    TEST_EXPECT(found_capture);
+}
+
 // ============================================================================
 // Parser 测试
 // ============================================================================
@@ -216,6 +232,142 @@ void test_parser_if_rule_with_condition() {
     TEST_EXPECT(rule.condition.index.has_value());
     TEST_EXPECT_EQ(*rule.condition.index, 2u);
     TEST_EXPECT(rule.condition.expected.has_value());
+}
+
+void test_parser_deep_path_indexing_sets_list_path() {
+    auto result = parse_sml(R"(
+    if (S2F21[1][2]==<U1 7>) ok.
+  )");
+
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.conditions.size(), 1u);
+
+    const auto &cond = result.document.conditions[0].condition;
+    TEST_EXPECT(!cond.index.has_value());
+    TEST_EXPECT(!cond.list_index.has_value()); // 只有单层 [i] 才会同步 list_index
+    TEST_EXPECT_EQ(cond.list_path.size(), 2u);
+    TEST_EXPECT_EQ(cond.list_path[0], 1u);
+    TEST_EXPECT_EQ(cond.list_path[1], 2u);
+    TEST_EXPECT(cond.expected.has_value());
+    TEST_EXPECT(!cond.pattern.has_value());
+}
+
+void test_parser_single_list_index_sets_list_index_and_list_path() {
+    auto result = parse_sml("if (S2F21[3]==<U1 7>) ok.");
+
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.conditions.size(), 1u);
+
+    const auto &cond = result.document.conditions[0].condition;
+    TEST_EXPECT(cond.list_index.has_value());
+    TEST_EXPECT_EQ(*cond.list_index, 3u);
+    TEST_EXPECT_EQ(cond.list_path.size(), 1u);
+    TEST_EXPECT_EQ(cond.list_path[0], 3u);
+}
+
+void test_parser_capture_pattern_parses_pattern_ast() {
+    auto result = parse_sml(R"(
+    if (S2F21 <L [2] <U2 $CAP_A> <L $CAP_B>>) r0.
+  )");
+
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.conditions.size(), 1u);
+
+    const auto &cond = result.document.conditions[0].condition;
+    TEST_EXPECT(!cond.expected.has_value());
+    TEST_EXPECT(cond.pattern.has_value());
+
+    const auto *pl = cond.pattern->get_if<PatL>();
+    TEST_EXPECT(pl != nullptr);
+    TEST_EXPECT(pl->size_hint.has_value());
+    TEST_EXPECT_EQ(*pl->size_hint, 2u);
+    TEST_EXPECT(!pl->capture.has_value());
+    TEST_EXPECT_EQ(pl->items.size(), 2u);
+
+    {
+        const auto *pu2 = pl->items[0].get_if<PatU2>();
+        TEST_EXPECT(pu2 != nullptr);
+        TEST_EXPECT(pu2->capture.has_value());
+        TEST_EXPECT_EQ(pu2->capture->name, "CAP_A");
+        TEST_EXPECT(pu2->values.empty());
+    }
+
+    {
+        const auto *pl2 = pl->items[1].get_if<PatL>();
+        TEST_EXPECT(pl2 != nullptr);
+        TEST_EXPECT(pl2->capture.has_value());
+        TEST_EXPECT_EQ(pl2->capture->name, "CAP_B");
+    }
+}
+
+void test_parser_condition_allows_list_index_and_pattern() {
+    auto result = parse_sml(R"(
+    if (S2F21[0] <U2 $X>) r0.
+  )");
+
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.conditions.size(), 1u);
+
+    const auto &cond = result.document.conditions[0].condition;
+    TEST_EXPECT_EQ(cond.list_path.size(), 1u);
+    TEST_EXPECT(cond.list_index.has_value());
+    TEST_EXPECT(cond.pattern.has_value());
+    TEST_EXPECT(!cond.expected.has_value());
+}
+
+void test_parser_capture_pattern_rejects_list_size_hint_mismatch() {
+    auto result = parse_sml(R"(
+    if (S2F21 <L [1] <U1 1> <U1 2>>) r0.
+  )");
+    TEST_EXPECT_EQ(result.ec, make_error_code(parser_errc::expected_number));
+}
+
+void test_parser_capture_pattern_rejects_capture_with_extra_values() {
+    {
+        auto result = parse_sml("if (S2F21 <U2 $A 1>) r0.");
+        TEST_EXPECT_EQ(result.ec,
+                       make_error_code(parser_errc::unexpected_token));
+    }
+    {
+        auto result = parse_sml("if (S2F21 <Boolean $B 1>) r0.");
+        TEST_EXPECT_EQ(result.ec,
+                       make_error_code(parser_errc::unexpected_token));
+    }
+}
+
+void test_parser_capture_pattern_rejects_identifier_as_number() {
+    {
+        auto result = parse_sml("if (S2F21 <U2 X>) r0.");
+        TEST_EXPECT_EQ(result.ec, make_error_code(parser_errc::expected_number));
+    }
+    {
+        auto result = parse_sml("if (S2F21 <F4 X>) r0.");
+        TEST_EXPECT_EQ(result.ec, make_error_code(parser_errc::expected_number));
+    }
+}
+
+void test_parser_capture_pattern_invalid_item_type_is_error() {
+    auto result = parse_sml("if (S2F21 <X>) r0.");
+    TEST_EXPECT_EQ(result.ec, make_error_code(parser_errc::expected_item));
+}
+
+void test_parser_capture_pattern_list_size_hint_bracket_errors() {
+    // [n] 里必须是数字
+    {
+        auto result = parse_sml("if (S2F21 <L [X] <U1 1>>) r0.");
+        TEST_EXPECT_EQ(result.ec, make_error_code(parser_errc::expected_number));
+    }
+    // 缺少右中括号
+    {
+        auto result = parse_sml("if (S2F21 <L [2 <U1 1>>) r0.");
+        TEST_EXPECT_EQ(result.ec,
+                       make_error_code(parser_errc::unexpected_token));
+    }
+}
+
+void test_parser_capture_pattern_binary_out_of_range_is_error() {
+    auto result = parse_sml("if (S2F21 <B 256>) r0.");
+    TEST_EXPECT_EQ(result.ec, make_error_code(parser_errc::expected_number));
 }
 
 void test_smlx_render_ascii_placeholder() {
@@ -1386,6 +1538,7 @@ int main() {
     test_lexer_numbers();
     test_lexer_comments();
     test_lexer_keywords();
+    test_lexer_capture_identifier();
     test_lexer_error_category_messages();
     test_lexer_unterminated_block_comment_is_error();
     test_lexer_unterminated_string_is_error();
@@ -1399,6 +1552,16 @@ int main() {
     test_parser_nested_list();
     test_parser_if_rule();
     test_parser_if_rule_with_condition();
+    test_parser_deep_path_indexing_sets_list_path();
+    test_parser_single_list_index_sets_list_index_and_list_path();
+    test_parser_capture_pattern_parses_pattern_ast();
+    test_parser_condition_allows_list_index_and_pattern();
+    test_parser_capture_pattern_rejects_list_size_hint_mismatch();
+    test_parser_capture_pattern_rejects_capture_with_extra_values();
+    test_parser_capture_pattern_rejects_identifier_as_number();
+    test_parser_capture_pattern_invalid_item_type_is_error();
+    test_parser_capture_pattern_list_size_hint_bracket_errors();
+    test_parser_capture_pattern_binary_out_of_range_is_error();
     test_smlx_render_ascii_placeholder();
     test_smlx_render_numeric_placeholder_expands_values();
     test_smlx_render_binary_placeholder_expands_values();
