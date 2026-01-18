@@ -117,6 +117,18 @@ add_executable(smlx_active_send_example smlx_active_send_example.cpp)
 target_link_libraries(smlx_active_send_example PRIVATE secs::protocol secs::sml secs::ii secs::core)
 list(APPEND _secs_example_targets smlx_active_send_example)
 
+# SML + CEID 完整示例：展示如何结合 SML 模板、CEID dispatcher 和变量注入
+add_executable(sml_ceid_complete sml_ceid_complete.cpp)
+target_link_libraries(sml_ceid_complete PRIVATE secs::protocol secs::sml secs::utils)
+list(APPEND _secs_example_targets sml_ceid_complete)
+# 复制 .sml 文件到构建目录
+add_custom_command(TARGET sml_ceid_complete POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    ${CMAKE_CURRENT_SOURCE_DIR}/sml_ceid_complete.sml
+    $<TARGET_FILE_DIR:sml_ceid_complete>/sml_ceid_complete.sml
+  COMMENT "Copying sml_ceid_complete.sml to build directory"
+)
+
 # HSMS（pipe）示例：通过 stdin/stdout 承载 HSMS 帧（仅在 UNIX 可用，依赖 asio::posix）
 if(UNIX)
   add_executable(hsms_pipe_server hsms_pipe_server.cpp)
