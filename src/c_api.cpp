@@ -1418,6 +1418,29 @@ secs_error_t secs_sml_render_context_set(secs_sml_render_context_t *ctx,
     });
 }
 
+secs_error_t secs_sml_render_context_get(const secs_sml_render_context_t *ctx,
+                                         const char *name,
+                                         secs_ii_item_t **out_value) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !name || !out_value) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_value = nullptr;
+
+        const auto *v = ctx->ctx.get(std::string_view{name});
+        if (!v) {
+            return c_api_err(SECS_C_API_NOT_FOUND);
+        }
+
+        auto *h = new (std::nothrow) secs_ii_item(*v);
+        if (!h) {
+            return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+        }
+        *out_value = h;
+        return ok();
+    });
+}
+
 // ----------------------------- SML Runtime（Context-Aware） -----------------------------
 
 secs_error_t secs_sml_runtime_encode_message_body(
@@ -1518,6 +1541,72 @@ secs_error_t secs_sml_runtime_match_response_with_context(
         std::memcpy(s, matched->data(), matched->size());
         s[matched->size()] = '\0';
         *out_name = s;
+        return ok();
+    });
+}
+
+secs_error_t secs_sml_runtime_match_response_with_capture(
+    const secs_sml_runtime_t *rt,
+    uint8_t stream,
+    uint8_t function,
+    const uint8_t *body_bytes,
+    size_t body_n,
+    const secs_sml_render_context_t *ctx,
+    char **out_name,
+    secs_sml_render_context_t **out_captures) {
+    return guard_error([&]() -> secs_error_t {
+        if (!rt || !out_name) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        if (!body_bytes && body_n != 0) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_name = nullptr;
+        if (out_captures) {
+            *out_captures = nullptr;
+        }
+
+        secs::ii::Item decoded{secs::ii::List{}};
+        std::size_t consumed = 0;
+        auto dec_ec = secs::ii::decode_one(
+            bytes_view{reinterpret_cast<const byte *>(body_bytes), body_n},
+            decoded,
+            consumed);
+        if (dec_ec) {
+            return from_error_code(dec_ec);
+        }
+
+        secs::sml::RenderContext empty_ctx{};
+        const auto &use_ctx = (ctx ? ctx->ctx : empty_ctx);
+
+        secs::sml::RenderContext captured{};
+        auto matched = rt->rt.match_response_with_capture(
+            stream, function, decoded, use_ctx, captured);
+        if (!matched.has_value()) {
+            return ok();
+        }
+
+        // 1) out_name
+        auto *s = static_cast<char *>(secs_malloc(matched->size() + 1));
+        if (!s) {
+            return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+        }
+        std::memcpy(s, matched->data(), matched->size());
+        s[matched->size()] = '\0';
+        *out_name = s;
+
+        // 2) out_captures（可选）
+        if (!out_captures) {
+            return ok();
+        }
+        auto *h = new (std::nothrow) secs_sml_render_context{};
+        if (!h) {
+            secs_free(*out_name);
+            *out_name = nullptr;
+            return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+        }
+        h->ctx = std::move(captured);
+        *out_captures = h;
         return ok();
     });
 }
@@ -2722,7 +2811,11 @@ secs_protocol_session_set_sml_default_handler(secs_protocol_session_t *sess,
                     co_return secs::protocol::HandlerResult{dec_ec, {}};
                 }
 
-                auto matched = runtime->match_response(msg.stream, msg.function, decoded);
+                // Data Capture：允许在条件里用 `<pattern>` 抓取 `$NAME`，并把捕获结果
+                // 作为渲染上下文注入到响应模板（实现“配置即解析”）。
+                secs::sml::RenderContext captured{};
+                auto matched = runtime->match_response_with_capture(
+                    msg.stream, msg.function, decoded, captured);
                 if (!matched.has_value()) {
                     co_return secs::protocol::HandlerResult{
                         make_error_code(errc::invalid_argument), {}};
@@ -2742,11 +2835,9 @@ secs_protocol_session_set_sml_default_handler(secs_protocol_session_t *sess,
                         make_error_code(errc::invalid_argument), {}};
                 }
 
-                // 当前 C API 的 SML default handler 不支持变量注入：用空上下文渲染。
-                secs::sml::RenderContext ctx{};
                 secs::ii::Item rendered{secs::ii::List{}};
                 const auto render_ec =
-                    secs::sml::render_item(rsp->item, ctx, rendered);
+                    secs::sml::render_item(rsp->item, captured, rendered);
                 if (render_ec) {
                     co_return secs::protocol::HandlerResult{render_ec, {}};
                 }

@@ -114,6 +114,210 @@ find_preorder_nth(const ii::Item &root, std::size_t n) noexcept {
     return found;
 }
 
+[[nodiscard]] bool try_capture(RenderContext *out,
+                               std::string_view name,
+                               const ii::Item &value) noexcept {
+    if (!out) {
+        return true;
+    }
+    try {
+        out->set(std::string{name}, value);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+[[nodiscard]] bool match_pattern(const PatternItem &pat,
+                                 const ii::Item &item,
+                                 RenderContext *out_captures) noexcept {
+    // List
+    if (const auto *pl = pat.get_if<PatL>()) {
+        const auto *list = item.get_if<ii::List>();
+        if (!list) {
+            return false;
+        }
+        if (pl->size_hint.has_value() && list->size() != *pl->size_hint) {
+            return false;
+        }
+
+        if (pl->capture.has_value()) {
+            return try_capture(out_captures, pl->capture->name, item);
+        }
+
+        if (list->size() != pl->items.size()) {
+            return false;
+        }
+        for (std::size_t i = 0; i < pl->items.size(); ++i) {
+            if (!match_pattern(pl->items[i], (*list)[i], out_captures)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // ASCII
+    if (const auto *pa = pat.get_if<PatASCII>()) {
+        const auto *a = item.get_if<ii::ASCII>();
+        if (!a) {
+            return false;
+        }
+        if (pa->capture.has_value()) {
+            return try_capture(out_captures, pa->capture->name, item);
+        }
+        return a->value == pa->value;
+    }
+
+    // Binary
+    if (const auto *pb = pat.get_if<PatBinary>()) {
+        const auto *b = item.get_if<ii::Binary>();
+        if (!b) {
+            return false;
+        }
+        if (pb->capture.has_value()) {
+            return try_capture(out_captures, pb->capture->name, item);
+        }
+        return b->value == pb->values;
+    }
+
+    // Boolean
+    if (const auto *pbool = pat.get_if<PatBoolean>()) {
+        const auto *bv = item.get_if<ii::Boolean>();
+        if (!bv) {
+            return false;
+        }
+        if (pbool->capture.has_value()) {
+            return try_capture(out_captures, pbool->capture->name, item);
+        }
+        return bv->values == pbool->values;
+    }
+
+    // Signed
+    if (const auto *pi1 = pat.get_if<PatI1>()) {
+        const auto *v = item.get_if<ii::I1>();
+        if (!v) {
+            return false;
+        }
+        if (pi1->capture.has_value()) {
+            return try_capture(out_captures, pi1->capture->name, item);
+        }
+        return v->values == pi1->values;
+    }
+    if (const auto *pi2 = pat.get_if<PatI2>()) {
+        const auto *v = item.get_if<ii::I2>();
+        if (!v) {
+            return false;
+        }
+        if (pi2->capture.has_value()) {
+            return try_capture(out_captures, pi2->capture->name, item);
+        }
+        return v->values == pi2->values;
+    }
+    if (const auto *pi4 = pat.get_if<PatI4>()) {
+        const auto *v = item.get_if<ii::I4>();
+        if (!v) {
+            return false;
+        }
+        if (pi4->capture.has_value()) {
+            return try_capture(out_captures, pi4->capture->name, item);
+        }
+        return v->values == pi4->values;
+    }
+    if (const auto *pi8 = pat.get_if<PatI8>()) {
+        const auto *v = item.get_if<ii::I8>();
+        if (!v) {
+            return false;
+        }
+        if (pi8->capture.has_value()) {
+            return try_capture(out_captures, pi8->capture->name, item);
+        }
+        return v->values == pi8->values;
+    }
+
+    // Unsigned
+    if (const auto *pu1 = pat.get_if<PatU1>()) {
+        const auto *v = item.get_if<ii::U1>();
+        if (!v) {
+            return false;
+        }
+        if (pu1->capture.has_value()) {
+            return try_capture(out_captures, pu1->capture->name, item);
+        }
+        return v->values == pu1->values;
+    }
+    if (const auto *pu2 = pat.get_if<PatU2>()) {
+        const auto *v = item.get_if<ii::U2>();
+        if (!v) {
+            return false;
+        }
+        if (pu2->capture.has_value()) {
+            return try_capture(out_captures, pu2->capture->name, item);
+        }
+        return v->values == pu2->values;
+    }
+    if (const auto *pu4 = pat.get_if<PatU4>()) {
+        const auto *v = item.get_if<ii::U4>();
+        if (!v) {
+            return false;
+        }
+        if (pu4->capture.has_value()) {
+            return try_capture(out_captures, pu4->capture->name, item);
+        }
+        return v->values == pu4->values;
+    }
+    if (const auto *pu8 = pat.get_if<PatU8>()) {
+        const auto *v = item.get_if<ii::U8>();
+        if (!v) {
+            return false;
+        }
+        if (pu8->capture.has_value()) {
+            return try_capture(out_captures, pu8->capture->name, item);
+        }
+        return v->values == pu8->values;
+    }
+
+    // Float (use the same tolerance policy as items_equal()).
+    if (const auto *pf4 = pat.get_if<PatF4>()) {
+        const auto *v = item.get_if<ii::F4>();
+        if (!v) {
+            return false;
+        }
+        if (pf4->capture.has_value()) {
+            return try_capture(out_captures, pf4->capture->name, item);
+        }
+        if (v->values.size() != pf4->values.size()) {
+            return false;
+        }
+        for (std::size_t i = 0; i < v->values.size(); ++i) {
+            if (!float_almost_equal(v->values[i], pf4->values[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    if (const auto *pf8 = pat.get_if<PatF8>()) {
+        const auto *v = item.get_if<ii::F8>();
+        if (!v) {
+            return false;
+        }
+        if (pf8->capture.has_value()) {
+            return try_capture(out_captures, pf8->capture->name, item);
+        }
+        if (v->values.size() != pf8->values.size()) {
+            return false;
+        }
+        for (std::size_t i = 0; i < v->values.size(); ++i) {
+            if (!double_almost_equal(v->values[i], pf8->values[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    return false;
+}
+
 } // namespace
 
 std::error_code Runtime::load(std::string_view source) noexcept {
@@ -236,6 +440,50 @@ Runtime::match_response(std::uint8_t stream,
     }
 }
 
+std::optional<std::string>
+Runtime::match_response_with_capture(std::uint8_t stream,
+                                     std::uint8_t function,
+                                     const ii::Item &item,
+                                     const RenderContext &ctx,
+                                     RenderContext &out_captures) const noexcept {
+    try {
+        out_captures.clear();
+        for (const auto &rule : document_.conditions) {
+            out_captures.clear();
+            if (match_condition_impl(rule.condition,
+                                     stream,
+                                     function,
+                                     item,
+                                     ctx,
+                                     nullptr,
+                                     &out_captures)) {
+                return rule.response_name;
+            }
+            // 失败时避免残留半成品 capture（例如最后一条规则未命中）。
+            out_captures.clear();
+        }
+        return std::nullopt;
+    } catch (...) {
+        out_captures.clear();
+        return std::nullopt;
+    }
+}
+
+std::optional<std::string>
+Runtime::match_response_with_capture(std::uint8_t stream,
+                                     std::uint8_t function,
+                                     const ii::Item &item,
+                                     RenderContext &out_captures) const noexcept {
+    try {
+        RenderContext empty_ctx{};
+        return match_response_with_capture(
+            stream, function, item, empty_ctx, out_captures);
+    } catch (...) {
+        out_captures.clear();
+        return std::nullopt;
+    }
+}
+
 MatchResponseResult
 Runtime::match_response_with_trace(std::uint8_t stream,
                                    std::uint8_t function,
@@ -316,7 +564,7 @@ bool Runtime::match_condition(const Condition &cond,
                               std::uint8_t function,
                               const ii::Item &item,
                               const RenderContext &ctx) const noexcept {
-    return match_condition_impl(cond, stream, function, item, ctx, nullptr);
+    return match_condition_impl(cond, stream, function, item, ctx, nullptr, nullptr);
 }
 
 bool Runtime::match_condition_with_trace(const Condition &cond,
@@ -325,7 +573,7 @@ bool Runtime::match_condition_with_trace(const Condition &cond,
                                          const ii::Item &item,
                                          const RenderContext &ctx,
                                          MatchTrace &trace) const noexcept {
-    return match_condition_impl(cond, stream, function, item, ctx, &trace);
+    return match_condition_impl(cond, stream, function, item, ctx, &trace, nullptr);
 }
 
 bool Runtime::match_condition_impl(const Condition &cond,
@@ -333,7 +581,8 @@ bool Runtime::match_condition_impl(const Condition &cond,
                                    std::uint8_t function,
                                    const ii::Item &item,
                                    const RenderContext &ctx,
-                                   MatchTrace *trace) const noexcept {
+                                   MatchTrace *trace,
+                                   RenderContext *out_captures) const noexcept {
     // 检查消息名是否匹配
     // 条件可以是消息名（如 s1f1），也可以直接写成 SxFy 格式（如 S1F1）
 
@@ -377,9 +626,40 @@ bool Runtime::match_condition_impl(const Condition &cond,
         }
     }
 
-    // 如果有索引和期望值，检查 Item
-    if ((cond.index || cond.list_index) && cond.expected) {
-        const ii::Item *elem = nullptr;
+    const bool has_selection =
+        cond.index.has_value() || cond.list_index.has_value() ||
+        !cond.list_path.empty();
+
+    const auto select_elem = [&]() -> const ii::Item * {
+        // [i][j][k] - 0-based 深层 List 路径索引
+        if (!cond.list_path.empty()) {
+            const ii::Item *cur = &item;
+            for (std::size_t depth = 0; depth < cond.list_path.size(); ++depth) {
+                const auto *list = cur->get_if<ii::List>();
+                if (!list) {
+                    if (trace) {
+                        trace->reason = MatchFailureReason::not_a_list;
+                        trace->detail =
+                            "item at list path depth " + std::to_string(depth) +
+                            " is not a list";
+                    }
+                    return nullptr;
+                }
+                const std::size_t idx = cond.list_path[depth];
+                if (idx >= list->size()) {
+                    if (trace) {
+                        trace->reason = MatchFailureReason::list_index_out_of_bounds;
+                        trace->detail =
+                            "list index " + std::to_string(idx) + " at depth " +
+                            std::to_string(depth) + " >= list size " +
+                            std::to_string(list->size());
+                    }
+                    return nullptr;
+                }
+                cur = &(*list)[idx];
+            }
+            return cur;
+        }
 
         // [i] - 0-based List 数组下标（仅对“根节点为 List”的消息体生效）。
         if (cond.list_index.has_value()) {
@@ -389,7 +669,7 @@ bool Runtime::match_condition_impl(const Condition &cond,
                     trace->reason = MatchFailureReason::not_a_list;
                     trace->detail = "item is not a list";
                 }
-                return false;
+                return nullptr;
             }
             if (*cond.list_index >= list->size()) {
                 if (trace) {
@@ -398,19 +678,21 @@ bool Runtime::match_condition_impl(const Condition &cond,
                         "list index " + std::to_string(*cond.list_index) +
                         " >= list size " + std::to_string(list->size());
                 }
-                return false;
+                return nullptr;
             }
-            elem = &(*list)[*cond.list_index];
-        } else if (cond.index.has_value()) {
-            // (n) - 1-based 先序遍历编号（包含根节点，保持向后兼容）。
-            // 注意：仅当根节点为 List 时允许索引匹配（避免对非 List 输入产生歧义）。
+            return &(*list)[*cond.list_index];
+        }
+
+        // (n) - 1-based 先序遍历编号（包含根节点，保持向后兼容）。
+        // 注意：仅当根节点为 List 时允许索引匹配（避免对非 List 输入产生歧义）。
+        if (cond.index.has_value()) {
             if (!item.get_if<ii::List>()) {
                 if (trace) {
                     trace->reason = MatchFailureReason::index_out_of_bounds;
                     trace->detail =
                         "preorder index requires root item to be a list";
                 }
-                return false;
+                return nullptr;
             }
 
             const std::size_t idx = *cond.index;
@@ -419,10 +701,10 @@ bool Runtime::match_condition_impl(const Condition &cond,
                     trace->reason = MatchFailureReason::index_out_of_bounds;
                     trace->detail = "preorder index must be >= 1";
                 }
-                return false;
+                return nullptr;
             }
 
-            elem = find_preorder_nth(item, idx);
+            const ii::Item *elem = find_preorder_nth(item, idx);
             if (!elem) {
                 if (trace) {
                     trace->reason = MatchFailureReason::index_out_of_bounds;
@@ -430,8 +712,19 @@ bool Runtime::match_condition_impl(const Condition &cond,
                         "preorder index " + std::to_string(idx) +
                         " out of bounds";
                 }
-                return false;
+                return nullptr;
             }
+            return elem;
+        }
+
+        return &item;
+    };
+
+    // 旧语义：仅当指定了索引/下标时才对 `==<...>` 做比较。
+    if (has_selection && cond.expected) {
+        const ii::Item *elem = select_elem();
+        if (!elem) {
+            return false;
         }
 
         ii::Item expected{ii::List{}};
@@ -455,10 +748,34 @@ bool Runtime::match_condition_impl(const Condition &cond,
             return false;
         }
 
-        if (!elem || !items_equal(*elem, expected)) {
+        if (!items_equal(*elem, expected)) {
             if (trace) {
                 trace->reason = MatchFailureReason::expected_value_mismatch;
                 trace->detail = "expected value mismatch";
+            }
+            return false;
+        }
+    }
+
+    // 新语义：<pattern> 结构匹配 + Data Capture（不带 ==）
+    if (cond.pattern.has_value()) {
+        const ii::Item *target = has_selection ? select_elem() : &item;
+        if (!target) {
+            if (out_captures) {
+                out_captures->clear();
+            }
+            return false;
+        }
+        if (out_captures) {
+            out_captures->clear();
+        }
+        if (!match_pattern(*cond.pattern, *target, out_captures)) {
+            if (out_captures) {
+                out_captures->clear();
+            }
+            if (trace) {
+                trace->reason = MatchFailureReason::expected_value_mismatch;
+                trace->detail = "pattern mismatch";
             }
             return false;
         }

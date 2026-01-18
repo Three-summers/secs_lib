@@ -453,6 +453,124 @@ if (S2F21[0]==<F8 1.0>) f8_ok.
     }
 }
 
+void test_match_response_deep_path_indexing_selection() {
+    secs::sml::Runtime rt;
+    const char *source = R"(
+if (S2F21[1][0]==<U1 7>) ok.
+)";
+
+    auto ec = rt.load(source);
+    TEST_EXPECT_OK(ec);
+
+    // body: <L <U2 1> <L <U1 7> <U1 8> > >
+    const auto body = secs::ii::Item::list({
+        secs::ii::Item::u2({1}),
+        secs::ii::Item::list({
+            secs::ii::Item::u1({7}),
+            secs::ii::Item::u1({8}),
+        }),
+    });
+
+    const auto rsp = rt.match_response(2, 21, body);
+    TEST_EXPECT(rsp.has_value());
+    TEST_EXPECT_EQ(*rsp, "ok");
+}
+
+void test_match_response_deep_path_indexing_not_a_list() {
+    secs::sml::Runtime rt;
+    const char *source = R"(
+if (S2F21[0][0]==<U1 7>) ok.
+)";
+
+    auto ec = rt.load(source);
+    TEST_EXPECT_OK(ec);
+
+    secs::sml::RenderContext ctx;
+
+    // root[0] 不是 List，因此第二层索引应触发 not_a_list。
+    const auto body = secs::ii::Item::list({
+        secs::ii::Item::u2({1}),
+        secs::ii::Item::u1({7}),
+    });
+
+    const auto result = rt.match_response_with_trace(2, 21, body, ctx);
+    TEST_EXPECT(!result.response_name.has_value());
+    TEST_EXPECT_EQ(result.traces.size(), 1u);
+    TEST_EXPECT_EQ(result.traces[0].reason,
+                   secs::sml::MatchFailureReason::not_a_list);
+    TEST_EXPECT(!result.traces[0].detail.empty());
+}
+
+void test_match_response_with_capture_pattern() {
+    secs::sml::Runtime rt;
+    const char *source = R"(
+r0: S2F22 <L <U2 CAP_A>>.
+if (S2F21 <L [2] <U2 $CAP_A> <L $CAP_B>>) r0.
+)";
+
+    auto ec = rt.load(source);
+    TEST_EXPECT_OK(ec);
+
+    const auto body = secs::ii::Item::list({
+        secs::ii::Item::u2({0x1001}),
+        secs::ii::Item::list({secs::ii::Item::ascii("x")}),
+    });
+
+    // 1) 仅匹配（不关心 capture）
+    {
+        const auto rsp = rt.match_response(2, 21, body);
+        TEST_EXPECT(rsp.has_value());
+        TEST_EXPECT_EQ(*rsp, "r0");
+    }
+
+    // 2) 匹配 + 捕获
+    secs::sml::RenderContext captured;
+    const auto rsp = rt.match_response_with_capture(2, 21, body, captured);
+    TEST_EXPECT(rsp.has_value());
+    TEST_EXPECT_EQ(*rsp, "r0");
+
+    {
+        const auto *a = captured.get("CAP_A");
+        TEST_EXPECT(a != nullptr);
+        const auto *u2 = a->get_if<secs::ii::U2>();
+        TEST_EXPECT(u2 != nullptr);
+        TEST_EXPECT_EQ(u2->values.size(), 1u);
+        TEST_EXPECT_EQ(u2->values[0], 0x1001u);
+    }
+
+    {
+        const auto *b = captured.get("CAP_B");
+        TEST_EXPECT(b != nullptr);
+        const auto *list = b->get_if<secs::ii::List>();
+        TEST_EXPECT(list != nullptr);
+        TEST_EXPECT_EQ(list->size(), 1u);
+        const auto *ascii = (*list)[0].get_if<secs::ii::ASCII>();
+        TEST_EXPECT(ascii != nullptr);
+        TEST_EXPECT_EQ(ascii->value, "x");
+    }
+
+    // 3) 捕获上下文可用于渲染响应模板（配置即解析）
+    std::vector<secs::core::byte> out_body;
+    std::uint8_t out_stream = 0;
+    std::uint8_t out_function = 0;
+    bool out_w = true;
+    const auto enc_ec =
+        rt.encode_message_body("r0", captured, out_body, &out_stream, &out_function, &out_w);
+    TEST_EXPECT_OK(enc_ec);
+    TEST_EXPECT_EQ(out_stream, 2u);
+    TEST_EXPECT_EQ(out_function, 22u);
+    TEST_EXPECT(!out_w);
+
+    secs::ii::Item decoded{secs::ii::List{}};
+    std::size_t consumed = 0;
+    const auto dec_ec = secs::ii::decode_one(
+        secs::ii::bytes_view{out_body.data(), out_body.size()}, decoded, consumed);
+    TEST_EXPECT_OK(dec_ec);
+    TEST_EXPECT_EQ(consumed, out_body.size());
+    TEST_EXPECT(decoded ==
+                secs::ii::Item::list({secs::ii::Item::u2({0x1001})}));
+}
+
 } // namespace
 
 int main() {
@@ -471,5 +589,8 @@ int main() {
     test_runtime_accessors_and_parse_error();
     test_encode_message_body();
     test_items_equal_float_tolerance();
+    test_match_response_deep_path_indexing_selection();
+    test_match_response_deep_path_indexing_not_a_list();
+    test_match_response_with_capture_pattern();
     return secs::tests::run_and_report();
 }

@@ -713,8 +713,491 @@ std::optional<TemplateItem> Parser::parse_float(TokenType type) noexcept {
     }
 }
 
+std::optional<PatternItem> Parser::parse_pattern_item() noexcept {
+    if (!match(TokenType::LAngle)) {
+        error(parser_errc::expected_item, "expected '<' for pattern item");
+        return std::nullopt;
+    }
+
+    std::optional<PatternItem> result;
+
+    const TokenType type = peek().type;
+    switch (type) {
+    case TokenType::KwL:
+        result = parse_pattern_list();
+        break;
+    case TokenType::KwA:
+        result = parse_pattern_ascii();
+        break;
+    case TokenType::KwB:
+        result = parse_pattern_binary();
+        break;
+    case TokenType::KwBoolean:
+        result = parse_pattern_boolean();
+        break;
+    case TokenType::KwU1:
+    case TokenType::KwU2:
+    case TokenType::KwU4:
+    case TokenType::KwU8:
+        result = parse_pattern_unsigned(type);
+        break;
+    case TokenType::KwI1:
+    case TokenType::KwI2:
+    case TokenType::KwI4:
+    case TokenType::KwI8:
+        result = parse_pattern_signed(type);
+        break;
+    case TokenType::KwF4:
+    case TokenType::KwF8:
+        result = parse_pattern_float(type);
+        break;
+    default:
+        error(parser_errc::expected_item, "expected item type in pattern");
+        return std::nullopt;
+    }
+
+    if (!result) {
+        return std::nullopt;
+    }
+
+    if (!match(TokenType::RAngle)) {
+        error(parser_errc::unclosed_item, "expected '>' after pattern item");
+        return std::nullopt;
+    }
+
+    return result;
+}
+
+static bool is_capture_ident(std::string_view s) noexcept {
+    return s.size() >= 2 && s.front() == '$';
+}
+
+static std::optional<CaptureVar> to_capture_var(std::string_view s) noexcept {
+    if (!is_capture_ident(s)) {
+        return std::nullopt;
+    }
+    return CaptureVar{std::string{s.substr(1)}};
+}
+
+std::optional<PatternItem> Parser::parse_pattern_list() noexcept {
+    advance(); // L
+
+    PatL l;
+
+    // 可选的 [n] size hint（在 pattern 中用于一致性校验）
+    if (match(TokenType::LBracket)) {
+        if (!check(TokenType::Integer)) {
+            error(parser_errc::expected_number, "expected list size in '[n]'");
+            return std::nullopt;
+        }
+        const auto n = parse_uint64_literal(advance().value);
+        if (!n.has_value() || *n > std::numeric_limits<std::size_t>::max()) {
+            error(parser_errc::expected_number, "list size out of range");
+            return std::nullopt;
+        }
+        l.size_hint = static_cast<std::size_t>(*n);
+
+        if (!match(TokenType::RBracket)) {
+            error("expected ']'");
+            return std::nullopt;
+        }
+    }
+
+    // 支持：<L $NAME> 捕获整个 List Item（children 可为空；size_hint 可选）
+    if (check(TokenType::Identifier) && is_capture_ident(peek().value)) {
+        l.capture = to_capture_var(peek().value);
+        advance();
+        return PatternItem(std::move(l));
+    }
+
+    while (check(TokenType::LAngle)) {
+        auto child = parse_pattern_item();
+        if (!child) {
+            return std::nullopt;
+        }
+        l.items.push_back(std::move(*child));
+    }
+
+    if (l.size_hint.has_value() && *l.size_hint != l.items.size()) {
+        error(parser_errc::expected_number,
+              "list size hint does not match number of pattern children");
+        return std::nullopt;
+    }
+
+    return PatternItem(std::move(l));
+}
+
+std::optional<PatternItem> Parser::parse_pattern_ascii() noexcept {
+    advance(); // A
+
+    PatASCII a;
+
+    if (check(TokenType::String)) {
+        a.value = advance().value;
+        return PatternItem(std::move(a));
+    }
+
+    if (check(TokenType::Identifier)) {
+        if (!is_capture_ident(peek().value)) {
+            error(parser_errc::expected_identifier,
+                  "ASCII pattern expects string literal or capture variable ($NAME)");
+            return std::nullopt;
+        }
+        a.capture = to_capture_var(peek().value);
+        advance();
+        return PatternItem(std::move(a));
+    }
+
+    // 空 ASCII（匹配空字符串）
+    a.value = std::string{};
+    return PatternItem(std::move(a));
+}
+
+std::optional<PatternItem> Parser::parse_pattern_binary() noexcept {
+    advance(); // B
+
+    PatBinary b;
+    if (check(TokenType::Identifier) && is_capture_ident(peek().value)) {
+        b.capture = to_capture_var(peek().value);
+        advance();
+        if (check(TokenType::Integer) || check(TokenType::Identifier)) {
+            error(parser_errc::unexpected_token,
+                  "binary capture must be the only value");
+            return std::nullopt;
+        }
+        return PatternItem(std::move(b));
+    }
+    if (check(TokenType::Identifier)) {
+        error(parser_errc::expected_number,
+              "binary pattern expects integer bytes or capture variable ($NAME)");
+        return std::nullopt;
+    }
+
+    while (check(TokenType::Integer)) {
+        const auto val = parse_uint64_literal(advance().value);
+        if (!val.has_value() || *val > 0xFFu) {
+            error(parser_errc::expected_number,
+                  "binary byte out of range (expected 0..255)");
+            return std::nullopt;
+        }
+        b.values.push_back(static_cast<secs::ii::byte>(*val));
+    }
+
+    return PatternItem(std::move(b));
+}
+
+std::optional<PatternItem> Parser::parse_pattern_boolean() noexcept {
+    advance(); // Boolean
+
+    PatBoolean b;
+    if (check(TokenType::Identifier) && is_capture_ident(peek().value)) {
+        b.capture = to_capture_var(peek().value);
+        advance();
+        if (check(TokenType::Integer) || check(TokenType::Identifier)) {
+            error(parser_errc::unexpected_token,
+                  "boolean capture must be the only value");
+            return std::nullopt;
+        }
+        return PatternItem(std::move(b));
+    }
+    if (check(TokenType::Identifier)) {
+        error(parser_errc::expected_number,
+              "boolean pattern expects 0/1 literals or capture variable ($NAME)");
+        return std::nullopt;
+    }
+
+    while (check(TokenType::Integer)) {
+        const auto val = parse_int64_literal(advance().value);
+        if (!val.has_value()) {
+            error(parser_errc::expected_number, "invalid boolean literal");
+            return std::nullopt;
+        }
+        b.values.push_back(*val != 0);
+    }
+
+    return PatternItem(std::move(b));
+}
+
+std::optional<PatternItem> Parser::parse_pattern_unsigned(TokenType type) noexcept {
+    advance(); // U1/U2/U4/U8
+
+    const auto parse_capture_only = [&]() -> std::optional<CaptureVar> {
+        if (!check(TokenType::Identifier) || !is_capture_ident(peek().value)) {
+            return std::nullopt;
+        }
+        auto cap = to_capture_var(peek().value);
+        advance();
+        if (check(TokenType::Integer) || check(TokenType::Identifier)) {
+            error(parser_errc::unexpected_token,
+                  "capture must be the only value");
+            return std::nullopt;
+        }
+        return cap;
+    };
+
+    switch (type) {
+    case TokenType::KwU1: {
+        PatU1 v;
+        if (auto cap = parse_capture_only()) {
+            v.capture = std::move(*cap);
+            return PatternItem(std::move(v));
+        }
+        if (check(TokenType::Identifier)) {
+            error(parser_errc::expected_number,
+                  "U1 pattern expects integer literals or capture variable ($NAME)");
+            return std::nullopt;
+        }
+        while (check(TokenType::Integer)) {
+            const auto n = parse_uint64_literal(advance().value);
+            if (!n.has_value() ||
+                *n > std::numeric_limits<std::uint8_t>::max()) {
+                error(parser_errc::expected_number, "U1 value out of range");
+                return std::nullopt;
+            }
+            v.values.push_back(static_cast<std::uint8_t>(*n));
+        }
+        return PatternItem(std::move(v));
+    }
+    case TokenType::KwU2: {
+        PatU2 v;
+        if (auto cap = parse_capture_only()) {
+            v.capture = std::move(*cap);
+            return PatternItem(std::move(v));
+        }
+        if (check(TokenType::Identifier)) {
+            error(parser_errc::expected_number,
+                  "U2 pattern expects integer literals or capture variable ($NAME)");
+            return std::nullopt;
+        }
+        while (check(TokenType::Integer)) {
+            const auto n = parse_uint64_literal(advance().value);
+            if (!n.has_value() ||
+                *n > std::numeric_limits<std::uint16_t>::max()) {
+                error(parser_errc::expected_number, "U2 value out of range");
+                return std::nullopt;
+            }
+            v.values.push_back(static_cast<std::uint16_t>(*n));
+        }
+        return PatternItem(std::move(v));
+    }
+    case TokenType::KwU4: {
+        PatU4 v;
+        if (auto cap = parse_capture_only()) {
+            v.capture = std::move(*cap);
+            return PatternItem(std::move(v));
+        }
+        if (check(TokenType::Identifier)) {
+            error(parser_errc::expected_number,
+                  "U4 pattern expects integer literals or capture variable ($NAME)");
+            return std::nullopt;
+        }
+        while (check(TokenType::Integer)) {
+            const auto n = parse_uint64_literal(advance().value);
+            if (!n.has_value() ||
+                *n > std::numeric_limits<std::uint32_t>::max()) {
+                error(parser_errc::expected_number, "U4 value out of range");
+                return std::nullopt;
+            }
+            v.values.push_back(static_cast<std::uint32_t>(*n));
+        }
+        return PatternItem(std::move(v));
+    }
+    case TokenType::KwU8: {
+        PatU8 v;
+        if (auto cap = parse_capture_only()) {
+            v.capture = std::move(*cap);
+            return PatternItem(std::move(v));
+        }
+        if (check(TokenType::Identifier)) {
+            error(parser_errc::expected_number,
+                  "U8 pattern expects integer literals or capture variable ($NAME)");
+            return std::nullopt;
+        }
+        while (check(TokenType::Integer)) {
+            const auto n = parse_uint64_literal(advance().value);
+            if (!n.has_value()) {
+                error(parser_errc::expected_number, "U8 value out of range");
+                return std::nullopt;
+            }
+            v.values.push_back(*n);
+        }
+        return PatternItem(std::move(v));
+    }
+    default:
+        return std::nullopt;
+    }
+}
+
+std::optional<PatternItem> Parser::parse_pattern_signed(TokenType type) noexcept {
+    advance(); // I1/I2/I4/I8
+
+    const auto parse_capture_only = [&]() -> std::optional<CaptureVar> {
+        if (!check(TokenType::Identifier) || !is_capture_ident(peek().value)) {
+            return std::nullopt;
+        }
+        auto cap = to_capture_var(peek().value);
+        advance();
+        if (check(TokenType::Integer) || check(TokenType::Identifier)) {
+            error(parser_errc::unexpected_token,
+                  "capture must be the only value");
+            return std::nullopt;
+        }
+        return cap;
+    };
+
+    switch (type) {
+    case TokenType::KwI1: {
+        PatI1 v;
+        if (auto cap = parse_capture_only()) {
+            v.capture = std::move(*cap);
+            return PatternItem(std::move(v));
+        }
+        if (check(TokenType::Identifier)) {
+            error(parser_errc::expected_number,
+                  "I1 pattern expects integer literals or capture variable ($NAME)");
+            return std::nullopt;
+        }
+        while (check(TokenType::Integer)) {
+            const auto n = parse_int64_literal(advance().value);
+            if (!n.has_value() ||
+                *n < std::numeric_limits<std::int8_t>::min() ||
+                *n > std::numeric_limits<std::int8_t>::max()) {
+                error(parser_errc::expected_number, "I1 value out of range");
+                return std::nullopt;
+            }
+            v.values.push_back(static_cast<std::int8_t>(*n));
+        }
+        return PatternItem(std::move(v));
+    }
+    case TokenType::KwI2: {
+        PatI2 v;
+        if (auto cap = parse_capture_only()) {
+            v.capture = std::move(*cap);
+            return PatternItem(std::move(v));
+        }
+        if (check(TokenType::Identifier)) {
+            error(parser_errc::expected_number,
+                  "I2 pattern expects integer literals or capture variable ($NAME)");
+            return std::nullopt;
+        }
+        while (check(TokenType::Integer)) {
+            const auto n = parse_int64_literal(advance().value);
+            if (!n.has_value() ||
+                *n < std::numeric_limits<std::int16_t>::min() ||
+                *n > std::numeric_limits<std::int16_t>::max()) {
+                error(parser_errc::expected_number, "I2 value out of range");
+                return std::nullopt;
+            }
+            v.values.push_back(static_cast<std::int16_t>(*n));
+        }
+        return PatternItem(std::move(v));
+    }
+    case TokenType::KwI4: {
+        PatI4 v;
+        if (auto cap = parse_capture_only()) {
+            v.capture = std::move(*cap);
+            return PatternItem(std::move(v));
+        }
+        if (check(TokenType::Identifier)) {
+            error(parser_errc::expected_number,
+                  "I4 pattern expects integer literals or capture variable ($NAME)");
+            return std::nullopt;
+        }
+        while (check(TokenType::Integer)) {
+            const auto n = parse_int64_literal(advance().value);
+            if (!n.has_value() ||
+                *n < std::numeric_limits<std::int32_t>::min() ||
+                *n > std::numeric_limits<std::int32_t>::max()) {
+                error(parser_errc::expected_number, "I4 value out of range");
+                return std::nullopt;
+            }
+            v.values.push_back(static_cast<std::int32_t>(*n));
+        }
+        return PatternItem(std::move(v));
+    }
+    case TokenType::KwI8: {
+        PatI8 v;
+        if (auto cap = parse_capture_only()) {
+            v.capture = std::move(*cap);
+            return PatternItem(std::move(v));
+        }
+        if (check(TokenType::Identifier)) {
+            error(parser_errc::expected_number,
+                  "I8 pattern expects integer literals or capture variable ($NAME)");
+            return std::nullopt;
+        }
+        while (check(TokenType::Integer)) {
+            const auto n = parse_int64_literal(advance().value);
+            if (!n.has_value()) {
+                error(parser_errc::expected_number, "I8 value out of range");
+                return std::nullopt;
+            }
+            v.values.push_back(*n);
+        }
+        return PatternItem(std::move(v));
+    }
+    default:
+        return std::nullopt;
+    }
+}
+
+std::optional<PatternItem> Parser::parse_pattern_float(TokenType type) noexcept {
+    advance(); // F4/F8
+
+    const auto parse_capture_only = [&]() -> std::optional<CaptureVar> {
+        if (!check(TokenType::Identifier) || !is_capture_ident(peek().value)) {
+            return std::nullopt;
+        }
+        auto cap = to_capture_var(peek().value);
+        advance();
+        if (check(TokenType::Float) || check(TokenType::Integer) ||
+            check(TokenType::Identifier)) {
+            error(parser_errc::unexpected_token,
+                  "capture must be the only value");
+            return std::nullopt;
+        }
+        return cap;
+    };
+
+    if (type == TokenType::KwF4) {
+        PatF4 v;
+        if (auto cap = parse_capture_only()) {
+            v.capture = std::move(*cap);
+            return PatternItem(std::move(v));
+        }
+        if (check(TokenType::Identifier)) {
+            error(parser_errc::expected_number,
+                  "F4 pattern expects numeric literals or capture variable ($NAME)");
+            return std::nullopt;
+        }
+        while (check(TokenType::Float) || check(TokenType::Integer)) {
+            v.values.push_back(
+                static_cast<float>(parse_float_value(advance().value)));
+        }
+        return PatternItem(std::move(v));
+    }
+
+    PatF8 v;
+    if (auto cap = parse_capture_only()) {
+        v.capture = std::move(*cap);
+        return PatternItem(std::move(v));
+    }
+    if (check(TokenType::Identifier)) {
+        error(parser_errc::expected_number,
+              "F8 pattern expects numeric literals or capture variable ($NAME)");
+        return std::nullopt;
+    }
+    while (check(TokenType::Float) || check(TokenType::Integer)) {
+        v.values.push_back(parse_float_value(advance().value));
+    }
+    return PatternItem(std::move(v));
+}
+
 std::optional<Condition> Parser::parse_condition() noexcept {
-    // 语法：消息名 [(索引)|[索引]][==<Item>]
+    // 语法：
+    // - 兼容旧：消息名 [(n)|[i]][==<Item>]
+    // - 扩展：消息名 [i][j][k] ...（深层路径索引）
+    // - 扩展：消息名 ... <pattern>（结构匹配/数据捕获；不带 ==）
     Condition cond;
 
     if (!check(TokenType::Identifier)) {
@@ -725,10 +1208,12 @@ std::optional<Condition> Parser::parse_condition() noexcept {
 
     cond.message_name = advance().value;
 
-    enum class IndexKind : std::uint8_t { none, preorder, list };
+    enum class IndexKind : std::uint8_t { none, preorder, list_path };
     IndexKind index_kind = IndexKind::none;
 
-    // 可选索引：(n) 或 [i]，两者互斥且只能出现一次
+    // 可选索引：
+    // - (n)：1-based 先序遍历编号（旧语法）
+    // - [i][j]...：0-based List 深层路径索引（新语法）
     while (check(TokenType::LParen) || check(TokenType::LBracket)) {
         if (match(TokenType::LParen)) {
             if (index_kind != IndexKind::none) {
@@ -761,12 +1246,12 @@ std::optional<Condition> Parser::parse_condition() noexcept {
         }
 
         if (match(TokenType::LBracket)) {
-            if (index_kind != IndexKind::none) {
+            if (index_kind == IndexKind::preorder) {
                 error(parser_errc::invalid_condition,
                       "index specifier must be unique; '(n)' and '[i]' are mutually exclusive");
                 return std::nullopt;
             }
-            index_kind = IndexKind::list;
+            index_kind = IndexKind::list_path;
 
             if (!check(TokenType::Integer)) {
                 error(parser_errc::expected_number, "expected list index number");
@@ -788,7 +1273,7 @@ std::optional<Condition> Parser::parse_condition() noexcept {
                 error(parser_errc::expected_number, "list index out of range");
                 return std::nullopt;
             }
-            cond.list_index = static_cast<std::size_t>(uidx);
+            cond.list_path.push_back(static_cast<std::size_t>(uidx));
 
             if (!match(TokenType::RBracket)) {
                 error(parser_errc::invalid_condition,
@@ -799,6 +1284,11 @@ std::optional<Condition> Parser::parse_condition() noexcept {
         }
     }
 
+    // 兼容：只有单层 [i] 时同步到 list_index（旧字段）。
+    if (cond.list_path.size() == 1u) {
+        cond.list_index = cond.list_path[0];
+    }
+
     // 可选的 ==<Item>（期望值匹配）
     if (match(TokenType::Equals)) {
         auto expected = parse_item();
@@ -807,6 +1297,16 @@ std::optional<Condition> Parser::parse_condition() noexcept {
         }
 
         cond.expected = std::move(*expected);
+        return cond;
+    }
+
+    // 可选的 <pattern>（结构匹配/捕获；不带 ==）
+    if (check(TokenType::LAngle)) {
+        auto pat = parse_pattern_item();
+        if (!pat) {
+            return std::nullopt;
+        }
+        cond.pattern = std::move(*pat);
     }
 
     return cond;

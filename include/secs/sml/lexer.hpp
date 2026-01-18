@@ -33,6 +33,7 @@ struct LexerResult {
  * 将 SML 源文本转换为 Token 序列。
  * 支持:
  * - 标识符: name, S1F1, StatusTank1
+ *   - 捕获变量标识符: $NAME（用于条件匹配的 Data Capture）
  * - 字符串: "..." 或 '...'
  * - 数字: 123, 0x1F, 0.5567
  * - 关键字: if, every, send, W, L, A, B, Boolean, U1-U8, I1-I8, F4, F8

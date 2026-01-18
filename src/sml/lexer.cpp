@@ -226,7 +226,8 @@ Token Lexer::scan_token() noexcept {
     }
 
     // 标识符或关键字
-    if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') {
+    // 备注：为支持 Data Capture 语法，引入 `$NAME`（捕获变量）作为一种标识符形式。
+    if (std::isalpha(static_cast<unsigned char>(c)) || c == '_' || c == '$') {
         --current_;
         --column_;
         return scan_identifier();
@@ -246,7 +247,7 @@ Token Lexer::scan_token() noexcept {
 Token Lexer::scan_identifier() noexcept {
     std::size_t start = current_;
     while (!at_end() && (std::isalnum(static_cast<unsigned char>(peek())) ||
-                         peek() == '_')) {
+                         peek() == '_' || peek() == '$')) {
         advance();
     }
 

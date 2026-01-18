@@ -1610,6 +1610,137 @@ static void test_sml_runtime_placeholders(void) {
     }
 }
 
+static void test_sml_runtime_match_response_with_capture(void) {
+    secs_sml_runtime_t *rt = NULL;
+    expect_ok("secs_sml_runtime_create(capture)", secs_sml_runtime_create(&rt));
+
+    const char *sml = "r0: S2F22 <L <U2 CAP_A>>.\n"
+                      "if (S2F21 <L [2] <U2 $CAP_A> <L $CAP_B>>) r0.\n";
+    expect_ok("secs_sml_runtime_load(capture)",
+              secs_sml_runtime_load(rt, sml, strlen(sml)));
+
+    /* incoming body：<L <U2 0x1001> <L <A \"x\">>> */
+    secs_ii_item_t *body_item = NULL;
+    expect_ok("secs_ii_item_create_list(capture body)",
+              secs_ii_item_create_list(&body_item));
+    {
+        uint16_t v = 0x1001;
+        secs_ii_item_t *u2 = NULL;
+        expect_ok("secs_ii_item_create_u2(capture A)",
+                  secs_ii_item_create_u2(&v, 1, &u2));
+        expect_ok("secs_ii_item_list_append(capture A)",
+                  secs_ii_item_list_append(body_item, u2));
+        secs_ii_item_destroy(u2);
+    }
+    {
+        secs_ii_item_t *inner = NULL;
+        expect_ok("secs_ii_item_create_list(capture B)",
+                  secs_ii_item_create_list(&inner));
+        secs_ii_item_t *ascii = NULL;
+        expect_ok("secs_ii_item_create_ascii(capture x)",
+                  secs_ii_item_create_ascii("x", 1, &ascii));
+        expect_ok("secs_ii_item_list_append(capture x)",
+                  secs_ii_item_list_append(inner, ascii));
+        secs_ii_item_destroy(ascii);
+
+        expect_ok("secs_ii_item_list_append(capture B)",
+                  secs_ii_item_list_append(body_item, inner));
+        secs_ii_item_destroy(inner);
+    }
+
+    uint8_t *body = NULL;
+    size_t body_n = 0;
+    expect_ok("secs_ii_encode(capture body)",
+              secs_ii_encode(body_item, &body, &body_n));
+    secs_ii_item_destroy(body_item);
+
+    char *out_name = NULL;
+    secs_sml_render_context_t *captures = NULL;
+    expect_ok("secs_sml_runtime_match_response_with_capture",
+              secs_sml_runtime_match_response_with_capture(
+                  rt, 2, 21, body, body_n, NULL, &out_name, &captures));
+    if (!out_name || strcmp(out_name, "r0") != 0) {
+        fprintf(stderr, "FAIL: match_response_with_capture expected r0\n");
+        ++g_failures;
+    }
+    if (!captures) {
+        fprintf(stderr, "FAIL: match_response_with_capture expected captures ctx\n");
+        ++g_failures;
+    }
+
+    if (captures) {
+        /* CAP_A: <U2 0x1001> */
+        secs_ii_item_t *a_item = NULL;
+        expect_ok("secs_sml_render_context_get(CAP_A)",
+                  secs_sml_render_context_get(captures, "CAP_A", &a_item));
+        {
+            const uint16_t *p = NULL;
+            size_t n = 0;
+            expect_ok("secs_ii_item_u2_view(CAP_A)",
+                      secs_ii_item_u2_view(a_item, &p, &n));
+            if (!p || n != 1 || p[0] != 0x1001) {
+                fprintf(stderr, "FAIL: capture A mismatch\n");
+                ++g_failures;
+            }
+        }
+        secs_ii_item_destroy(a_item);
+
+        /* CAP_B: <L <A \"x\">> */
+        secs_ii_item_t *b_item = NULL;
+        expect_ok("secs_sml_render_context_get(CAP_B)",
+                  secs_sml_render_context_get(captures, "CAP_B", &b_item));
+        {
+            size_t n = 0;
+            expect_ok("secs_ii_item_list_size(CAP_B)",
+                      secs_ii_item_list_size(b_item, &n));
+            if (n != 1) {
+                fprintf(stderr, "FAIL: capture B list size mismatch\n");
+                ++g_failures;
+            }
+            secs_ii_item_t *child = NULL;
+            expect_ok("secs_ii_item_list_get(CAP_B[0])",
+                      secs_ii_item_list_get(b_item, 0, &child));
+            const char *s = NULL;
+            size_t s_n = 0;
+            expect_ok("secs_ii_item_ascii_view(CAP_B[0])",
+                      secs_ii_item_ascii_view(child, &s, &s_n));
+            if (!s || s_n != 1 || s[0] != 'x') {
+                fprintf(stderr, "FAIL: capture B[0] ascii mismatch\n");
+                ++g_failures;
+            }
+            secs_ii_item_destroy(child);
+        }
+        secs_ii_item_destroy(b_item);
+
+        /* 不存在：应返回 NOT_FOUND */
+        {
+            secs_ii_item_t *missing = NULL;
+            secs_error_t err =
+                secs_sml_render_context_get(captures, "NO_SUCH", &missing);
+            expect_err("secs_sml_render_context_get(NO_SUCH)", err);
+            if (missing) {
+                fprintf(stderr,
+                        "FAIL: render_context_get(NO_SUCH) expected NULL\n");
+                ++g_failures;
+                secs_ii_item_destroy(missing);
+            }
+            if (err.value != (int)SECS_C_API_NOT_FOUND ||
+                err.category == NULL || strcmp(err.category, "secs.c_api") != 0) {
+                failf("render_context_get(NO_SUCH) should be secs.c_api/NOT_FOUND",
+                      err);
+            }
+        }
+
+        secs_sml_render_context_destroy(captures);
+    }
+
+    if (out_name) {
+        secs_free(out_name);
+    }
+    secs_free(body);
+    secs_sml_runtime_destroy(rt);
+}
+
 static void test_sml_render_context_lifecycle(void) {
     secs_sml_render_context_t *ctx = NULL;
     expect_ok("secs_sml_render_context_create", secs_sml_render_context_create(&ctx));
@@ -3766,6 +3897,7 @@ int main(void) {
     test_sml_render_context_lifecycle();
     test_sml_runtime_encode_message_body_with_context();
     test_sml_runtime_match_response_with_context();
+    test_sml_runtime_match_response_with_capture();
     test_sml_runtime_match_response_with_trace();
     test_sml_runtime_match_response_with_trace_empty_rules();
     test_hsms_open_passive_ip_invalid_cases();

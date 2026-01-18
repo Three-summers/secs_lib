@@ -1,13 +1,13 @@
 /**
  * @file sml_ceid_complete.cpp
- * @brief SML + CEID 完整示例：展示如何结合 SML 模板、CEID dispatcher 和变量注入
+ * @brief SML + CEID 完整示例：展示如何结合 SML 模板、条件匹配、Data Capture 与变量注入
  *
  * 功能：
  * 1. Equipment 侧：
  *    - 加载 SML 模板文件（定义多个响应模板，带占位符）
- *    - 使用 protocol::Router 的条件响应机制（if 规则）
- *    - 根据收到的 CEID 自动选择响应模板
- *    - 运行时注入动态数据（设备状态、温度、报警等）
+ *    - 使用 protocol::Router 的 handler + SML Runtime 的条件规则（if）
+ *    - 通过 Data Capture（$NAME）从请求中自动提取 DATAID 等字段
+ *    - 根据命中的响应模板注入动态业务变量（设备状态、温度、报警等）
  *
  * 2. Host 侧：
  *    - 发送不同 CEID 的 S6F11 请求
@@ -46,6 +46,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -69,16 +70,6 @@ extract_u2_at(const ii::Item &list_item, std::size_t index) noexcept {
         return std::nullopt;
     }
     return u2->values[0];
-}
-
-/* ========== 辅助函数：从 S6F11 body 中提取 CEID ========== */
-
-[[nodiscard]] std::optional<std::uint16_t>
-extract_ceid_from_s6f11(const ii::Item &body) noexcept {
-    // S6F11 结构: <L <U2 DATAID> <U2 CEID> <L ...>>
-    // CEID 在根 List 的第 2 个元素（0-based index=1）
-    // 对应 SML 条件的新语法：s6f11[1]；旧语法：s6f11(3)
-    return extract_u2_at(body, 1);
 }
 
 /* ========== 辅助函数：构造 S6F11 请求 body ========== */
@@ -183,7 +174,7 @@ void print_match_traces(const sml::MatchResponseResult &r) {
         if (t.condition_index.has_value()) {
             std::cout << "(" << *t.condition_index << ")";
         }
-        std::cout << " == <expected>) failed: " << match_failure_reason_name(t.reason)
+        std::cout << ") failed: " << match_failure_reason_name(t.reason)
                   << " (" << t.detail << ")\n";
     }
 }
@@ -210,56 +201,49 @@ struct DeviceData {
 
 /* ========== Equipment 侧：根据 CEID 填充 RenderContext ========== */
 
-void fill_context_for_ceid(std::uint16_t ceid,
-                           std::uint16_t dataid,
-                           const DeviceData &data,
-                           sml::RenderContext &ctx) {
-    // 期望值占位符：用于 SML 条件中的 ==<U2 EXPECTED_CEID_STATUS>
-    // 若不设置该变量，使用 match_response(..., ctx) 将无法命中该规则，
-    // 可用 match_response_with_trace() 快速定位缺失变量原因。
-    ctx.set("EXPECTED_CEID_STATUS", ii::Item::u2({0x1001}));
+void fill_context_for_response(std::string_view response_name,
+                               const DeviceData &data,
+                               sml::RenderContext &ctx) {
+    // DATAID 等请求字段由 Data Capture 从请求中自动注入到 ctx。
+    //
+    // 这里仅注入“响应模板所需的业务变量”，避免 C++ 侧手工遍历 Item 树取值。
 
-    // 所有响应都需要 DATAID
-    ctx.set("DATAID", ii::Item::u2({dataid}));
-
-    switch (ceid) {
-    case 0x1001: // 设备状态查询
+    if (response_name == "status_response") {
         ctx.set("DEVICE_NAME", ii::Item::ascii(data.device_name));
         ctx.set("STATUS_CODE", ii::Item::u1({data.status_code}));
         ctx.set("UPTIME_SECONDS", ii::Item::u4({data.uptime_seconds}));
-        break;
+        return;
+    }
 
-    case 0x1002: // 温度数据查询
+    if (response_name == "temperature_response") {
         ctx.set("TEMP_SENSOR_1", ii::Item::f4({data.temp_sensor_1}));
         ctx.set("TEMP_SENSOR_2", ii::Item::f4({data.temp_sensor_2}));
         ctx.set("TEMP_SENSOR_3", ii::Item::f4({data.temp_sensor_3}));
-        {
-            float avg = (data.temp_sensor_1 + data.temp_sensor_2 +
-                         data.temp_sensor_3) /
-                        3.0f;
-            ctx.set("TEMP_AVG", ii::Item::f4({avg}));
-        }
-        break;
+        const float avg =
+            (data.temp_sensor_1 + data.temp_sensor_2 + data.temp_sensor_3) /
+            3.0f;
+        ctx.set("TEMP_AVG", ii::Item::f4({avg}));
+        return;
+    }
 
-    case 0x1003: // 报警信息查询
+    if (response_name == "alarm_response") {
         ctx.set("ALARM_COUNT", ii::Item::u2({data.alarm_count}));
         ctx.set("ALARM_MSG_1", ii::Item::ascii(data.alarm_msg_1));
         ctx.set("ALARM_MSG_2", ii::Item::ascii(data.alarm_msg_2));
-        break;
+        return;
+    }
 
-    case 0x1004: // 生产数据查询
+    if (response_name == "production_response") {
         ctx.set("TOTAL_COUNT", ii::Item::u4({data.total_count}));
         ctx.set("GOOD_COUNT", ii::Item::u4({data.good_count}));
         ctx.set("BAD_COUNT", ii::Item::u4({data.bad_count}));
-        {
-            float yield = static_cast<float>(data.good_count) /
-                          static_cast<float>(data.total_count) * 100.0f;
-            ctx.set("YIELD_RATE", ii::Item::f4({yield}));
-        }
-        break;
-
-    default:
-        break;
+        const float yield = (data.total_count == 0)
+                                ? 0.0f
+                                : (static_cast<float>(data.good_count) /
+                                   static_cast<float>(data.total_count) *
+                                   100.0f);
+        ctx.set("YIELD_RATE", ii::Item::f4({yield}));
+        return;
     }
 }
 
@@ -342,55 +326,19 @@ asio::awaitable<int> run() {
                 co_return protocol::HandlerResult{dec_ec, {}};
             }
 
-            // 提取 DATAID 和 CEID
-            auto dataid_opt = extract_u2_at(decoded.item, 0);
-            auto ceid_opt = extract_ceid_from_s6f11(decoded.item);
-
-            if (!dataid_opt || !ceid_opt) {
-                std::cout << "[Equipment] Invalid S6F11 structure\n";
-                co_return protocol::HandlerResult{
-                    core::make_error_code(core::errc::invalid_argument), {}};
-            }
-
-            std::uint16_t dataid = *dataid_opt;
-            std::uint16_t ceid = *ceid_opt;
-
-            std::cout << "[Equipment] DATAID=" << dataid << ", CEID=0x"
-                      << std::hex << ceid << std::dec << "\n";
-
-            // 填充 RenderContext（注入动态数据）
+            // Data Capture：SML 条件规则用 `<pattern>` 匹配并捕获 `$DATAID/$PARAMS`。
+            // 命中后，我们把捕获结果作为渲染上下文继续注入业务变量。
             sml::RenderContext ctx;
-            fill_context_for_ceid(ceid, dataid, device_data, ctx);
-
-            // 仅用于演示：当条件期望值包含占位符时，若 ctx 缺失变量，可用 trace 快速定位原因。
-            // - 本示例的 sml_ceid_complete.sml 中，status_response 的期望 CEID 使用了占位符：
-            //   if (s6f11[1]==<U2 EXPECTED_CEID_STATUS>) status_response.
-            // - 因此这里用“空上下文”做一次 trace，展示缺失变量时的失败原因（不影响真实匹配）。
-            static bool trace_demo_printed = false;
-            if (!trace_demo_printed) {
-                trace_demo_printed = true;
-                sml::RenderContext empty_ctx;
-                const auto demo = rt.match_response_with_trace(
-                    req.stream, req.function, decoded.item, empty_ctx);
-                if (!demo.response_name.has_value()) {
-                    std::cout << "[Equipment][Debug] match_response_with_trace() demo "
-                                 "(missing EXPECTED_CEID_STATUS):\n";
-                    print_match_traces(demo);
-                    std::cout << "[Equipment][Debug] end demo\n\n";
-                }
-            }
-
-            // 使用 SML Runtime 的条件响应匹配（带 ctx：支持期望值占位符）
-            auto response_name =
-                rt.match_response(req.stream, req.function, decoded.item, ctx);
+            auto response_name = rt.match_response_with_capture(
+                req.stream, req.function, decoded.item, ctx);
 
             if (!response_name) {
-                std::cout << "[Equipment] No matching response for CEID=0x"
-                          << std::hex << ceid << std::dec << "\n";
+                std::cout << "[Equipment] No matching response\n";
 
-                // 调试：输出每条规则的失败原因（包含缺失变量/索引越界等）。
+                // 调试：输出每条规则的失败原因（包含 pattern mismatch / 索引越界等）。
+                sml::RenderContext empty_ctx;
                 const auto traced = rt.match_response_with_trace(
-                    req.stream, req.function, decoded.item, ctx);
+                    req.stream, req.function, decoded.item, empty_ctx);
                 std::cout << "[Equipment][Debug] match_response_with_trace():\n";
                 print_match_traces(traced);
 
@@ -400,6 +348,18 @@ asio::awaitable<int> run() {
 
             std::cout << "[Equipment] Matched response: " << *response_name
                       << "\n";
+
+            // 演示：直接从捕获上下文取出 DATAID（无需手工遍历 Item 树）。
+            if (const auto *dataid_item = ctx.get("DATAID")) {
+                if (const auto *u2 = dataid_item->get_if<ii::U2>();
+                    u2 && !u2->values.empty()) {
+                    std::cout << "[Equipment] Captured DATAID=" << u2->values[0]
+                              << "\n";
+                }
+            }
+
+            // 注入业务变量（响应模板所需）
+            fill_context_for_response(*response_name, device_data, ctx);
 
             // 渲染响应模板
             std::vector<core::byte> response_body;

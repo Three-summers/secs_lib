@@ -67,6 +67,16 @@ private:
     std::optional<TemplateItem> parse_signed(TokenType type) noexcept;
     std::optional<TemplateItem> parse_float(TokenType type) noexcept;
 
+    // 解析条件 pattern（用于 Data Capture：if (...) 里的 `<pattern>`，不带 `==`）
+    std::optional<PatternItem> parse_pattern_item() noexcept;
+    std::optional<PatternItem> parse_pattern_list() noexcept;
+    std::optional<PatternItem> parse_pattern_ascii() noexcept;
+    std::optional<PatternItem> parse_pattern_binary() noexcept;
+    std::optional<PatternItem> parse_pattern_boolean() noexcept;
+    std::optional<PatternItem> parse_pattern_unsigned(TokenType type) noexcept;
+    std::optional<PatternItem> parse_pattern_signed(TokenType type) noexcept;
+    std::optional<PatternItem> parse_pattern_float(TokenType type) noexcept;
+
     // 解析辅助
     std::optional<Condition> parse_condition() noexcept;
 

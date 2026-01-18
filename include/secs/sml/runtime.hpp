@@ -123,6 +123,35 @@ public:
                    const RenderContext &ctx) const noexcept;
 
     /**
+     * @brief 匹配条件响应并捕获数据（Data Capture）
+     *
+     * 行为：
+     * - 若命中规则且该规则的条件包含 `<pattern>`（不带 `==`），则把 pattern 内的
+     *   `$NAME` 捕获到 out_captures；
+     * - out_captures 在调用前会被 clear()；
+     * - 未命中时返回 nullopt，out_captures 为空。
+     *
+     * 说明：
+     * - ctx 仍用于旧的 `==<Item>` 期望值渲染（占位符变量）；
+     * - `<pattern>` 的捕获变量名称不包含 '$'（例如 `$CEID` -> "CEID"）。
+     */
+    [[nodiscard]] std::optional<std::string>
+    match_response_with_capture(std::uint8_t stream,
+                                std::uint8_t function,
+                                const ii::Item &item,
+                                const RenderContext &ctx,
+                                RenderContext &out_captures) const noexcept;
+
+    /**
+     * @brief match_response_with_capture() 的便捷重载：使用空 RenderContext
+     */
+    [[nodiscard]] std::optional<std::string>
+    match_response_with_capture(std::uint8_t stream,
+                                std::uint8_t function,
+                                const ii::Item &item,
+                                RenderContext &out_captures) const noexcept;
+
+    /**
      * @brief 匹配条件响应（返回详细失败轨迹）
      *
      * 约定：
@@ -213,7 +242,8 @@ private:
                                             std::uint8_t function,
                                             const ii::Item &item,
                                             const RenderContext &ctx,
-                                            MatchTrace *trace) const noexcept;
+                                            MatchTrace *trace,
+                                            RenderContext *out_captures) const noexcept;
     [[nodiscard]] bool items_equal(const ii::Item &a,
                                    const ii::Item &b) const noexcept;
 

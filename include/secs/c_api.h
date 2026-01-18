@@ -318,6 +318,14 @@ secs_error_t secs_sml_render_context_set(secs_sml_render_context_t *ctx,
                                          const char *name,
                                          const secs_ii_item_t *value);
 
+/*
+ * 获取变量：name -> SECS-II Item（out_value 需用 secs_ii_item_destroy 释放）。
+ * 若不存在返回 NOT_FOUND。
+ */
+secs_error_t secs_sml_render_context_get(const secs_sml_render_context_t *ctx,
+                                         const char *name,
+                                         secs_ii_item_t **out_value);
+
 /* ----------------------------- SML Runtime（Context-Aware）
  * ----------------------------- */
 
@@ -353,6 +361,23 @@ secs_error_t secs_sml_runtime_match_response_with_context(
     size_t body_n,
     const secs_sml_render_context_t *ctx,
     char **out_name);
+
+/*
+ * 匹配条件响应并捕获 Data Capture 变量（$NAME）：
+ * - ctx：渲染上下文（可为 NULL，表示空上下文；用于旧的 `==<Item>` 期望值占位符渲染）
+ * - 命中：out_name 返回响应名；若 out_captures 非 NULL，则返回捕获到的 RenderContext
+ *  （需用 secs_sml_render_context_destroy 释放）
+ * - 未命中：out_name=NULL；out_captures（若非 NULL）返回 NULL；并返回 OK
+ */
+secs_error_t secs_sml_runtime_match_response_with_capture(
+    const secs_sml_runtime_t *rt,
+    uint8_t stream,
+    uint8_t function,
+    const uint8_t *body_bytes,
+    size_t body_n,
+    const secs_sml_render_context_t *ctx,
+    char **out_name,
+    secs_sml_render_context_t **out_captures);
 
 /* 条件匹配失败轨迹（用于调试/错误提示）。 */
 typedef struct secs_sml_match_trace {

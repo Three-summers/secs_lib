@@ -4,9 +4,9 @@
  * 目标：
  * - 使用 C API 加载同一份 `sml_ceid_complete.sml`；
  * - server（Equipment）侧：
- *   - 使用 RenderContext 注入动态变量；
- *   - 使用 match_response_with_context() 支持“期望值占位符”（==<... IDENT>）；
- *   - 使用 encode_message_body(..., ctx) 渲染并编码响应模板；
+ *   - 使用 match_response_with_capture() 做结构匹配 + Data Capture（$NAME）；
+ *   - 把捕获到的 RenderContext 作为渲染上下文继续注入动态变量；
+ *   - 使用 encode_message_body(..., ctx) 渲染并编码响应模板（ctx 为“捕获+业务变量”合并结果）；
  *   - 使用 match_response_with_trace() 输出失败轨迹，便于调试条件规则。
  * - client（Host）侧：
  *   - 发送多条 S6F11(W=1) 请求（不同 CEID）；
@@ -435,23 +435,17 @@ struct device_data {
     uint32_t bad_count;
 };
 
-static int fill_context_for_ceid(uint16_t ceid,
-                                 uint16_t dataid,
-                                 const struct device_data *data,
-                                 secs_sml_render_context_t *ctx) {
-    /* 期望值占位符：对应 sml_ceid_complete.sml 里的规则
-     * if (s6f11[1]==<U2 EXPECTED_CEID_STATUS>) status_response.
-     */
-    if (!ctx_set_u2(ctx, "EXPECTED_CEID_STATUS", 0x1001u)) {
+static int fill_context_for_response(const char *response_name,
+                                     const struct device_data *data,
+                                     secs_sml_render_context_t *ctx) {
+    /* DATAID 等请求字段由 SML Data Capture 从请求中自动注入到 ctx。
+     * 这里仅注入“响应模板所需的业务变量”。 */
+
+    if (!response_name || !data || !ctx) {
         return 0;
     }
 
-    if (!ctx_set_u2(ctx, "DATAID", dataid)) {
-        return 0;
-    }
-
-    switch (ceid) {
-    case 0x1001u:
+    if (strcmp(response_name, "status_response") == 0) {
         if (!ctx_set_ascii(ctx, "DEVICE_NAME", data->device_name)) {
             return 0;
         }
@@ -461,9 +455,10 @@ static int fill_context_for_ceid(uint16_t ceid,
         if (!ctx_set_u4(ctx, "UPTIME_SECONDS", data->uptime_seconds)) {
             return 0;
         }
-        break;
+        return 1;
+    }
 
-    case 0x1002u: {
+    if (strcmp(response_name, "temperature_response") == 0) {
         if (!ctx_set_f4(ctx, "TEMP_SENSOR_1", data->temp1) ||
             !ctx_set_f4(ctx, "TEMP_SENSOR_2", data->temp2) ||
             !ctx_set_f4(ctx, "TEMP_SENSOR_3", data->temp3)) {
@@ -473,10 +468,10 @@ static int fill_context_for_ceid(uint16_t ceid,
         if (!ctx_set_f4(ctx, "TEMP_AVG", avg)) {
             return 0;
         }
-        break;
+        return 1;
     }
 
-    case 0x1003u:
+    if (strcmp(response_name, "alarm_response") == 0) {
         if (!ctx_set_u2(ctx, "ALARM_COUNT", data->alarm_count)) {
             return 0;
         }
@@ -484,9 +479,10 @@ static int fill_context_for_ceid(uint16_t ceid,
             !ctx_set_ascii(ctx, "ALARM_MSG_2", data->alarm_msg_2)) {
             return 0;
         }
-        break;
+        return 1;
+    }
 
-    case 0x1004u: {
+    if (strcmp(response_name, "production_response") == 0) {
         if (!ctx_set_u4(ctx, "TOTAL_COUNT", data->total_count) ||
             !ctx_set_u4(ctx, "GOOD_COUNT", data->good_count) ||
             !ctx_set_u4(ctx, "BAD_COUNT", data->bad_count)) {
@@ -499,14 +495,10 @@ static int fill_context_for_ceid(uint16_t ceid,
         if (!ctx_set_f4(ctx, "YIELD_RATE", yield)) {
             return 0;
         }
-        break;
+        return 1;
     }
-
-    default:
-        break;
-    }
-
-    return 1;
+    /* 未知模板：让上层报错/不回包，避免渲染缺失变量导致的“静默行为”。 */
+    return 0;
 }
 
 /* ========== match_response_with_trace：失败轨迹打印 ========== */
@@ -527,7 +519,7 @@ static void dump_match_traces(const secs_sml_match_trace_t *traces, size_t n) {
         if (t->has_index) {
             printf("(%zu)", t->index);
         }
-        printf(" == <expected>) failed: reason=%d detail=%s\n",
+        printf(") failed: reason=%d detail=%s\n",
                t->reason,
                (t->detail ? t->detail : "(null)"));
     }
@@ -548,7 +540,7 @@ static int open_passive_thread(void *p) {
     return 0;
 }
 
-/* ========== server handler：用 SML 条件 + ctx 注入自动回包 ========== */
+/* ========== server handler：用 SML Data Capture 自动提取字段并回包 ========== */
 
 struct server_state {
     const secs_sml_runtime_t *rt;
@@ -575,82 +567,26 @@ static secs_error_t server_s6f11_handler(void *user_data,
         return ok();
     }
 
-    uint16_t dataid = 0;
-    uint16_t ceid = 0;
-    if (!decode_u2_at_list_index(req->body, req->body_n, 0, &dataid) ||
-        !decode_u2_at_list_index(req->body, req->body_n, 1, &ceid)) {
-        fprintf(stderr, "[Equipment] invalid S6F11 body\n");
-        return invalid_argument();
-    }
-
-    printf("[Equipment] DATAID=%u CEID=0x%04X\n",
-           (unsigned)dataid,
-           (unsigned)ceid);
-
-    /* 1) 构造 RenderContext（用于响应模板渲染 + 条件期望值占位符渲染） */
-    secs_sml_render_context_t *ctx = NULL;
-    if (!ensure_ok("secs_sml_render_context_create",
-                   secs_sml_render_context_create(&ctx))) {
-        return invalid_argument();
-    }
-    if (!fill_context_for_ceid(ceid, dataid, &st->data, ctx)) {
-        secs_sml_render_context_destroy(ctx);
-        return invalid_argument();
-    }
-
-    /* 2) 仅用于演示：如果 ctx 缺失占位符变量，可用 trace 定位失败原因。
-     * - 本示例第一条规则的期望 CEID 使用了占位符 EXPECTED_CEID_STATUS；
-     * - 因此这里用 ctx=NULL 做一次 trace，展示“缺失变量”时的 detail（不影响真实匹配）。
-     */
-    static int trace_demo_printed = 0;
-    if (!trace_demo_printed) {
-        trace_demo_printed = 1;
-        char *demo_name = NULL;
-        secs_sml_match_trace_t *traces = NULL;
-        size_t trace_n = 0;
-        if (ensure_ok("secs_sml_runtime_match_response_with_trace(demo)",
-                      secs_sml_runtime_match_response_with_trace(
-                          st->rt,
-                          req->stream,
-                          req->function,
-                          req->body,
-                          req->body_n,
-                          NULL,
-                          &demo_name,
-                          &traces,
-                          &trace_n))) {
-            if (!demo_name) {
-                printf("[Equipment][Debug] match_response_with_trace() demo "
-                       "(missing EXPECTED_CEID_STATUS):\n");
-                dump_match_traces(traces, trace_n);
-                printf("[Equipment][Debug] end demo\n\n");
-            } else {
-                secs_free(demo_name);
-            }
-        }
-        secs_sml_match_traces_free(traces, trace_n);
-    }
-
-    /* 3) 使用 match_response_with_context：支持期望值占位符（==<U2 IDENT>） */
+    /* 1) 匹配条件并捕获字段（Data Capture：$DATAID/$PARAMS...） */
     char *matched = NULL;
-    secs_error_t m = secs_sml_runtime_match_response_with_context(st->rt,
+    secs_sml_render_context_t *captures = NULL;
+    secs_error_t m = secs_sml_runtime_match_response_with_capture(st->rt,
                                                                   req->stream,
                                                                   req->function,
                                                                   req->body,
                                                                   req->body_n,
-                                                                  ctx,
-                                                                  &matched);
+                                                                  NULL,
+                                                                  &matched,
+                                                                  &captures);
     if (!secs_error_is_ok(m)) {
-        ensure_ok("secs_sml_runtime_match_response_with_context", m);
-        secs_sml_render_context_destroy(ctx);
-        if (matched) {
-            secs_free(matched);
-        }
+        ensure_ok("secs_sml_runtime_match_response_with_capture", m);
+        secs_sml_render_context_destroy(captures);
+        secs_free(matched);
         return m;
     }
 
     if (!matched) {
-        /* 未命中：输出 trace 便于调试（例如索引越界/期望值不等/缺失变量等）。 */
+        /* 未命中：输出 trace 便于调试（例如 pattern mismatch / 解码失败等）。 */
         fprintf(stderr, "[Equipment] no matching response\n");
         char *out_name = NULL;
         secs_sml_match_trace_t *traces = NULL;
@@ -662,7 +598,7 @@ static secs_error_t server_s6f11_handler(void *user_data,
                           req->function,
                           req->body,
                           req->body_n,
-                          ctx,
+                          NULL,
                           &out_name,
                           &traces,
                           &trace_n))) {
@@ -672,13 +608,42 @@ static secs_error_t server_s6f11_handler(void *user_data,
             }
         }
         secs_sml_match_traces_free(traces, trace_n);
-        secs_sml_render_context_destroy(ctx);
         return invalid_argument();
     }
 
     printf("[Equipment] matched response: %s\n", matched);
 
-    /* 4) 渲染并编码响应模板（encode_message_body 会使用 ctx 注入变量） */
+    if (!captures) {
+        fprintf(stderr, "[Equipment] internal error: captures is NULL\n");
+        secs_free(matched);
+        return invalid_argument();
+    }
+
+    /* 演示：直接从捕获上下文取 DATAID（无需手工遍历 Item 树）。 */
+    {
+        secs_ii_item_t *dataid_item = NULL;
+        if (secs_error_is_ok(
+                secs_sml_render_context_get(captures, "DATAID", &dataid_item)) &&
+            dataid_item) {
+            const uint16_t *p = NULL;
+            size_t n = 0;
+            if (secs_error_is_ok(secs_ii_item_u2_view(dataid_item, &p, &n)) &&
+                p && n == 1) {
+                printf("[Equipment] captured DATAID=%u\n", (unsigned)p[0]);
+            }
+            secs_ii_item_destroy(dataid_item);
+        }
+    }
+
+    /* 2) 注入业务变量（响应模板所需） */
+    if (!fill_context_for_response(matched, &st->data, captures)) {
+        fprintf(stderr, "[Equipment] fill_context_for_response failed\n");
+        secs_sml_render_context_destroy(captures);
+        secs_free(matched);
+        return invalid_argument();
+    }
+
+    /* 3) 渲染并编码响应模板（encode_message_body 会使用 captures 注入变量） */
     uint8_t *rsp_body = NULL;
     size_t rsp_body_n = 0;
     uint8_t rsp_stream = 0;
@@ -687,13 +652,13 @@ static secs_error_t server_s6f11_handler(void *user_data,
 
     secs_error_t e = secs_sml_runtime_encode_message_body(st->rt,
                                                          matched,
-                                                         ctx,
+                                                         captures,
                                                          &rsp_body,
                                                          &rsp_body_n,
                                                          &rsp_stream,
                                                          &rsp_function,
                                                          &rsp_w);
-    secs_sml_render_context_destroy(ctx);
+    secs_sml_render_context_destroy(captures);
     secs_free(matched);
 
     if (!secs_error_is_ok(e)) {
@@ -998,4 +963,3 @@ cleanup:
     }
     return exit_code;
 }
-

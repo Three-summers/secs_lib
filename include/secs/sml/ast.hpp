@@ -153,6 +153,165 @@ private:
 };
 
 /**
+ * @brief 捕获变量（用于 Data Capture：匹配时提取数据）
+ *
+ * 约定：
+ * - 语法上写作 `$NAME`；
+ * - AST 中的 `name` 不包含前导 '$'；
+ * - 该类型仅用于条件 pattern（不影响消息模板渲染的 VarRef）。
+ */
+struct CaptureVar final {
+    std::string name;
+    friend bool operator==(const CaptureVar &, const CaptureVar &) = default;
+};
+
+struct PatASCII final {
+    std::optional<CaptureVar> capture;
+    std::string value; // 字面量；capture 有值时该字段忽略
+    friend bool operator==(const PatASCII &, const PatASCII &) = default;
+};
+
+struct PatBinary final {
+    std::optional<CaptureVar> capture;
+    std::vector<secs::ii::byte> values; // capture 有值时该字段忽略
+    friend bool operator==(const PatBinary &, const PatBinary &) = default;
+};
+
+struct PatBoolean final {
+    std::optional<CaptureVar> capture;
+    std::vector<bool> values; // capture 有值时该字段忽略
+    friend bool operator==(const PatBoolean &, const PatBoolean &) = default;
+};
+
+struct PatI1 final {
+    std::optional<CaptureVar> capture;
+    std::vector<std::int8_t> values;
+    friend bool operator==(const PatI1 &, const PatI1 &) = default;
+};
+struct PatI2 final {
+    std::optional<CaptureVar> capture;
+    std::vector<std::int16_t> values;
+    friend bool operator==(const PatI2 &, const PatI2 &) = default;
+};
+struct PatI4 final {
+    std::optional<CaptureVar> capture;
+    std::vector<std::int32_t> values;
+    friend bool operator==(const PatI4 &, const PatI4 &) = default;
+};
+struct PatI8 final {
+    std::optional<CaptureVar> capture;
+    std::vector<std::int64_t> values;
+    friend bool operator==(const PatI8 &, const PatI8 &) = default;
+};
+
+struct PatU1 final {
+    std::optional<CaptureVar> capture;
+    std::vector<std::uint8_t> values;
+    friend bool operator==(const PatU1 &, const PatU1 &) = default;
+};
+struct PatU2 final {
+    std::optional<CaptureVar> capture;
+    std::vector<std::uint16_t> values;
+    friend bool operator==(const PatU2 &, const PatU2 &) = default;
+};
+struct PatU4 final {
+    std::optional<CaptureVar> capture;
+    std::vector<std::uint32_t> values;
+    friend bool operator==(const PatU4 &, const PatU4 &) = default;
+};
+struct PatU8 final {
+    std::optional<CaptureVar> capture;
+    std::vector<std::uint64_t> values;
+    friend bool operator==(const PatU8 &, const PatU8 &) = default;
+};
+
+struct PatF4 final {
+    std::optional<CaptureVar> capture;
+    std::vector<float> values;
+    friend bool operator==(const PatF4 &, const PatF4 &) = default;
+};
+struct PatF8 final {
+    std::optional<CaptureVar> capture;
+    std::vector<double> values;
+    friend bool operator==(const PatF8 &, const PatF8 &) = default;
+};
+
+class PatternItem;
+using PatChildren = std::vector<PatternItem>;
+
+struct PatL final {
+    std::optional<std::size_t> size_hint;
+    std::optional<CaptureVar> capture;
+    PatChildren items; // capture 有值时仍可为空；匹配时仍可用 size_hint 做校验
+    friend bool operator==(const PatL &, const PatL &) = default;
+};
+
+/**
+ * @brief 条件匹配用的 Item Pattern（支持捕获变量）
+ *
+ * 说明：
+ * - 该类型用于 `if (...)` 条件中的 `<pattern>`（不带 `==`）；
+ * - 捕获变量用于“匹配时提取数据”，其值以 `secs::ii::Item` 形式输出给运行时。
+ */
+class PatternItem final {
+public:
+    using storage_type = std::variant<PatL,
+                                      PatASCII,
+                                      PatBinary,
+                                      PatBoolean,
+                                      PatI1,
+                                      PatI2,
+                                      PatI4,
+                                      PatI8,
+                                      PatU1,
+                                      PatU2,
+                                      PatU4,
+                                      PatU8,
+                                      PatF4,
+                                      PatF8>;
+
+    PatternItem() = delete;
+
+    explicit PatternItem(PatL v) : storage_(std::move(v)) {}
+    explicit PatternItem(PatASCII v) : storage_(std::move(v)) {}
+    explicit PatternItem(PatBinary v) : storage_(std::move(v)) {}
+    explicit PatternItem(PatBoolean v) : storage_(std::move(v)) {}
+
+    explicit PatternItem(PatI1 v) : storage_(std::move(v)) {}
+    explicit PatternItem(PatI2 v) : storage_(std::move(v)) {}
+    explicit PatternItem(PatI4 v) : storage_(std::move(v)) {}
+    explicit PatternItem(PatI8 v) : storage_(std::move(v)) {}
+
+    explicit PatternItem(PatU1 v) : storage_(std::move(v)) {}
+    explicit PatternItem(PatU2 v) : storage_(std::move(v)) {}
+    explicit PatternItem(PatU4 v) : storage_(std::move(v)) {}
+    explicit PatternItem(PatU8 v) : storage_(std::move(v)) {}
+
+    explicit PatternItem(PatF4 v) : storage_(std::move(v)) {}
+    explicit PatternItem(PatF8 v) : storage_(std::move(v)) {}
+
+    [[nodiscard]] const storage_type &storage() const noexcept {
+        return storage_;
+    }
+    [[nodiscard]] storage_type &storage() noexcept { return storage_; }
+
+    template <class T>
+    [[nodiscard]] const T *get_if() const noexcept {
+        return std::get_if<T>(&storage_);
+    }
+
+    template <class T>
+    [[nodiscard]] T *get_if() noexcept {
+        return std::get_if<T>(&storage_);
+    }
+
+    friend bool operator==(const PatternItem &, const PatternItem &) = default;
+
+private:
+    storage_type storage_;
+};
+
+/**
  * @brief 消息定义
  *
  * 格式：名称: SxFy [W] <Item>.
@@ -180,7 +339,12 @@ struct Condition {
     std::optional<std::size_t> index;
     // 可选索引（从 0 开始）：对 List 做“数组下标”访问（仅选择第 N 个子元素）。
     std::optional<std::size_t> list_index;
+    // 深层路径索引（从 0 开始）：支持链式 `[i][j][k]`。
+    // - 为空表示未使用该语法；
+    // - 当 size()==1 时，语义等价于 list_index（解析器会保持两者一致以兼容旧用法）。
+    std::vector<std::size_t> list_path;
     std::optional<TemplateItem> expected; // 可选的期望值（允许占位符）
+    std::optional<PatternItem> pattern;   // 可选的结构匹配/捕获 pattern（不带 ==）
 };
 
 /**
