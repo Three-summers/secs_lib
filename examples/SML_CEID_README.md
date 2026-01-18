@@ -25,19 +25,31 @@ status_response: S6F12
 
 ```sml
 /* 条件中的 s6f11 会被自动解析为 stream=6, function=11 */
-if (s6f11(3)==<U2 0x1001>) status_response.
-if (s6f11(3)==<U2 0x1002>) temperature_response.
-if (s6f11(3)==<U2 0x1003>) alarm_response.
-if (s6f11(3)==<U2 0x1004>) production_response.
+/* 新语法：[i] 为 0-based List 下标（取根 List 的第 i 个子元素） */
+if (s6f11[1]==<U2 0x1001>) status_response.
+if (s6f11[1]==<U2 0x1002>) temperature_response.
+if (s6f11[1]==<U2 0x1003>) alarm_response.
+if (s6f11[1]==<U2 0x1004>) production_response.
+
+/* 兼容旧语法：(n) 为 1-based 先序遍历编号（包含根节点） */
+// if (s6f11(3)==<U2 0x1001>) status_response.
 ```
 
 **关键点：**
-- 索引 `(3)` 采用**先序遍历编号**（包含根节点），从 1 开始
+- `[i]` 是 **0-based 数组下标**，更贴近日常对 List 的访问；`(n)` 仍保持完全兼容（1-based 先序遍历编号）
+- `(n)` 与 `[i]` **互斥**，不能写成 `s6f11(3)[1]`
 - S6F11 结构: `<L <U2 DATAID> <U2 CEID> <L>>`
-  - (1) = 根节点 List
-  - (2) = `<U2 DATAID>`
-  - (3) = `<U2 CEID>` ← CEID 在这里
-  - (4) = `<L>` params
+  - `[0]` = `<U2 DATAID>`
+  - `[1]` = `<U2 CEID>` ← CEID 在这里
+  - `[2]` = `<L>` params
+  - `(3)` = `<U2 CEID>`（等价于 `[1]`，用于向后兼容/复杂嵌套场景）
+
+**期望值占位符示例：**
+
+```sml
+/* 期望值也支持占位符：由 RenderContext 注入并在匹配时渲染后比较 */
+if (s6f11[1]==<U2 EXPECTED_CEID>) status_response.
+```
 
 ### 3. 运行时变量注入
 
@@ -45,6 +57,8 @@ if (s6f11(3)==<U2 0x1004>) production_response.
 // 根据 CEID 填充不同的数据
 sml::RenderContext ctx;
 ctx.set("DATAID", ii::Item::u2({dataid}));
+// 可选：用于条件期望值占位符（例如 if (...==<U2 EXPECTED_CEID>)）
+ctx.set("EXPECTED_CEID", ii::Item::u2({0x1001}));
 
 switch (ceid) {
 case 0x1001: // 设备状态查询
@@ -67,7 +81,8 @@ case 0x1002: // 温度数据查询
 
 ```cpp
 // SML Runtime 自动匹配条件并返回响应模板名称
-auto response_name = rt.match_response(req.stream, req.function, decoded.item);
+// 当条件期望值包含占位符时，需要把 ctx 传给 match_response()
+auto response_name = rt.match_response(req.stream, req.function, decoded.item, ctx);
 
 // 渲染模板（注入变量）
 std::vector<core::byte> response_body;
@@ -153,11 +168,11 @@ disp->set(0x1001, [](auto ceid, auto& item, auto& msg) {
 
 ## 关键技术点总结
 
-1. **SML 条件匹配**：`if (s6f11(3)==<U2 0x1001>)` 自动解析 stream/function
-2. **先序遍历索引**：理解 `(3)` 的含义（包含根节点）
-3. **变量注入**：`RenderContext` 提供运行时数据
+1. **SML 条件匹配**：`if (s6f11[1]==<U2 0x1001>)` 自动解析 stream/function
+2. **索引语义**：`[i]` 为 0-based List 下标；`(n)` 为 1-based 先序遍历编号（向后兼容）
+3. **变量注入**：`RenderContext` 为消息渲染与条件期望值渲染提供运行时数据
 4. **自动渲染**：`Runtime::encode_message_body()` 一步完成渲染+编码
-5. **Router 集成**：`match_response()` 返回响应模板名称
+5. **Router 集成**：`match_response(..., ctx)` 返回响应模板名称（需要占位符条件时传入 ctx）
 
 ## 扩展阅读
 

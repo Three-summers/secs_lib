@@ -13,6 +13,7 @@
 #include "test_main.hpp"
 
 #include <string_view>
+#include <variant>
 
 namespace {
 
@@ -543,21 +544,114 @@ void test_runtime_encode_message_body_ok_and_errors() {
     }
 }
 
-void test_parser_condition_expected_disallows_placeholder() {
-    // 条件期望值当前只允许字面量，不允许占位符。
+void test_parser_condition_expected_allows_placeholder() {
     auto result = parse_sml(R"(
     a: S1F1 <L>.
     rsp: S1F2 <L>.
     if (a(1)==<A MDLN>) rsp.
   )");
-    TEST_EXPECT_EQ(result.ec, make_error_code(parser_errc::invalid_condition));
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.conditions.size(), 1u);
+
+    const auto &cond = result.document.conditions[0].condition;
+    TEST_EXPECT(cond.expected.has_value());
+    const auto *ascii = cond.expected->get_if<TplASCII>();
+    TEST_EXPECT(ascii != nullptr);
+    TEST_EXPECT(std::holds_alternative<VarRef>(ascii->value));
+    TEST_EXPECT_EQ(std::get<VarRef>(ascii->value).name, std::string("MDLN"));
 }
 
-void test_parser_condition_expected_disallows_placeholder_in_numeric() {
+void test_parser_condition_expected_allows_placeholder_in_numeric() {
     auto result = parse_sml(R"(
     a: S1F1 <L>.
     rsp: S1F2 <L>.
     if (a(1)==<U2 SVIDS>) rsp.
+  )");
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.conditions.size(), 1u);
+
+    const auto &cond = result.document.conditions[0].condition;
+    TEST_EXPECT(cond.expected.has_value());
+    const auto *u2 = cond.expected->get_if<TplU2>();
+    TEST_EXPECT(u2 != nullptr);
+    TEST_EXPECT_EQ(u2->values.size(), 1u);
+    TEST_EXPECT(std::holds_alternative<VarRef>(u2->values[0]));
+    TEST_EXPECT_EQ(std::get<VarRef>(u2->values[0]).name, std::string("SVIDS"));
+}
+
+void test_parser_if_rule_with_list_index_and_expected() {
+    auto result = parse_sml(R"(
+    a: S1F1 <L <U2 1> <U2 2>>.
+    rsp: S1F2 <L>.
+    if (a[1]==<U2 0x1001>) rsp.
+  )");
+
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.conditions.size(), 1u);
+
+    const auto &cond = result.document.conditions[0].condition;
+    TEST_EXPECT(!cond.index.has_value());
+    TEST_EXPECT(cond.list_index.has_value());
+    TEST_EXPECT_EQ(*cond.list_index, 1u);
+    TEST_EXPECT(cond.expected.has_value());
+}
+
+void test_parser_condition_list_index_allows_zero() {
+    auto result = parse_sml(R"(
+    a: S1F1 <L <U2 1> <U2 2>>.
+    rsp: S1F2 <L>.
+    if (a[0]==<U2 0x1001>) rsp.
+  )");
+
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.conditions.size(), 1u);
+
+    const auto &cond = result.document.conditions[0].condition;
+    TEST_EXPECT(cond.list_index.has_value());
+    TEST_EXPECT_EQ(*cond.list_index, 0u);
+}
+
+void test_parser_condition_rejects_mixed_index_and_list_index() {
+    auto result = parse_sml(R"(
+    a: S1F1 <L>.
+    rsp: S1F2 <L>.
+    if (a(3)[1]==<U2 0x1001>) rsp.
+  )");
+    TEST_EXPECT_EQ(result.ec, make_error_code(parser_errc::invalid_condition));
+}
+
+void test_parser_condition_rejects_negative_list_index() {
+    auto result = parse_sml(R"(
+    a: S1F1 <L>.
+    rsp: S1F2 <L>.
+    if (a[-1]==<U2 0x1001>) rsp.
+  )");
+    TEST_EXPECT_EQ(result.ec, make_error_code(parser_errc::invalid_condition));
+}
+
+void test_parser_condition_rejects_list_index_missing_number() {
+    auto result = parse_sml(R"(
+    a: S1F1 <L>.
+    rsp: S1F2 <L>.
+    if (a[]==<U2 0x1001>) rsp.
+  )");
+    TEST_EXPECT_EQ(result.ec, make_error_code(parser_errc::expected_number));
+}
+
+void test_parser_condition_rejects_list_index_out_of_range() {
+    auto result = parse_sml(R"(
+    a: S1F1 <L>.
+    rsp: S1F2 <L>.
+    if (a[18446744073709551616]==<U2 0x1001>) rsp.
+  )");
+    TEST_EXPECT_EQ(result.ec, make_error_code(parser_errc::expected_number));
+}
+
+void test_parser_condition_rejects_list_index_missing_rbracket() {
+    auto result = parse_sml(R"(
+    a: S1F1 <L>.
+    rsp: S1F2 <L>.
+    if (a[1==<U2 0x1001>) rsp.
   )");
     TEST_EXPECT_EQ(result.ec, make_error_code(parser_errc::invalid_condition));
 }
@@ -1315,8 +1409,15 @@ int main() {
     test_smlx_render_type_mismatch_is_error();
     test_smlx_render_nested_list_with_placeholders();
     test_smlx_render_deep_nesting();
-    test_parser_condition_expected_disallows_placeholder();
-    test_parser_condition_expected_disallows_placeholder_in_numeric();
+    test_parser_condition_expected_allows_placeholder();
+    test_parser_condition_expected_allows_placeholder_in_numeric();
+    test_parser_if_rule_with_list_index_and_expected();
+    test_parser_condition_list_index_allows_zero();
+    test_parser_condition_rejects_mixed_index_and_list_index();
+    test_parser_condition_rejects_negative_list_index();
+    test_parser_condition_rejects_list_index_missing_number();
+    test_parser_condition_rejects_list_index_out_of_range();
+    test_parser_condition_rejects_list_index_missing_rbracket();
     test_parser_every_rule();
     test_parser_quoted_sf();
     test_parser_error_category_messages();

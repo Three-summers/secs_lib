@@ -303,6 +303,89 @@ secs_sml_runtime_get_message_body_by_name(const secs_sml_runtime_t *rt,
                                           uint8_t *out_function,
                                           int *out_w_bit);
 
+/* ----------------------------- SML RenderContext
+ * ----------------------------- */
+
+typedef struct secs_sml_render_context secs_sml_render_context_t;
+
+/* 创建/销毁/复用（clear 后可重复使用） */
+secs_error_t secs_sml_render_context_create(secs_sml_render_context_t **out_ctx);
+void secs_sml_render_context_destroy(secs_sml_render_context_t *ctx);
+void secs_sml_render_context_clear(secs_sml_render_context_t *ctx);
+
+/* 设置变量：name -> SECS-II Item（value 由调用方持有，本函数会拷贝）。 */
+secs_error_t secs_sml_render_context_set(secs_sml_render_context_t *ctx,
+                                         const char *name,
+                                         const secs_ii_item_t *value);
+
+/* ----------------------------- SML Runtime（Context-Aware）
+ * ----------------------------- */
+
+/*
+ * 渲染并编码消息模板（支持占位符变量注入）：
+ * - name_or_sf：消息名；也支持 "SxFy"（例如 "S2F22"）
+ * - ctx：渲染上下文（可为 NULL，表示空上下文）
+ *
+ * 失败场景：
+ * - 找不到消息：secs.core/invalid_argument
+ * - 渲染失败：sml.render
+ * - 编码失败：secs.ii
+ */
+secs_error_t secs_sml_runtime_encode_message_body(
+    const secs_sml_runtime_t *rt,
+    const char *name_or_sf,
+    const secs_sml_render_context_t *ctx,
+    uint8_t **out_body_bytes,
+    size_t *out_body_n,
+    uint8_t *out_stream,
+    uint8_t *out_function,
+    int *out_w_bit);
+
+/*
+ * 匹配条件响应（支持期望值占位符）：
+ * - ctx：渲染上下文（可为 NULL，表示空上下文）
+ */
+secs_error_t secs_sml_runtime_match_response_with_context(
+    const secs_sml_runtime_t *rt,
+    uint8_t stream,
+    uint8_t function,
+    const uint8_t *body_bytes,
+    size_t body_n,
+    const secs_sml_render_context_t *ctx,
+    char **out_name);
+
+/* 条件匹配失败轨迹（用于调试/错误提示）。 */
+typedef struct secs_sml_match_trace {
+    size_t rule_index;
+    const char *condition_message_name;
+    int has_index;
+    size_t index;
+    int has_list_index;
+    size_t list_index;
+    int reason; /* secs::sml::MatchFailureReason（C++ enum class） */
+    const char *detail;
+} secs_sml_match_trace_t;
+
+/*
+ * 匹配条件响应（返回详细失败轨迹）：
+ * - 命中规则：out_name 为响应名；out_traces=NULL 且 out_trace_count==0；
+ * - 未命中：out_name=NULL；out_traces/out_trace_count 返回每条规则失败原因。
+ *
+ * 备注：out_traces 指向的内存需要用 secs_sml_match_traces_free 释放。
+ */
+secs_error_t secs_sml_runtime_match_response_with_trace(
+    const secs_sml_runtime_t *rt,
+    uint8_t stream,
+    uint8_t function,
+    const uint8_t *body_bytes,
+    size_t body_n,
+    const secs_sml_render_context_t *ctx,
+    char **out_name,
+    secs_sml_match_trace_t **out_traces,
+    size_t *out_trace_count);
+
+void secs_sml_match_traces_free(secs_sml_match_trace_t *traces, size_t count);
+
 /* ----------------------------- HSMS：连接/会话（用于协议层）
  * ----------------------------- */
 

@@ -99,7 +99,7 @@
 
 - 消息体 `<Item>` 支持“值占位符”：在原本写字面量的位置写 **标识符（Identifier）**，例如 `<A MDLN>`、`<U2 1 SVIDS 3>`、`<B BYTES>`。
 - 占位符的值由宿主程序通过 `secs::sml::RenderContext` 注入，并在发送前渲染（见 `include/secs/sml/render.hpp` 与 `include/secs/sml/runtime.hpp`）。
-- `if (...) ==<Item>` 的期望值 **当前不允许占位符**（解析阶段直接报 `sml.parser/invalid_condition`，见 `tests/test_sml_parser.cpp`）。
+- `if (...) ==<Item>` 的期望值也支持占位符：`==<...>` 内的 `<Item>` 与消息模板共享同一套 `TemplateItem` 语法；匹配时会先用 `RenderContext` 渲染期望值再做比较（缺失变量会导致该规则不命中）。
 
 ### 2.2 SECS-II 数据项语法
 
@@ -155,11 +155,13 @@
 │                                                                     │
 │  格式：if (条件) 响应消息名.                                        │
 │                                                                     │
-│  条件格式：消息名[(索引)][==<期望值>]                               │
+│  条件格式：消息名[(n)|[i]][==<期望值>]                              │
 │  ┌────────────────────────────────────────────────────────────┐    │
 │  │  - 消息名  : 触发消息的名称或 SxFy                          │    │
-│  │  - (索引)  : 可选，指定消息体中的元素位置（1-based 先序）    │    │
+│  │  - (n)     : 可选，1-based 先序遍历编号（包含根节点）         │    │
+│  │  - [i]     : 可选，0-based List 数组下标（第 i 个子元素）     │    │
 │  │  - ==<值>  : 可选，指定期望的元素值                         │    │
+│  │  - 约束    : (n) 与 [i] 互斥，最多出现一次                   │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
 │  示例：                                                             │
@@ -170,20 +172,27 @@
 │  │  // 收到 S2F21，且第 2 个元素等于 <U1 1> 时，回复 ack       │    │
 │  │  if (S2F21(2)==<U1 1>) ack.                                 │    │
 │  │                                                             │    │
+│  │  // 0-based List 下标（更贴近日常“数组取第 N 个元素”）        │    │
+│  │  if (S2F21[1]==<U1 1>) ack.                                  │    │
+│  │                                                             │    │
 │  │  // 使用消息名引用（需要先定义 request 消息）               │    │
 │  │  if (request(3)==<A "START">) start_response.               │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
-│  索引说明（先序遍历编号）：                                         │
+│  索引说明：                                                         │
 │  ┌────────────────────────────────────────────────────────────┐    │
 │  │  消息体：<L <A "a"> <L <U1 1> <U1 2>>>                      │    │
 │  │                                                             │    │
-│  │  先序遍历编号：                                             │    │
+│  │  (n) 先序遍历编号（1-based，包含根节点）：                  │    │
 │  │    1: <L ...>          (根节点)                             │    │
 │  │    2: <A "a">          (第一个子元素)                       │    │
 │  │    3: <L ...>          (第二个子元素，嵌套 List)            │    │
 │  │    4: <U1 1>           (嵌套 List 的第一个子元素)           │    │
 │  │    5: <U1 2>           (嵌套 List 的第二个子元素)           │    │
+│  │                                                             │    │
+│  │  [i] List 下标（0-based，仅对“根节点为 List”的消息体生效）： │    │
+│  │    [0] -> <A "a">                                           │    │
+│  │    [1] -> <L <U1 1> <U1 2>>                                 │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -191,7 +200,8 @@
 
 说明（当前实现）：
 
-- 条件期望值 `==<...>` 仅允许纯字面量；若 `<...>` 内包含占位符（Identifier），解析将失败并返回 `sml.parser/invalid_condition`。
+- `(n)` 语法保持完全向后兼容；新增的 `[i]` 是对 List 的 0-based 下标访问，两者互斥。
+- 条件期望值 `==<...>` 与消息模板一样支持占位符；匹配时由 `RenderContext` 提供变量并渲染后再比较。
 
 ### 2.4 定时规则语法
 
@@ -582,7 +592,7 @@
 
 - `Parser::parse_item()` 的返回类型为 **TemplateItem**（模板 AST），而不是 `secs::ii::Item`。
 - 在 `A/B/Boolean/U*/I*/F*` 的 values 位置，`Identifier` token 会被解析为占位符 `VarRef{name}`。
-- 条件期望值 `==<...>` 在解析阶段会检查并拒绝占位符（见 `src/sml/parser.cpp` 的 `item_has_var(...)` 分支）。
+- 条件期望值 `==<...>` 与消息模板共享同一套解析规则：`<...>` 内允许占位符（Identifier），并在运行时由 `RenderContext` 渲染后参与比较。
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -665,8 +675,9 @@
 │                                                                     │
 │  struct Condition {                                                 │
 │      string message_name;            // 触发消息名或 SxFy           │
-│      optional<size_t> index;         // 可选的元素索引              │
-│      optional<TemplateItem> expected;// 可选的期望值（仅字面量）     │
+│      optional<size_t> index;         // (n) 1-based 先序遍历编号     │
+│      optional<size_t> list_index;    // [i] 0-based List 下标（互斥）│
+│      optional<TemplateItem> expected;// ==<...> 期望值（允许占位符） │
 │  };                                                                 │
 │                                                                     │
 │  struct TimerRule {                                                 │
@@ -680,7 +691,7 @@
 补充说明：
 
 - `TemplateItem` / `VarRef` 等模板类型定义见 `include/secs/sml/ast.hpp`；渲染逻辑见 `include/secs/sml/render.hpp` 与 `src/sml/render.cpp`。
-- `MessageDef.item` 与 `Condition.expected` 共享同一份模板表示；但 `parse_sml()` 会保证 `Condition.expected` 不含占位符（保持条件匹配的确定性）。
+- `MessageDef.item` 与 `Condition.expected` 共享同一份模板表示，均允许占位符；运行时会用 `RenderContext` 渲染模板（发送时渲染消息体，匹配时渲染条件期望值）。
 
 ### 6.2 AST 示例
 
@@ -831,6 +842,7 @@
 │                                                                     │
 │  ┌────────────────────────────────────────────────────────────┐    │
 │  │  optional<string> match_response(stream, function, item) {  │    │
+│  │      // 兼容接口：内部使用空 RenderContext                    │    │
 │  │      for (const auto& rule : conditions) {                  │    │
 │  │          if (match_condition(rule.condition,                │    │
 │  │                              stream, function, item)) {     │    │
@@ -839,6 +851,9 @@
 │  │      }                                                      │    │
 │  │      return nullopt;                                        │    │
 │  │  }                                                          │    │
+│  │                                                             │    │
+│  │  optional<string> match_response(stream, function, item, ctx)│    │
+│  │      // 需要条件期望值占位符时使用该重载                      │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
 │  match_condition() 匹配逻辑：                                       │
@@ -849,8 +864,9 @@
 │  │                                                             │    │
 │  │  2. 若有索引和期望值，检查 Item：                           │    │
 │  │     - 仅当根节点为 List 时允许索引匹配                      │    │
-│  │     - 使用先序遍历找到第 N 个元素                           │    │
-│  │     - 调用 items_equal() 比较元素值                         │    │
+│  │     - (n)：先序遍历找到第 N 个元素（1-based）               │    │
+│  │     - [i]：选择根 List 的第 i 个子元素（0-based）           │    │
+│  │     - 期望值先用 ctx 渲染（支持占位符），再 items_equal()    │    │
 │  │                                                             │    │
 │  │  3. 全部检查通过则返回 true。                               │    │
 │  └────────────────────────────────────────────────────────────┘    │
@@ -1072,7 +1088,7 @@ ec = runtime.encode_message_body("req", ctx, body, &s, &f, &w);
 │  │      }                                                       │    │
 │  │  }                                                           │    │
 │  │  auto response_name = runtime.match_response(                │    │
-│  │      msg.stream, msg.function, decoded                       │    │
+│  │      msg.stream, msg.function, decoded, ctx                  │    │
 │  │  );                                                         │    │
 │  │                                                             │    │
 │  │  if (response_name) {                                       │    │

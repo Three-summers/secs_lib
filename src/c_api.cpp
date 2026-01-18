@@ -90,6 +90,10 @@ struct secs_sml_runtime final {
     secs::sml::Runtime rt{};
 };
 
+struct secs_sml_render_context final {
+    secs::sml::RenderContext ctx{};
+};
+
 struct secs_hsms_connection final {
     explicit secs_hsms_connection(secs::hsms::Connection v)
         : conn(std::move(v)) {}
@@ -1368,6 +1372,264 @@ secs_sml_runtime_get_message_body_by_name(const secs_sml_runtime_t *rt,
         if (out_w_bit)
             *out_w_bit = msg->w_bit ? 1 : 0;
         return ok();
+    });
+}
+
+// ----------------------------- SML RenderContext -----------------------------
+
+secs_error_t secs_sml_render_context_create(secs_sml_render_context_t **out_ctx) {
+    return guard_error([&]() -> secs_error_t {
+        if (!out_ctx) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_ctx = nullptr;
+
+        auto *ctx = new (std::nothrow) secs_sml_render_context{};
+        if (!ctx) {
+            return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+        }
+        *out_ctx = ctx;
+        return ok();
+    });
+}
+
+void secs_sml_render_context_destroy(secs_sml_render_context_t *ctx) {
+    guard_void([&]() { delete ctx; });
+}
+
+void secs_sml_render_context_clear(secs_sml_render_context_t *ctx) {
+    guard_void([&]() {
+        if (!ctx) {
+            return;
+        }
+        ctx->ctx.clear();
+    });
+}
+
+secs_error_t secs_sml_render_context_set(secs_sml_render_context_t *ctx,
+                                         const char *name,
+                                         const secs_ii_item_t *value) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !name || !value) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        ctx->ctx.set(std::string{name}, value->item);
+        return ok();
+    });
+}
+
+// ----------------------------- SML Runtime（Context-Aware） -----------------------------
+
+secs_error_t secs_sml_runtime_encode_message_body(
+    const secs_sml_runtime_t *rt,
+    const char *name_or_sf,
+    const secs_sml_render_context_t *ctx,
+    uint8_t **out_body_bytes,
+    size_t *out_body_n,
+    uint8_t *out_stream,
+    uint8_t *out_function,
+    int *out_w_bit) {
+    return guard_error([&]() -> secs_error_t {
+        if (!rt || !name_or_sf || !out_body_bytes || !out_body_n) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_body_bytes = nullptr;
+        *out_body_n = 0;
+        if (out_stream) {
+            *out_stream = 0;
+        }
+        if (out_function) {
+            *out_function = 0;
+        }
+        if (out_w_bit) {
+            *out_w_bit = 0;
+        }
+
+        secs::sml::RenderContext empty_ctx{};
+        const auto &use_ctx = (ctx ? ctx->ctx : empty_ctx);
+
+        std::vector<byte> out;
+        bool w_bit = false;
+        const auto ec = rt->rt.encode_message_body(
+            std::string_view{name_or_sf},
+            use_ctx,
+            out,
+            out_stream,
+            out_function,
+            out_w_bit ? &w_bit : nullptr);
+        if (ec) {
+            return from_error_code(ec);
+        }
+        if (out_w_bit) {
+            *out_w_bit = w_bit ? 1 : 0;
+        }
+
+        if (!out.empty()) {
+            auto *buf = static_cast<uint8_t *>(secs_malloc(out.size()));
+            if (!buf) {
+                return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+            }
+            std::memcpy(buf, out.data(), out.size());
+            *out_body_bytes = buf;
+            *out_body_n = out.size();
+        }
+        return ok();
+    });
+}
+
+secs_error_t secs_sml_runtime_match_response_with_context(
+    const secs_sml_runtime_t *rt,
+    uint8_t stream,
+    uint8_t function,
+    const uint8_t *body_bytes,
+    size_t body_n,
+    const secs_sml_render_context_t *ctx,
+    char **out_name) {
+    return guard_error([&]() -> secs_error_t {
+        if (!rt || !out_name) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        if (!body_bytes && body_n != 0) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_name = nullptr;
+
+        secs::ii::Item decoded{secs::ii::List{}};
+        std::size_t consumed = 0;
+        auto dec_ec = secs::ii::decode_one(
+            bytes_view{reinterpret_cast<const byte *>(body_bytes), body_n},
+            decoded,
+            consumed);
+        if (dec_ec) {
+            return from_error_code(dec_ec);
+        }
+
+        secs::sml::RenderContext empty_ctx{};
+        const auto &use_ctx = (ctx ? ctx->ctx : empty_ctx);
+        auto matched = rt->rt.match_response(stream, function, decoded, use_ctx);
+        if (!matched.has_value()) {
+            return ok();
+        }
+
+        auto *s = static_cast<char *>(secs_malloc(matched->size() + 1));
+        if (!s) {
+            return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+        }
+        std::memcpy(s, matched->data(), matched->size());
+        s[matched->size()] = '\0';
+        *out_name = s;
+        return ok();
+    });
+}
+
+secs_error_t secs_sml_runtime_match_response_with_trace(
+    const secs_sml_runtime_t *rt,
+    uint8_t stream,
+    uint8_t function,
+    const uint8_t *body_bytes,
+    size_t body_n,
+    const secs_sml_render_context_t *ctx,
+    char **out_name,
+    secs_sml_match_trace_t **out_traces,
+    size_t *out_trace_count) {
+    return guard_error([&]() -> secs_error_t {
+        if (!rt || !out_name || !out_traces || !out_trace_count) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        if (!body_bytes && body_n != 0) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_name = nullptr;
+        *out_traces = nullptr;
+        *out_trace_count = 0;
+
+        secs::ii::Item decoded{secs::ii::List{}};
+        std::size_t consumed = 0;
+        auto dec_ec = secs::ii::decode_one(
+            bytes_view{reinterpret_cast<const byte *>(body_bytes), body_n},
+            decoded,
+            consumed);
+        if (dec_ec) {
+            return from_error_code(dec_ec);
+        }
+
+        secs::sml::RenderContext empty_ctx{};
+        const auto &use_ctx = (ctx ? ctx->ctx : empty_ctx);
+        const auto result =
+            rt->rt.match_response_with_trace(stream, function, decoded, use_ctx);
+
+        if (result.response_name.has_value()) {
+            const auto &name = *result.response_name;
+            auto *s = static_cast<char *>(secs_malloc(name.size() + 1));
+            if (!s) {
+                return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+            }
+            std::memcpy(s, name.data(), name.size());
+            s[name.size()] = '\0';
+            *out_name = s;
+            return ok();
+        }
+
+        if (result.traces.empty()) {
+            return ok();
+        }
+
+        const std::size_t n = result.traces.size();
+        auto *traces = static_cast<secs_sml_match_trace_t *>(
+            secs_malloc(sizeof(secs_sml_match_trace_t) * n));
+        if (!traces) {
+            return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+        }
+        std::memset(traces, 0, sizeof(secs_sml_match_trace_t) * n);
+
+        const auto cleanup_partial = [&](std::size_t count) noexcept {
+            for (std::size_t i = 0; i < count; ++i) {
+                secs_free(const_cast<char *>(traces[i].condition_message_name));
+                secs_free(const_cast<char *>(traces[i].detail));
+                traces[i].condition_message_name = nullptr;
+                traces[i].detail = nullptr;
+            }
+            secs_free(traces);
+        };
+
+        for (std::size_t i = 0; i < n; ++i) {
+            const auto &t = result.traces[i];
+            traces[i].rule_index = t.rule_index;
+            traces[i].condition_message_name = dup_string(t.condition_message_name);
+            if (!traces[i].condition_message_name) {
+                cleanup_partial(i);
+                return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+            }
+            traces[i].has_index = t.condition_index.has_value() ? 1 : 0;
+            traces[i].index = t.condition_index.value_or(0);
+            traces[i].has_list_index = t.condition_list_index.has_value() ? 1 : 0;
+            traces[i].list_index = t.condition_list_index.value_or(0);
+            traces[i].reason = static_cast<int>(t.reason);
+            traces[i].detail = dup_string(t.detail);
+            if (!traces[i].detail) {
+                cleanup_partial(i + 1);
+                return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+            }
+        }
+
+        *out_traces = traces;
+        *out_trace_count = n;
+        return ok();
+    });
+}
+
+void secs_sml_match_traces_free(secs_sml_match_trace_t *traces, size_t count) {
+    guard_void([&]() {
+        if (!traces) {
+            return;
+        }
+        for (size_t i = 0; i < count; ++i) {
+            secs_free(const_cast<char *>(traces[i].condition_message_name));
+            secs_free(const_cast<char *>(traces[i].detail));
+            traces[i].condition_message_name = nullptr;
+            traces[i].detail = nullptr;
+        }
+        secs_free(traces);
     });
 }
 

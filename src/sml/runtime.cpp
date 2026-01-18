@@ -236,6 +236,38 @@ Runtime::match_response(std::uint8_t stream,
     }
 }
 
+MatchResponseResult
+Runtime::match_response_with_trace(std::uint8_t stream,
+                                   std::uint8_t function,
+                                   const ii::Item &item,
+                                   const RenderContext &ctx) const noexcept {
+    MatchResponseResult result;
+    try {
+        for (std::size_t i = 0; i < document_.conditions.size(); ++i) {
+            const auto &rule = document_.conditions[i];
+
+            MatchTrace trace;
+            trace.rule_index = i;
+            trace.condition_message_name = rule.condition.message_name;
+            trace.condition_index = rule.condition.index;
+            trace.condition_list_index = rule.condition.list_index;
+
+            if (match_condition_with_trace(
+                    rule.condition, stream, function, item, ctx, trace)) {
+                result.response_name = rule.response_name;
+                result.traces.clear(); // 命中时不返回失败轨迹
+                return result;
+            }
+
+            result.traces.push_back(std::move(trace));
+        }
+        return result;
+    } catch (...) {
+        // noexcept：异常视为“未命中且无轨迹”（避免二次分配/字符串拼接导致再次失败）。
+        return {};
+    }
+}
+
 std::error_code
 Runtime::encode_message_body(std::string_view name_or_sf,
                              const RenderContext &ctx,
@@ -284,6 +316,24 @@ bool Runtime::match_condition(const Condition &cond,
                               std::uint8_t function,
                               const ii::Item &item,
                               const RenderContext &ctx) const noexcept {
+    return match_condition_impl(cond, stream, function, item, ctx, nullptr);
+}
+
+bool Runtime::match_condition_with_trace(const Condition &cond,
+                                         std::uint8_t stream,
+                                         std::uint8_t function,
+                                         const ii::Item &item,
+                                         const RenderContext &ctx,
+                                         MatchTrace &trace) const noexcept {
+    return match_condition_impl(cond, stream, function, item, ctx, &trace);
+}
+
+bool Runtime::match_condition_impl(const Condition &cond,
+                                   std::uint8_t stream,
+                                   std::uint8_t function,
+                                   const ii::Item &item,
+                                   const RenderContext &ctx,
+                                   MatchTrace *trace) const noexcept {
     // 检查消息名是否匹配
     // 条件可以是消息名（如 s1f1），也可以直接写成 SxFy 格式（如 S1F1）
 
@@ -294,36 +344,122 @@ bool Runtime::match_condition(const Condition &cond,
     // 如果是 SxFy 格式，直接比较
     if (is_sf) {
         if (stream != cond_stream || function != cond_function) {
+            if (trace) {
+                trace->reason = MatchFailureReason::stream_function_mismatch;
+                trace->detail =
+                    "incoming S" + std::to_string(stream) + "F" +
+                    std::to_string(function) + " does not match condition " +
+                    cond.message_name;
+            }
             return false;
         }
     } else {
         // 按消息名查找
         const MessageDef *msg = get_message(cond.message_name);
-        if (!msg || msg->stream != stream || msg->function != function) {
+        if (!msg) {
+            if (trace) {
+                trace->reason = MatchFailureReason::stream_function_mismatch;
+                trace->detail =
+                    "condition message name not found: " + cond.message_name;
+            }
+            return false;
+        }
+        if (msg->stream != stream || msg->function != function) {
+            if (trace) {
+                trace->reason = MatchFailureReason::stream_function_mismatch;
+                trace->detail =
+                    "incoming S" + std::to_string(stream) + "F" +
+                    std::to_string(function) + " does not match condition " +
+                    cond.message_name + " (S" + std::to_string(msg->stream) +
+                    "F" + std::to_string(msg->function) + ")";
+            }
             return false;
         }
     }
 
     // 如果有索引和期望值，检查 Item
-    if (cond.index && cond.expected) {
-        // 兼容 sample.sml：索引采用“先序遍历编号（包含根节点）”。
-        // 注意：仅当根节点为 List 时允许索引匹配（避免对非 List 输入产生歧义）。
-        if (!item.get_if<ii::List>()) {
-            return false;
-        }
+    if ((cond.index || cond.list_index) && cond.expected) {
+        const ii::Item *elem = nullptr;
 
-        const std::size_t idx = *cond.index;
-        const ii::Item *elem = find_preorder_nth(item, idx);
-        if (!elem) {
-            return false;
+        // [i] - 0-based List 数组下标（仅对“根节点为 List”的消息体生效）。
+        if (cond.list_index.has_value()) {
+            const auto *list = item.get_if<ii::List>();
+            if (!list) {
+                if (trace) {
+                    trace->reason = MatchFailureReason::not_a_list;
+                    trace->detail = "item is not a list";
+                }
+                return false;
+            }
+            if (*cond.list_index >= list->size()) {
+                if (trace) {
+                    trace->reason = MatchFailureReason::list_index_out_of_bounds;
+                    trace->detail =
+                        "list index " + std::to_string(*cond.list_index) +
+                        " >= list size " + std::to_string(list->size());
+                }
+                return false;
+            }
+            elem = &(*list)[*cond.list_index];
+        } else if (cond.index.has_value()) {
+            // (n) - 1-based 先序遍历编号（包含根节点，保持向后兼容）。
+            // 注意：仅当根节点为 List 时允许索引匹配（避免对非 List 输入产生歧义）。
+            if (!item.get_if<ii::List>()) {
+                if (trace) {
+                    trace->reason = MatchFailureReason::index_out_of_bounds;
+                    trace->detail =
+                        "preorder index requires root item to be a list";
+                }
+                return false;
+            }
+
+            const std::size_t idx = *cond.index;
+            if (idx < 1) {
+                if (trace) {
+                    trace->reason = MatchFailureReason::index_out_of_bounds;
+                    trace->detail = "preorder index must be >= 1";
+                }
+                return false;
+            }
+
+            elem = find_preorder_nth(item, idx);
+            if (!elem) {
+                if (trace) {
+                    trace->reason = MatchFailureReason::index_out_of_bounds;
+                    trace->detail =
+                        "preorder index " + std::to_string(idx) +
+                        " out of bounds";
+                }
+                return false;
+            }
         }
 
         ii::Item expected{ii::List{}};
-        if (render_item(*cond.expected, ctx, expected)) {
+        const auto render_ec = render_item(*cond.expected, ctx, expected);
+        if (render_ec) {
+            if (trace) {
+                if (render_ec == render_errc::missing_variable) {
+                    trace->reason = MatchFailureReason::render_missing_variable;
+                    trace->detail =
+                        "render expected value failed: missing variable";
+                } else if (render_ec == render_errc::type_mismatch) {
+                    trace->reason = MatchFailureReason::render_type_mismatch;
+                    trace->detail =
+                        "render expected value failed: type mismatch";
+                } else {
+                    trace->reason = MatchFailureReason::render_type_mismatch;
+                    trace->detail =
+                        "render expected value failed: " + render_ec.message();
+                }
+            }
             return false;
         }
 
-        if (!items_equal(*elem, expected)) {
+        if (!elem || !items_equal(*elem, expected)) {
+            if (trace) {
+                trace->reason = MatchFailureReason::expected_value_mismatch;
+                trace->detail = "expected value mismatch";
+            }
             return false;
         }
     }

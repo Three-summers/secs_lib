@@ -20,6 +20,43 @@ namespace secs::sml {
 class RenderContext;
 
 /**
+ * @brief 条件匹配失败原因（用于调试与错误回溯）
+ */
+enum class MatchFailureReason : std::uint8_t {
+    stream_function_mismatch,
+    index_out_of_bounds,
+    list_index_out_of_bounds,
+    render_missing_variable,
+    render_type_mismatch,
+    expected_value_mismatch,
+    not_a_list, // [index] 用于非 List
+};
+
+/**
+ * @brief 单条条件规则的匹配轨迹
+ *
+ * 说明：
+ * - `rule_index` 为 document_.conditions 的下标；
+ * - `detail` 为可读解释（便于打印日志或 UI 展示）。
+ */
+struct MatchTrace final {
+    std::size_t rule_index{0};
+    std::string condition_message_name;
+    std::optional<std::size_t> condition_index;
+    std::optional<std::size_t> condition_list_index;
+    MatchFailureReason reason{MatchFailureReason::stream_function_mismatch};
+    std::string detail;
+};
+
+/**
+ * @brief 条件响应匹配结果（带失败轨迹）
+ */
+struct MatchResponseResult final {
+    std::optional<std::string> response_name;
+    std::vector<MatchTrace> traces; // 命中时为空
+};
+
+/**
  * @brief SML 运行时
  *
  * 提供:
@@ -75,14 +112,28 @@ public:
      * @brief 匹配条件响应（带渲染上下文）
      *
      * 说明：
-     * - 当前 `parse_sml()` 不允许在条件期望值 `==<...>` 中使用占位符；
-     * - 该接口主要用于未来扩展或直接构造 Document 的场景。
+     * - 条件期望值 `==<...>` 允许使用占位符（Identifier），匹配时会先用 ctx
+     *   渲染期望值再做比较；
+     * - 若期望值渲染失败（缺失变量/类型不匹配），该规则视为“不命中”。
      */
     [[nodiscard]] std::optional<std::string>
     match_response(std::uint8_t stream,
                    std::uint8_t function,
                    const ii::Item &item,
                    const RenderContext &ctx) const noexcept;
+
+    /**
+     * @brief 匹配条件响应（返回详细失败轨迹）
+     *
+     * 约定：
+     * - 命中规则时：`response_name` 有值，且 `traces` 为空；
+     * - 未命中时：`response_name` 为空，`traces` 包含每条规则的失败原因与详情。
+     */
+    [[nodiscard]] MatchResponseResult
+    match_response_with_trace(std::uint8_t stream,
+                              std::uint8_t function,
+                              const ii::Item &item,
+                              const RenderContext &ctx) const noexcept;
 
     /**
      * @brief 渲染并编码消息模板（用于“代码主动发送”）
@@ -151,6 +202,18 @@ private:
                                        std::uint8_t function,
                                        const ii::Item &item,
                                        const RenderContext &ctx) const noexcept;
+    [[nodiscard]] bool match_condition_with_trace(const Condition &cond,
+                                                  std::uint8_t stream,
+                                                  std::uint8_t function,
+                                                  const ii::Item &item,
+                                                  const RenderContext &ctx,
+                                                  MatchTrace &trace) const noexcept;
+    [[nodiscard]] bool match_condition_impl(const Condition &cond,
+                                            std::uint8_t stream,
+                                            std::uint8_t function,
+                                            const ii::Item &item,
+                                            const RenderContext &ctx,
+                                            MatchTrace *trace) const noexcept;
     [[nodiscard]] bool items_equal(const ii::Item &a,
                                    const ii::Item &b) const noexcept;
 

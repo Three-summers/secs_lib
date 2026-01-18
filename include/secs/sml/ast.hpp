@@ -170,7 +170,7 @@ struct MessageDef {
 /**
  * @brief 条件表达式
  *
- * 格式：消息名[(index)][==<Item>]
+ * 格式：消息名[(index)|[index]][==<Item>]
  */
 struct Condition {
     std::string message_name;         // 触发消息名或 SxFy
@@ -178,7 +178,9 @@ struct Condition {
     // - 采用 SECS-II Item 的先序遍历编号（包含根节点）。
     // - 若消息体为 <L ...>，则根 List 的编号为 1，第一个子元素编号为 2。
     std::optional<std::size_t> index;
-    std::optional<TemplateItem> expected; // 可选的期望值（当前不允许占位符）
+    // 可选索引（从 0 开始）：对 List 做“数组下标”访问（仅选择第 N 个子元素）。
+    std::optional<std::size_t> list_index;
+    std::optional<TemplateItem> expected; // 可选的期望值（允许占位符）
 };
 
 /**

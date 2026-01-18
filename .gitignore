@@ -47,3 +47,4 @@ third_party/*/build/
 *.log
 *.tmp
 verification.md
+coverage*

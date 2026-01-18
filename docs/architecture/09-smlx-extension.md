@@ -10,13 +10,13 @@
 已实现（代码已落地）：
 
 - **消息模板支持占位符**（值位置写标识符）：`<A MDLN>`、`<U2 1 SVIDS 3>`、`<B BYTES>` 等
+- **条件期望值支持占位符**：`if (...) ==<Item>` 的 `<Item>` 允许写标识符，占位符由 `RenderContext` 提供并在匹配时渲染后比较
 - **渲染接口**：
   - `include/secs/sml/render.hpp`：`secs::sml::RenderContext` + `secs::sml::render_item()`
   - `include/secs/sml/runtime.hpp`：`secs::sml::Runtime::encode_message_body()`（面向“代码主动发送”）
 
 当前限制（后续可扩展）：
 
-- `if (...) ==<Item>` 的 **期望值不允许占位符**（解析阶段会报 `sml.parser/invalid_condition`）
 - `every N send ...` 的 `N` 暂不支持变量
 - ASCII 字符串内的 `${VAR}` 插值暂未实现（仅支持 `<A VAR>` 整值替换）
 
@@ -154,9 +154,9 @@ establish: S1F13 W
 - 字符串插值只影响 `A "..."` 的内容，不影响词法层；实现时可在渲染阶段扫描 `${...}` 并替换。
 - `${...}` 中仅允许变量名（不引入表达式），不支持嵌套。
 
-### 4.2 条件规则与定时规则的扩展点（可选，但推荐支持）
+### 4.2 条件规则与定时规则的扩展点（部分已实现）
 
-#### 4.2.1 `if` 规则中的期望值支持占位符
+#### 4.2.1 `if` 规则中的期望值支持占位符（已实现）
 
 使“匹配条件”可以由配置/上下文驱动：
 
@@ -168,7 +168,7 @@ ack_ng: S2F22 <L <U1 1>>.
 if (S2F21(2)==<A EXPECT_CMD>) ack_ok.
 ```
 
-#### 4.2.2 `every` 的间隔支持变量（仍以秒为单位）
+#### 4.2.2 `every` 的间隔支持变量（仍以秒为单位，待实现）
 
 ```sml
 every HEARTBEAT_INTERVAL send heartbeat.

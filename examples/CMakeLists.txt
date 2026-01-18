@@ -13,6 +13,20 @@ target_link_libraries(c_api_secs2_simple PRIVATE secs::c_api)
 set_target_properties(c_api_secs2_simple PROPERTIES LINKER_LANGUAGE CXX)
 list(APPEND _secs_example_targets c_api_secs2_simple)
 
+# C API（C ABI）SML + CEID 完整示例（源文件为 C，但链接需使用 C++ 链接器）
+add_executable(c_api_sml_ceid_complete c_api_sml_ceid_complete.c)
+target_link_libraries(c_api_sml_ceid_complete PRIVATE secs::c_api)
+set_target_properties(c_api_sml_ceid_complete PROPERTIES LINKER_LANGUAGE CXX)
+target_compile_features(c_api_sml_ceid_complete PRIVATE c_std_11)
+list(APPEND _secs_example_targets c_api_sml_ceid_complete)
+# 复制 .sml 文件到构建目录（与 C++ 版本共用同一份模板）
+add_custom_command(TARGET c_api_sml_ceid_complete POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    ${CMAKE_CURRENT_SOURCE_DIR}/sml_ceid_complete.sml
+    $<TARGET_FILE_DIR:c_api_sml_ceid_complete>/sml_ceid_complete.sml
+  COMMENT "Copying sml_ceid_complete.sml to build directory"
+)
+
 # C API（C ABI）HSMS（TCP）示例（源文件为 C，但链接需使用 C++ 链接器）
 add_executable(c_api_hsms_server c_api_hsms_server.c)
 target_link_libraries(c_api_hsms_server PRIVATE secs::c_api)

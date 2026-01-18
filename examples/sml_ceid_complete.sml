@@ -80,19 +80,34 @@ production_response: S6F12
  * 说明：
  * - 条件中的 s6f11 会被自动解析为 stream=6, function=11
  * - 不需要预先定义 s6f11 消息模板
- * - 索引采用先序遍历编号（包含根节点），从 1 开始
+ * - 推荐新语法：[i] 为 0-based 的 List 下标（更直观）
+ * - 兼容旧语法：(n) 为 1-based 的先序遍历编号（包含根节点）
+ * - (n) 与 [i] 互斥，不能写成 s6f11(3)[1]
  *
  * S6F11 结构: <L <U2 DATAID> <U2 CEID> <L>>
- * 先序遍历顺序：
+ *
+ * 新语法（推荐）：取根 List 的第 i 个子元素（从 0 开始）
+ *   [0] = <U2 DATAID>
+ *   [1] = <U2 CEID>      <-- CEID 在这里
+ *   [2] = <L> params
+ *
+ * 旧语法（兼容）：先序遍历编号（包含根节点，从 1 开始）
  *   (1) = 根节点 List
  *   (2) = <U2 DATAID>
- *   (3) = <U2 CEID>      <-- CEID 在这里
+ *   (3) = <U2 CEID>      <-- 等价于 [1]
  *   (4) = <L> params
+ *
+ * 期望值占位符：
+ * - ==<U2 EXPECTED_CEID_STATUS> 中的 EXPECTED_CEID_STATUS 会在匹配时按 RenderContext 渲染；
+ * - 若缺失该变量，规则会“不命中”（可用 match_response_with_trace() 调试）。
  */
-if (s6f11(3)==<U2 0x1001>) status_response.
-if (s6f11(3)==<U2 0x1002>) temperature_response.
-if (s6f11(3)==<U2 0x1003>) alarm_response.
-if (s6f11(3)==<U2 0x1004>) production_response.
+if (s6f11[1]==<U2 EXPECTED_CEID_STATUS>) status_response.
+if (s6f11[1]==<U2 0x1002>) temperature_response.
+if (s6f11[1]==<U2 0x1003>) alarm_response.
+if (s6f11[1]==<U2 0x1004>) production_response.
+
+/* 旧语法对照（不参与匹配） */
+/* if (s6f11(3)==<U2 0x1001>) status_response. */
 
 /* ========== 可选：定时发送心跳 ========== */
 

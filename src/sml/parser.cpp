@@ -167,81 +167,6 @@ double parse_float_value(std::string_view text) {
     return std::strtod(text.data(), nullptr);
 }
 
-template <class T>
-[[nodiscard]] bool values_has_var(
-    const std::vector<ValueExpr<T>> &values) noexcept {
-    for (const auto &v : values) {
-        if (std::holds_alternative<VarRef>(v)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-[[nodiscard]] bool item_has_var(const TemplateItem &item) noexcept {
-    struct Visitor final {
-        static bool run(const TemplateItem &it) noexcept {
-            return std::visit(Visitor{}, it.storage());
-        }
-
-        bool operator()(const TplList &list) const noexcept {
-            for (const auto &child : list) {
-                if (run(child)) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        bool operator()(const TplASCII &a) const noexcept {
-            return std::holds_alternative<VarRef>(a.value);
-        }
-
-        bool operator()(const TplBinary &b) const noexcept {
-            return values_has_var(b.values);
-        }
-
-        bool operator()(const TplBoolean &b) const noexcept {
-            return values_has_var(b.values);
-        }
-
-        bool operator()(const TplI1 &v) const noexcept {
-            return values_has_var(v.values);
-        }
-        bool operator()(const TplI2 &v) const noexcept {
-            return values_has_var(v.values);
-        }
-        bool operator()(const TplI4 &v) const noexcept {
-            return values_has_var(v.values);
-        }
-        bool operator()(const TplI8 &v) const noexcept {
-            return values_has_var(v.values);
-        }
-
-        bool operator()(const TplU1 &v) const noexcept {
-            return values_has_var(v.values);
-        }
-        bool operator()(const TplU2 &v) const noexcept {
-            return values_has_var(v.values);
-        }
-        bool operator()(const TplU4 &v) const noexcept {
-            return values_has_var(v.values);
-        }
-        bool operator()(const TplU8 &v) const noexcept {
-            return values_has_var(v.values);
-        }
-
-        bool operator()(const TplF4 &v) const noexcept {
-            return values_has_var(v.values);
-        }
-        bool operator()(const TplF8 &v) const noexcept {
-            return values_has_var(v.values);
-        }
-    };
-
-    return Visitor::run(item);
-}
-
 } // namespace
 
 const std::error_category &parser_error_category() noexcept {
@@ -789,7 +714,7 @@ std::optional<TemplateItem> Parser::parse_float(TokenType type) noexcept {
 }
 
 std::optional<Condition> Parser::parse_condition() noexcept {
-    // 语法：消息名 [(索引)][==<Item>]
+    // 语法：消息名 [(索引)|[索引]][==<Item>]
     Condition cond;
 
     if (!check(TokenType::Identifier)) {
@@ -800,26 +725,77 @@ std::optional<Condition> Parser::parse_condition() noexcept {
 
     cond.message_name = advance().value;
 
-    // 可选的 (索引)
-    if (match(TokenType::LParen)) {
-        if (!check(TokenType::Integer)) {
-            error(parser_errc::expected_number, "expected index number");
-            return std::nullopt;
+    enum class IndexKind : std::uint8_t { none, preorder, list };
+    IndexKind index_kind = IndexKind::none;
+
+    // 可选索引：(n) 或 [i]，两者互斥且只能出现一次
+    while (check(TokenType::LParen) || check(TokenType::LBracket)) {
+        if (match(TokenType::LParen)) {
+            if (index_kind != IndexKind::none) {
+                error(parser_errc::invalid_condition,
+                      "index specifier must be unique; '(n)' and '[i]' are mutually exclusive");
+                return std::nullopt;
+            }
+            index_kind = IndexKind::preorder;
+
+            if (!check(TokenType::Integer)) {
+                error(parser_errc::expected_number, "expected index number");
+                return std::nullopt;
+            }
+            const auto idx = parse_uint64_literal(advance().value);
+            if (!idx.has_value() ||
+                *idx > std::numeric_limits<std::size_t>::max()) {
+                error(parser_errc::expected_number, "index out of range");
+                return std::nullopt;
+            }
+            if (*idx < 1) {
+                error(parser_errc::invalid_condition, "index must be >= 1");
+                return std::nullopt;
+            }
+            cond.index = static_cast<std::size_t>(*idx);
+            if (!match(TokenType::RParen)) {
+                error(parser_errc::invalid_condition, "expected ')' after index");
+                return std::nullopt;
+            }
+            continue;
         }
-        const auto idx = parse_uint64_literal(advance().value);
-        if (!idx.has_value() ||
-            *idx > std::numeric_limits<std::size_t>::max()) {
-            error(parser_errc::expected_number, "index out of range");
-            return std::nullopt;
-        }
-        if (*idx < 1) {
-            error(parser_errc::invalid_condition, "index must be >= 1");
-            return std::nullopt;
-        }
-        cond.index = static_cast<std::size_t>(*idx);
-        if (!match(TokenType::RParen)) {
-            error(parser_errc::invalid_condition, "expected ')' after index");
-            return std::nullopt;
+
+        if (match(TokenType::LBracket)) {
+            if (index_kind != IndexKind::none) {
+                error(parser_errc::invalid_condition,
+                      "index specifier must be unique; '(n)' and '[i]' are mutually exclusive");
+                return std::nullopt;
+            }
+            index_kind = IndexKind::list;
+
+            if (!check(TokenType::Integer)) {
+                error(parser_errc::expected_number, "expected list index number");
+                return std::nullopt;
+            }
+            const auto idx = parse_int64_literal(advance().value);
+            if (!idx.has_value()) {
+                error(parser_errc::expected_number, "list index out of range");
+                return std::nullopt;
+            }
+            if (*idx < 0) {
+                error(parser_errc::invalid_condition, "list index must be >= 0");
+                return std::nullopt;
+            }
+            const auto uidx = static_cast<std::uint64_t>(*idx);
+            if (uidx >
+                static_cast<std::uint64_t>(
+                    std::numeric_limits<std::size_t>::max())) {
+                error(parser_errc::expected_number, "list index out of range");
+                return std::nullopt;
+            }
+            cond.list_index = static_cast<std::size_t>(uidx);
+
+            if (!match(TokenType::RBracket)) {
+                error(parser_errc::invalid_condition,
+                      "expected ']' after list index");
+                return std::nullopt;
+            }
+            continue;
         }
     }
 
@@ -830,13 +806,6 @@ std::optional<Condition> Parser::parse_condition() noexcept {
             return std::nullopt;
         }
 
-        // 约束：条件期望值只允许“纯字面量”，不允许占位符（避免在匹配阶段引入隐式
-        // 上下文依赖）。
-        if (item_has_var(*expected)) {
-            error(parser_errc::invalid_condition,
-                  "placeholders are not allowed in expected item");
-            return std::nullopt;
-        }
         cond.expected = std::move(*expected);
     }
 

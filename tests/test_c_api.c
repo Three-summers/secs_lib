@@ -16,6 +16,13 @@
 #include <string.h>
 #include <time.h>
 
+#if defined(__unix__) || defined(__APPLE__)
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
 static int g_failures = 0;
 
 static void failf(const char *what, secs_error_t err) {
@@ -81,6 +88,60 @@ static int wait_until_atomic_gt(const atomic_int *v,
     }
     return atomic_load(v) > threshold;
 }
+
+#if defined(__unix__) || defined(__APPLE__)
+static int pick_free_loopback_tcp_port(uint16_t *out_port) {
+    if (!out_port) {
+        return 0;
+    }
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return 0;
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(0);
+
+    if (bind(fd, (struct sockaddr *)&addr, (socklen_t)sizeof(addr)) != 0) {
+        (void)close(fd);
+        return 0;
+    }
+
+    socklen_t len = (socklen_t)sizeof(addr);
+    if (getsockname(fd, (struct sockaddr *)&addr, &len) != 0) {
+        (void)close(fd);
+        return 0;
+    }
+
+    const uint16_t port = ntohs(addr.sin_port);
+    (void)close(fd);
+    if (port == 0) {
+        return 0;
+    }
+    *out_port = port;
+    return 1;
+}
+
+static void best_effort_tcp_connect(uint16_t port) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return;
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    (void)connect(fd, (struct sockaddr *)&addr, (socklen_t)sizeof(addr));
+    (void)close(fd);
+}
+#endif
 
 static void proto_dump_sink(void *user_data, const char *data, size_t size) {
     (void)data;
@@ -233,6 +294,8 @@ static void test_context_create_with_options_smoke(void) {
     secs_context_options_t def;
     memset(&def, 0, sizeof(def));
     secs_context_options_init_default(&def);
+    /* NULL 入参应安全 */
+    secs_context_options_init_default(NULL);
     if (def.io_threads != 1) {
         fprintf(stderr, "FAIL: secs_context_options_init_default io_threads=%zu\n",
                 def.io_threads);
@@ -299,6 +362,129 @@ static void test_hsms_open_passive_ip_invalid_cases(void) {
     secs_context_destroy(ctx);
 }
 
+#if defined(__unix__) || defined(__APPLE__)
+struct open_ip_args {
+    secs_hsms_session_t *sess;
+    const char *ip;
+    uint16_t port;
+    secs_error_t out_err;
+};
+
+static void *open_passive_ip_thread(void *p) {
+    struct open_ip_args *args = (struct open_ip_args *)p;
+    args->out_err = secs_hsms_session_open_passive_ip(args->sess, args->ip, args->port);
+    return NULL;
+}
+#endif
+
+static void test_hsms_open_ip_smoke(void) {
+#if !defined(__unix__) && !defined(__APPLE__)
+    /* 非 UNIX 环境：跳过该用例（本仓库主要面向 UNIX）。 */
+    return;
+#else
+    uint16_t port = 0;
+    if (!pick_free_loopback_tcp_port(&port)) {
+        /* 某些沙箱环境会禁止创建 socket（EPERM）。此时跳过该用例，不影响其它覆盖率/功能。 */
+        return;
+    }
+
+    secs_context_t *ctx = NULL;
+    expect_ok("secs_context_create(open_ip)", secs_context_create(&ctx));
+
+    secs_hsms_session_options_t opt;
+    memset(&opt, 0, sizeof(opt));
+    opt.session_id = 0x3333;
+    opt.t3_ms = 2000;
+    opt.t5_ms = 200;
+    opt.t6_ms = 2000;
+    opt.t7_ms = 2000;
+    opt.t8_ms = 2000;
+    opt.linktest_interval_ms = 0;
+    opt.auto_reconnect = 0;
+    opt.passive_accept_select = 1;
+
+    secs_hsms_session_t *server = NULL;
+    secs_hsms_session_t *client = NULL;
+    expect_ok("secs_hsms_session_create(open_ip server)",
+              secs_hsms_session_create(ctx, &opt, &server));
+    expect_ok("secs_hsms_session_create(open_ip client)",
+              secs_hsms_session_create(ctx, &opt, &client));
+
+    struct open_ip_args args;
+    memset(&args, 0, sizeof(args));
+    args.sess = server;
+    args.ip = "127.0.0.1";
+    args.port = port;
+
+    pthread_t th;
+    int started = pthread_create(&th, NULL, open_passive_ip_thread, &args);
+    if (started != 0) {
+        fprintf(stderr, "FAIL: pthread_create(open_passive_ip)\n");
+        ++g_failures;
+        goto cleanup;
+    }
+
+    /* 等待 server bind/listen */
+    {
+        struct timespec req;
+        req.tv_sec = 0;
+        req.tv_nsec = 20 * 1000 * 1000;
+        (void)nanosleep(&req, NULL);
+    }
+
+    secs_error_t active_err;
+    memset(&active_err, 0, sizeof(active_err));
+    int active_ok = 0;
+    for (int i = 0; i < 20; ++i) {
+        active_err = secs_hsms_session_open_active_ip(client, "127.0.0.1", port);
+        if (active_err.value == 0) {
+            active_ok = 1;
+            break;
+        }
+        struct timespec req;
+        req.tv_sec = 0;
+        req.tv_nsec = 10 * 1000 * 1000;
+        (void)nanosleep(&req, NULL);
+    }
+    if (!active_ok) {
+        failf("secs_hsms_session_open_active_ip(loopback)", active_err);
+        /* 避免 server 线程永久卡在 accept：尽力触发一次连接以解锁 accept。 */
+        best_effort_tcp_connect(port);
+    }
+
+    if (started == 0) {
+        (void)pthread_join(th, NULL);
+        if (active_ok) {
+            expect_ok("secs_hsms_session_open_passive_ip(loopback)", args.out_err);
+        }
+    }
+
+    if (active_ok && args.out_err.value == 0) {
+        int selected = 0;
+        expect_ok("secs_hsms_session_is_selected(open_ip client)",
+                  secs_hsms_session_is_selected(client, &selected));
+        if (!selected) {
+            fprintf(stderr, "FAIL: open_ip client not selected\n");
+            ++g_failures;
+        }
+        selected = 0;
+        expect_ok("secs_hsms_session_is_selected(open_ip server)",
+                  secs_hsms_session_is_selected(server, &selected));
+        if (!selected) {
+            fprintf(stderr, "FAIL: open_ip server not selected\n");
+            ++g_failures;
+        }
+    }
+
+cleanup:
+    (void)secs_hsms_session_stop(client);
+    (void)secs_hsms_session_stop(server);
+    secs_hsms_session_destroy(client);
+    secs_hsms_session_destroy(server);
+    secs_context_destroy(ctx);
+#endif
+}
+
 static void test_invalid_argument_fast_fail(void) {
     /* 这些用例不追求业务意义，主要用于覆盖“参数校验/快速失败”分支，且必须不阻塞/不崩溃。
      */
@@ -316,6 +502,10 @@ static void test_invalid_argument_fast_fail(void) {
     secs_hsms_data_message_free(NULL);
     secs_data_message_free(NULL);
     secs_hsms_connection_destroy(NULL);
+    secs_sml_runtime_destroy(NULL);
+    secs_sml_render_context_destroy(NULL);
+    secs_sml_render_context_clear(NULL);
+    secs_sml_match_traces_free(NULL, 123);
 
     secs_context_t *ctx = NULL;
     expect_ok("secs_context_create(valid)", secs_context_create(&ctx));
@@ -375,6 +565,64 @@ static void test_invalid_argument_fast_fail(void) {
                   secs_sml_runtime_create(&rt));
         expect_err("secs_sml_runtime_load(NULL)",
                    secs_sml_runtime_load(NULL, "x", 1));
+
+        expect_err("secs_sml_render_context_create(NULL)",
+                   secs_sml_render_context_create(NULL));
+        secs_sml_render_context_t *rctx = NULL;
+        expect_ok("secs_sml_render_context_create(valid)",
+                  secs_sml_render_context_create(&rctx));
+
+        secs_ii_item_t *tmp = NULL;
+        expect_ok("secs_ii_item_create_ascii(tmp)",
+                  secs_ii_item_create_ascii("x", 1, &tmp));
+        expect_err("secs_sml_render_context_set(NULL ctx)",
+                   secs_sml_render_context_set(NULL, "X", tmp));
+        expect_err("secs_sml_render_context_set(NULL name)",
+                   secs_sml_render_context_set(rctx, NULL, tmp));
+        expect_err("secs_sml_render_context_set(NULL value)",
+                   secs_sml_render_context_set(rctx, "X", NULL));
+        secs_ii_item_destroy(tmp);
+        secs_sml_render_context_destroy(rctx);
+
+        {
+            uint8_t *body = NULL;
+            size_t body_n = 0;
+            char *out_name = NULL;
+            secs_sml_match_trace_t *traces = NULL;
+            size_t trace_n = 0;
+
+            expect_err("secs_sml_runtime_encode_message_body(NULL rt)",
+                       secs_sml_runtime_encode_message_body(
+                           NULL, "x", NULL, &body, &body_n, NULL, NULL, NULL));
+            expect_err("secs_sml_runtime_encode_message_body(NULL name)",
+                       secs_sml_runtime_encode_message_body(
+                           rt, NULL, NULL, &body, &body_n, NULL, NULL, NULL));
+            expect_err("secs_sml_runtime_encode_message_body(NULL out_body)",
+                       secs_sml_runtime_encode_message_body(
+                           rt, "x", NULL, NULL, &body_n, NULL, NULL, NULL));
+
+            expect_err("secs_sml_runtime_match_response_with_context(NULL rt)",
+                       secs_sml_runtime_match_response_with_context(
+                           NULL, 1, 1, NULL, 0, NULL, &out_name));
+            expect_err("secs_sml_runtime_match_response_with_context(NULL out)",
+                       secs_sml_runtime_match_response_with_context(
+                           rt, 1, 1, NULL, 0, NULL, NULL));
+
+            expect_err("secs_sml_runtime_match_response_with_trace(NULL rt)",
+                       secs_sml_runtime_match_response_with_trace(
+                           NULL,
+                           1,
+                           1,
+                           NULL,
+                           0,
+                           NULL,
+                           &out_name,
+                           &traces,
+                           &trace_n));
+            expect_err("secs_sml_runtime_match_response_with_trace(NULL out_name)",
+                       secs_sml_runtime_match_response_with_trace(
+                           rt, 1, 1, NULL, 0, NULL, NULL, &traces, &trace_n));
+        }
         secs_sml_runtime_destroy(rt);
     }
 
@@ -564,6 +812,14 @@ static void test_invalid_argument_fast_fail(void) {
         expect_err("secs_protocol_session_request(NULL)",
                    secs_protocol_session_request(NULL, 1, 1, NULL, 0, 1, NULL));
         secs_protocol_session_destroy(NULL);
+    }
+
+    /* CEID dispatcher 参数校验 */
+    {
+        expect_err("secs_ceid_dispatcher_clear_default_handler(NULL)",
+                   secs_ceid_dispatcher_clear_default_handler(NULL));
+        expect_err("secs_ceid_dispatcher_erase_handler(NULL)",
+                   secs_ceid_dispatcher_erase_handler(NULL, 1));
     }
 
     /* Protocol：ctx 与 hsms_session 所属 ctx 不一致必须拒绝（避免跨 io_context
@@ -1333,24 +1589,393 @@ static void test_sml_runtime_placeholders(void) {
     secs_sml_runtime_destroy(rt);
 
     /*
-     * 负例：条件期望值中包含占位符应被解析器拒绝（sml.parser/invalid_condition=7）。
+     * 负例：索引语义约束：(n) 与 [i] 互斥，组合写法应被解析器拒绝
+     * （sml.parser/invalid_condition=7）。
      */
     {
         secs_sml_runtime_t *bad_rt = NULL;
-        expect_ok("secs_sml_runtime_create(bad placeholder expected)",
+        expect_ok("secs_sml_runtime_create(bad index combination)",
                   secs_sml_runtime_create(&bad_rt));
         const char *bad = "a: S1F1 <L>.\n"
                           "rsp: S1F2 <L>.\n"
-                          "if (a(1)==<A MDLN>) rsp.\n";
+                          "if (a(1)[1]==<A \"x\">) rsp.\n";
         secs_error_t err = secs_sml_runtime_load(bad_rt, bad, strlen(bad));
-        expect_err("secs_sml_runtime_load(bad placeholder expected)", err);
+        expect_err("secs_sml_runtime_load(bad index combination)", err);
         if (err.category == NULL || strcmp(err.category, "sml.parser") != 0 ||
             err.value != 7) {
-            failf("bad placeholder expected should be sml.parser/invalid_condition",
+            failf("bad index combination should be sml.parser/invalid_condition",
                   err);
         }
         secs_sml_runtime_destroy(bad_rt);
     }
+}
+
+static void test_sml_render_context_lifecycle(void) {
+    secs_sml_render_context_t *ctx = NULL;
+    expect_ok("secs_sml_render_context_create", secs_sml_render_context_create(&ctx));
+
+    secs_ii_item_t *mdln = NULL;
+    expect_ok("secs_ii_item_create_ascii(MDLN)",
+              secs_ii_item_create_ascii("MODEL-X", 7, &mdln));
+    expect_ok("secs_sml_render_context_set(MDLN)",
+              secs_sml_render_context_set(ctx, "MDLN", mdln));
+    secs_ii_item_destroy(mdln);
+
+    /* clear 后可复用 */
+    secs_sml_render_context_clear(ctx);
+
+    uint16_t ceid = 0x1234;
+    secs_ii_item_t *ceid_item = NULL;
+    expect_ok("secs_ii_item_create_u2(CEID)",
+              secs_ii_item_create_u2(&ceid, 1, &ceid_item));
+    expect_ok("secs_sml_render_context_set(CEID)",
+              secs_sml_render_context_set(ctx, "CEID", ceid_item));
+    secs_ii_item_destroy(ceid_item);
+
+    secs_sml_render_context_destroy(ctx);
+}
+
+static void test_sml_runtime_encode_message_body_with_context(void) {
+    secs_sml_runtime_t *rt = NULL;
+    expect_ok("secs_sml_runtime_create(encode ctx)", secs_sml_runtime_create(&rt));
+
+    const char *sml = "req: S1F1 W <A MDLN>.\n"
+                      "rsp: S1F2 <L <A \"OK\">>.\n"
+                      "if (req) rsp.\n";
+    expect_ok("secs_sml_runtime_load(encode ctx)",
+              secs_sml_runtime_load(rt, sml, strlen(sml)));
+
+    secs_sml_render_context_t *ctx = NULL;
+    expect_ok("secs_sml_render_context_create(encode ctx)",
+              secs_sml_render_context_create(&ctx));
+
+    /* 负例：缺失变量，应该返回 sml.render/missing_variable（value=1） */
+    {
+        uint8_t *body = NULL;
+        size_t body_n = 0;
+        secs_error_t err = secs_sml_runtime_encode_message_body(
+            rt, "req", ctx, &body, &body_n, NULL, NULL, NULL);
+        expect_err("secs_sml_runtime_encode_message_body(missing var)", err);
+        if (err.category == NULL || strcmp(err.category, "sml.render") != 0 ||
+            err.value != 1) {
+            failf("encode(missing var) should be sml.render/missing_variable", err);
+        }
+        if (body != NULL || body_n != 0) {
+            fprintf(stderr,
+                    "FAIL: encode(missing var) expected (body=NULL, body_n=0)\n");
+            ++g_failures;
+            if (body) {
+                secs_free(body);
+            }
+        }
+    }
+
+    /* 正例：注入 MDLN 后可正常渲染编码 */
+    {
+        secs_ii_item_t *mdln = NULL;
+        expect_ok("secs_ii_item_create_ascii(MDLN)",
+                  secs_ii_item_create_ascii("HELLO", 5, &mdln));
+        expect_ok("secs_sml_render_context_set(MDLN)",
+                  secs_sml_render_context_set(ctx, "MDLN", mdln));
+        secs_ii_item_destroy(mdln);
+
+        uint8_t *body = NULL;
+        size_t body_n = 0;
+        uint8_t stream = 0;
+        uint8_t function = 0;
+        int w_bit = 0;
+        expect_ok("secs_sml_runtime_encode_message_body(req)",
+                  secs_sml_runtime_encode_message_body(
+                      rt, "req", ctx, &body, &body_n, &stream, &function, &w_bit));
+        if (stream != 1u || function != 1u || w_bit != 1) {
+            fprintf(stderr, "FAIL: encode(req) meta mismatch\n");
+            ++g_failures;
+        }
+
+        size_t consumed = 0;
+        secs_ii_item_t *decoded = NULL;
+        expect_ok("secs_ii_decode_one(req body)",
+                  secs_ii_decode_one(body, body_n, &consumed, &decoded));
+
+        secs_ii_item_type_t ty;
+        expect_ok("secs_ii_item_get_type(req body)",
+                  secs_ii_item_get_type(decoded, &ty));
+        if (ty != SECS_II_ITEM_ASCII) {
+            fprintf(stderr, "FAIL: encode(req) expected ASCII item\n");
+            ++g_failures;
+        } else {
+            const char *p = NULL;
+            size_t n = 0;
+            expect_ok("secs_ii_item_ascii_view(req body)",
+                      secs_ii_item_ascii_view(decoded, &p, &n));
+            if (!p || n != 5 || memcmp(p, "HELLO", 5) != 0) {
+                fprintf(stderr, "FAIL: encode(req) ASCII mismatch\n");
+                ++g_failures;
+            }
+        }
+
+        secs_ii_item_destroy(decoded);
+        secs_free(body);
+    }
+
+    secs_sml_render_context_destroy(ctx);
+    secs_sml_runtime_destroy(rt);
+}
+
+static void test_sml_runtime_match_response_with_context(void) {
+    secs_sml_runtime_t *rt = NULL;
+    expect_ok("secs_sml_runtime_create(match ctx)", secs_sml_runtime_create(&rt));
+
+    const char *sml = "req: S1F1 <L <U2 1> <U2 2>>.\n"
+                      "rsp: S1F2 <L>.\n"
+                      "if (req[1]==<U2 EXPECTED>) rsp.\n";
+    expect_ok("secs_sml_runtime_load(match ctx)",
+              secs_sml_runtime_load(rt, sml, strlen(sml)));
+
+    /* 构造 incoming body：<L <U2 1> <U2 2>> */
+    secs_ii_item_t *body_item = NULL;
+    expect_ok("secs_ii_item_create_list(match ctx)",
+              secs_ii_item_create_list(&body_item));
+    {
+        uint16_t v0 = 1;
+        uint16_t v1 = 2;
+        secs_ii_item_t *u2_0 = NULL;
+        secs_ii_item_t *u2_1 = NULL;
+        expect_ok("secs_ii_item_create_u2(v0)", secs_ii_item_create_u2(&v0, 1, &u2_0));
+        expect_ok("secs_ii_item_create_u2(v1)", secs_ii_item_create_u2(&v1, 1, &u2_1));
+        expect_ok("secs_ii_item_list_append(v0)",
+                  secs_ii_item_list_append(body_item, u2_0));
+        expect_ok("secs_ii_item_list_append(v1)",
+                  secs_ii_item_list_append(body_item, u2_1));
+        secs_ii_item_destroy(u2_0);
+        secs_ii_item_destroy(u2_1);
+    }
+
+    uint8_t *body = NULL;
+    size_t body_n = 0;
+    expect_ok("secs_ii_encode(match ctx)", secs_ii_encode(body_item, &body, &body_n));
+    secs_ii_item_destroy(body_item);
+
+    /* ctx 为空：应不命中 */
+    {
+        char *out_name = NULL;
+        expect_ok("secs_sml_runtime_match_response_with_context(no ctx)",
+                  secs_sml_runtime_match_response_with_context(
+                      rt, 1, 1, body, body_n, NULL, &out_name));
+        if (out_name) {
+            fprintf(stderr,
+                    "FAIL: match_response_with_context(no ctx) expected NULL\n");
+            ++g_failures;
+            secs_free(out_name);
+        }
+    }
+
+    /* 注入 EXPECTED=2：应命中 rsp */
+    {
+        secs_sml_render_context_t *ctx = NULL;
+        expect_ok("secs_sml_render_context_create(match ctx)",
+                  secs_sml_render_context_create(&ctx));
+        uint16_t expected = 2;
+        secs_ii_item_t *expected_item = NULL;
+        expect_ok("secs_ii_item_create_u2(EXPECTED)",
+                  secs_ii_item_create_u2(&expected, 1, &expected_item));
+        expect_ok("secs_sml_render_context_set(EXPECTED)",
+                  secs_sml_render_context_set(ctx, "EXPECTED", expected_item));
+        secs_ii_item_destroy(expected_item);
+
+        char *out_name = NULL;
+        expect_ok("secs_sml_runtime_match_response_with_context(match)",
+                  secs_sml_runtime_match_response_with_context(
+                      rt, 1, 1, body, body_n, ctx, &out_name));
+        if (!out_name || strcmp(out_name, "rsp") != 0) {
+            fprintf(stderr, "FAIL: match_response_with_context expected rsp\n");
+            ++g_failures;
+        }
+        if (out_name) {
+            secs_free(out_name);
+        }
+        secs_sml_render_context_destroy(ctx);
+    }
+
+    secs_free(body);
+    secs_sml_runtime_destroy(rt);
+}
+
+static void test_sml_runtime_match_response_with_trace(void) {
+    enum {
+        REASON_STREAM_FUNCTION_MISMATCH = 0,
+        REASON_INDEX_OUT_OF_BOUNDS = 1,
+        REASON_LIST_INDEX_OUT_OF_BOUNDS = 2,
+        REASON_RENDER_MISSING_VARIABLE = 3,
+        REASON_RENDER_TYPE_MISMATCH = 4,
+        REASON_EXPECTED_VALUE_MISMATCH = 5,
+        REASON_NOT_A_LIST = 6,
+    };
+
+    secs_sml_runtime_t *rt = NULL;
+    expect_ok("secs_sml_runtime_create(trace)", secs_sml_runtime_create(&rt));
+
+    const char *sml = "req: S1F1 <L <U2 1> <U2 2>>.\n"
+                      "rsp1: S1F2 <L>.\n"
+                      "rsp2: S1F3 <L>.\n"
+                      "if (req[1]==<U2 999>) rsp1.\n"
+                      "if (req[1]==<U2 EXPECTED>) rsp2.\n";
+    expect_ok("secs_sml_runtime_load(trace)", secs_sml_runtime_load(rt, sml, strlen(sml)));
+
+    /* incoming body：<L <U2 1> <U2 2>> */
+    secs_ii_item_t *body_item = NULL;
+    expect_ok("secs_ii_item_create_list(trace)", secs_ii_item_create_list(&body_item));
+    {
+        uint16_t v0 = 1;
+        uint16_t v1 = 2;
+        secs_ii_item_t *u2_0 = NULL;
+        secs_ii_item_t *u2_1 = NULL;
+        expect_ok("secs_ii_item_create_u2(trace v0)", secs_ii_item_create_u2(&v0, 1, &u2_0));
+        expect_ok("secs_ii_item_create_u2(trace v1)", secs_ii_item_create_u2(&v1, 1, &u2_1));
+        expect_ok("secs_ii_item_list_append(trace v0)",
+                  secs_ii_item_list_append(body_item, u2_0));
+        expect_ok("secs_ii_item_list_append(trace v1)",
+                  secs_ii_item_list_append(body_item, u2_1));
+        secs_ii_item_destroy(u2_0);
+        secs_ii_item_destroy(u2_1);
+    }
+
+    uint8_t *body = NULL;
+    size_t body_n = 0;
+    expect_ok("secs_ii_encode(trace)", secs_ii_encode(body_item, &body, &body_n));
+    secs_ii_item_destroy(body_item);
+
+    /* 未命中：应返回 traces（规则 0: mismatch；规则 1: missing variable） */
+    {
+        char *out_name = NULL;
+        secs_sml_match_trace_t *traces = NULL;
+        size_t trace_n = 0;
+        expect_ok("secs_sml_runtime_match_response_with_trace(no match)",
+                  secs_sml_runtime_match_response_with_trace(
+                      rt, 1, 1, body, body_n, NULL, &out_name, &traces, &trace_n));
+        if (out_name) {
+            fprintf(stderr, "FAIL: match_response_with_trace expected no match\n");
+            ++g_failures;
+            secs_free(out_name);
+        }
+        if (!traces || trace_n != 2) {
+            fprintf(stderr,
+                    "FAIL: match_response_with_trace expected 2 traces\n");
+            ++g_failures;
+        } else {
+            if (traces[0].rule_index != 0 ||
+                traces[0].condition_message_name == NULL ||
+                strcmp(traces[0].condition_message_name, "req") != 0 ||
+                traces[0].has_list_index != 1 || traces[0].list_index != 1 ||
+                traces[0].reason != REASON_EXPECTED_VALUE_MISMATCH ||
+                traces[0].detail == NULL ||
+                strstr(traces[0].detail, "mismatch") == NULL) {
+                fprintf(stderr, "FAIL: trace[0] unexpected content\n");
+                ++g_failures;
+            }
+            if (traces[1].rule_index != 1 ||
+                traces[1].reason != REASON_RENDER_MISSING_VARIABLE ||
+                traces[1].detail == NULL ||
+                strstr(traces[1].detail, "missing") == NULL) {
+                fprintf(stderr, "FAIL: trace[1] unexpected content\n");
+                ++g_failures;
+            }
+        }
+        secs_sml_match_traces_free(traces, trace_n);
+    }
+
+    /* 命中：应返回 name 且 traces 为空 */
+    {
+        secs_sml_render_context_t *ctx = NULL;
+        expect_ok("secs_sml_render_context_create(trace match)",
+                  secs_sml_render_context_create(&ctx));
+        uint16_t expected = 2;
+        secs_ii_item_t *expected_item = NULL;
+        expect_ok("secs_ii_item_create_u2(EXPECTED trace)",
+                  secs_ii_item_create_u2(&expected, 1, &expected_item));
+        expect_ok("secs_sml_render_context_set(EXPECTED trace)",
+                  secs_sml_render_context_set(ctx, "EXPECTED", expected_item));
+        secs_ii_item_destroy(expected_item);
+
+        char *out_name = NULL;
+        secs_sml_match_trace_t *traces = NULL;
+        size_t trace_n = 0;
+        expect_ok("secs_sml_runtime_match_response_with_trace(match)",
+                  secs_sml_runtime_match_response_with_trace(
+                      rt, 1, 1, body, body_n, ctx, &out_name, &traces, &trace_n));
+        if (!out_name || strcmp(out_name, "rsp2") != 0) {
+            fprintf(stderr, "FAIL: match_response_with_trace expected rsp2\n");
+            ++g_failures;
+        }
+        if (traces || trace_n != 0) {
+            fprintf(stderr, "FAIL: match_response_with_trace(match) expected empty traces\n");
+            ++g_failures;
+            secs_sml_match_traces_free(traces, trace_n);
+        }
+        if (out_name) {
+            secs_free(out_name);
+        }
+        secs_sml_render_context_destroy(ctx);
+    }
+
+    /* 轻量循环：反复分配/释放 traces，辅助检查泄漏/悬空 */
+    for (int i = 0; i < 50; ++i) {
+        char *out_name = NULL;
+        secs_sml_match_trace_t *traces = NULL;
+        size_t trace_n = 0;
+        expect_ok("secs_sml_runtime_match_response_with_trace(loop)",
+                  secs_sml_runtime_match_response_with_trace(
+                      rt, 1, 1, body, body_n, NULL, &out_name, &traces, &trace_n));
+        if (out_name) {
+            secs_free(out_name);
+        }
+        secs_sml_match_traces_free(traces, trace_n);
+    }
+
+    secs_free(body);
+    secs_sml_runtime_destroy(rt);
+}
+
+static void test_sml_runtime_match_response_with_trace_empty_rules(void) {
+    secs_sml_runtime_t *rt = NULL;
+    expect_ok("secs_sml_runtime_create(trace empty)",
+              secs_sml_runtime_create(&rt));
+
+    /* 不含任何 if 规则：traces 应为空且不返回响应名 */
+    const char *sml = "req: S1F1 <L>.\n"
+                      "rsp: S1F2 <L>.\n";
+    expect_ok("secs_sml_runtime_load(trace empty)",
+              secs_sml_runtime_load(rt, sml, strlen(sml)));
+
+    secs_ii_item_t *body_item = NULL;
+    expect_ok("secs_ii_item_create_list(trace empty)",
+              secs_ii_item_create_list(&body_item));
+
+    uint8_t *body = NULL;
+    size_t body_n = 0;
+    expect_ok("secs_ii_encode(trace empty)",
+              secs_ii_encode(body_item, &body, &body_n));
+    secs_ii_item_destroy(body_item);
+
+    char *out_name = NULL;
+    secs_sml_match_trace_t *traces = NULL;
+    size_t trace_n = 123;
+    expect_ok("secs_sml_runtime_match_response_with_trace(empty rules)",
+              secs_sml_runtime_match_response_with_trace(
+                  rt, 1, 1, body, body_n, NULL, &out_name, &traces, &trace_n));
+    if (out_name || traces || trace_n != 0) {
+        fprintf(stderr,
+                "FAIL: match_response_with_trace(empty rules) expected "
+                "out_name=NULL traces=NULL trace_n=0\n");
+        ++g_failures;
+    }
+    if (out_name) {
+        secs_free(out_name);
+    }
+    secs_sml_match_traces_free(traces, trace_n);
+    secs_free(body);
+
+    secs_sml_runtime_destroy(rt);
 }
 
 struct open_args {
@@ -1673,6 +2298,102 @@ static secs_error_t build_ceid_request_body(uint32_t ceid,
         if (err.value != 0) {
             goto cleanup;
         }
+        err = secs_ii_item_create_list(&empty_list);
+        if (err.value != 0) {
+            goto cleanup;
+        }
+
+        err = secs_ii_item_list_append(body, dataid_item);
+        if (err.value != 0) {
+            goto cleanup;
+        }
+        err = secs_ii_item_list_append(body, ceid_item);
+        if (err.value != 0) {
+            goto cleanup;
+        }
+        err = secs_ii_item_list_append(body, empty_list);
+        if (err.value != 0) {
+            goto cleanup;
+        }
+    }
+
+    err = secs_ii_encode(body, out_body, out_body_n);
+
+cleanup:
+    secs_ii_item_destroy(dataid_item);
+    secs_ii_item_destroy(ceid_item);
+    secs_ii_item_destroy(empty_list);
+    secs_ii_item_destroy(body);
+    return err;
+}
+
+typedef enum ceid_num_type {
+    CEID_NUM_U1 = 1,
+    CEID_NUM_U2 = 2,
+    CEID_NUM_U4 = 4,
+    CEID_NUM_U8 = 8,
+} ceid_num_type_t;
+
+static secs_error_t build_ceid_request_body_with_ceid_values(ceid_num_type_t ty,
+                                                             const void *values,
+                                                             size_t values_n,
+                                                             uint8_t **out_body,
+                                                             size_t *out_body_n) {
+    if (!out_body || !out_body_n) {
+        secs_error_t err;
+        err.value = (int)SECS_C_API_INVALID_ARGUMENT;
+        err.category = "secs.c_api";
+        return err;
+    }
+    if (!values && values_n != 0) {
+        secs_error_t err;
+        err.value = (int)SECS_C_API_INVALID_ARGUMENT;
+        err.category = "secs.c_api";
+        return err;
+    }
+
+    *out_body = NULL;
+    *out_body_n = 0;
+
+    secs_ii_item_t *body = NULL;
+    secs_ii_item_t *dataid_item = NULL;
+    secs_ii_item_t *ceid_item = NULL;
+    secs_ii_item_t *empty_list = NULL;
+
+    secs_error_t err = secs_ii_item_create_list(&body);
+    if (err.value != 0) {
+        return err;
+    }
+
+    {
+        uint32_t dataid = 1;
+        err = secs_ii_item_create_u4(&dataid, 1, &dataid_item);
+        if (err.value != 0) {
+            goto cleanup;
+        }
+
+        switch (ty) {
+        case CEID_NUM_U1:
+            err = secs_ii_item_create_u1((const uint8_t *)values, values_n, &ceid_item);
+            break;
+        case CEID_NUM_U2:
+            err = secs_ii_item_create_u2((const uint16_t *)values, values_n, &ceid_item);
+            break;
+        case CEID_NUM_U4:
+            err = secs_ii_item_create_u4((const uint32_t *)values, values_n, &ceid_item);
+            break;
+        case CEID_NUM_U8:
+            err = secs_ii_item_create_u8((const uint64_t *)values, values_n, &ceid_item);
+            break;
+        default:
+            err.value = (int)SECS_C_API_INVALID_ARGUMENT;
+            err.category = "secs.c_api";
+            break;
+        }
+        if (err.value != 0) {
+            goto cleanup;
+        }
+
         err = secs_ii_item_create_list(&empty_list);
         if (err.value != 0) {
             goto cleanup;
@@ -2449,8 +3170,284 @@ static void test_hsms_protocol_loopback(void) {
             secs_free(req);
         }
 
+        /* 5) 覆盖 CEID 提取：U1/U2/U8 标量（extract_u32_scalar 分支） */
+        {
+            uint8_t *req = NULL;
+            size_t req_n = 0;
+            uint16_t ceid_u2 = 100;
+            expect_ok("build_ceid_request_body_with_ceid_values(U2=100)",
+                      build_ceid_request_body_with_ceid_values(
+                          CEID_NUM_U2, &ceid_u2, 1, &req, &req_n));
+
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            int has_req = 0;
+            uint32_t req_ceid = 0;
+            int has_rep = 0;
+            uint32_t rep_ceid = 0;
+
+            expect_ok("secs_protocol_session_request_with_ceid_list_path(U2=100)",
+                      secs_protocol_session_request_with_ceid_list_path(
+                          client_proto,
+                          6,
+                          11,
+                          req,
+                          req_n,
+                          1000,
+                          ceid_path,
+                          1,
+                          NULL,
+                          1,
+                          &reply,
+                          &has_req,
+                          &req_ceid,
+                          &has_rep,
+                          &rep_ceid));
+            if (!has_req || req_ceid != 100u || !has_rep || rep_ceid != 100u) {
+                fprintf(stderr, "FAIL: CEID(U2) verify values mismatch\n");
+                ++g_failures;
+            }
+
+            secs_data_message_free(&reply);
+            secs_free(req);
+        }
+        {
+            uint8_t *req = NULL;
+            size_t req_n = 0;
+            uint8_t ceid_u1 = 100;
+            expect_ok("build_ceid_request_body_with_ceid_values(U1=100)",
+                      build_ceid_request_body_with_ceid_values(
+                          CEID_NUM_U1, &ceid_u1, 1, &req, &req_n));
+
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            int has_req = 0;
+            uint32_t req_ceid = 0;
+            int has_rep = 0;
+            uint32_t rep_ceid = 0;
+
+            expect_ok("secs_protocol_session_request_with_ceid_list_path(U1=100)",
+                      secs_protocol_session_request_with_ceid_list_path(
+                          client_proto,
+                          6,
+                          11,
+                          req,
+                          req_n,
+                          1000,
+                          ceid_path,
+                          1,
+                          NULL,
+                          1,
+                          &reply,
+                          &has_req,
+                          &req_ceid,
+                          &has_rep,
+                          &rep_ceid));
+            if (!has_req || req_ceid != 100u || !has_rep || rep_ceid != 100u) {
+                fprintf(stderr, "FAIL: CEID(U1) verify values mismatch\n");
+                ++g_failures;
+            }
+
+            secs_data_message_free(&reply);
+            secs_free(req);
+        }
+        {
+            uint8_t *req = NULL;
+            size_t req_n = 0;
+            uint64_t ceid_u8 = 100;
+            expect_ok("build_ceid_request_body_with_ceid_values(U8=100)",
+                      build_ceid_request_body_with_ceid_values(
+                          CEID_NUM_U8, &ceid_u8, 1, &req, &req_n));
+
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            int has_req = 0;
+            uint32_t req_ceid = 0;
+            int has_rep = 0;
+            uint32_t rep_ceid = 0;
+
+            expect_ok("secs_protocol_session_request_with_ceid_list_path(U8=100)",
+                      secs_protocol_session_request_with_ceid_list_path(
+                          client_proto,
+                          6,
+                          11,
+                          req,
+                          req_n,
+                          1000,
+                          ceid_path,
+                          1,
+                          NULL,
+                          1,
+                          &reply,
+                          &has_req,
+                          &req_ceid,
+                          &has_rep,
+                          &rep_ceid));
+            if (!has_req || req_ceid != 100u || !has_rep || rep_ceid != 100u) {
+                fprintf(stderr, "FAIL: CEID(U8) verify values mismatch\n");
+                ++g_failures;
+            }
+
+            secs_data_message_free(&reply);
+            secs_free(req);
+        }
+
+        /* 6) CEID 不是标量：应在发送前直接失败（verify_equal=1） */
+        {
+            uint8_t *req = NULL;
+            size_t req_n = 0;
+            const uint8_t ceid_u1s[2] = {1, 2};
+            expect_ok("build_ceid_request_body_with_ceid_values(U1=[1,2])",
+                      build_ceid_request_body_with_ceid_values(
+                          CEID_NUM_U1, ceid_u1s, 2, &req, &req_n));
+
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            int has_req = 1;
+            uint32_t req_ceid = 0;
+            int has_rep = 1;
+            uint32_t rep_ceid = 0;
+
+            secs_error_t err = secs_protocol_session_request_with_ceid_list_path(
+                client_proto,
+                6,
+                11,
+                req,
+                req_n,
+                1000,
+                ceid_path,
+                1,
+                NULL,
+                1,
+                &reply,
+                &has_req,
+                &req_ceid,
+                &has_rep,
+                &rep_ceid);
+            expect_err("secs_protocol_session_request_with_ceid_list_path(U1 multi)",
+                       err);
+            if (err.value != 4) {
+                failf("ceid multi expected secs.core invalid_argument", err);
+            }
+            if (reply.body != NULL || reply.body_n != 0) {
+                fprintf(stderr,
+                        "FAIL: CEID multi expected empty reply (not sent)\n");
+                ++g_failures;
+                secs_data_message_free(&reply);
+            }
+            if (has_req || has_rep) {
+                fprintf(stderr, "FAIL: CEID multi expected has_req/has_rep==0\n");
+                ++g_failures;
+            }
+
+            secs_free(req);
+        }
+        {
+            uint8_t *req = NULL;
+            size_t req_n = 0;
+            const uint16_t ceid_u2s[2] = {100, 101};
+            expect_ok("build_ceid_request_body_with_ceid_values(U2=[100,101])",
+                      build_ceid_request_body_with_ceid_values(
+                          CEID_NUM_U2, ceid_u2s, 2, &req, &req_n));
+
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            int has_req = 1;
+            uint32_t req_ceid = 0;
+            int has_rep = 1;
+            uint32_t rep_ceid = 0;
+
+            secs_error_t err = secs_protocol_session_request_with_ceid_list_path(
+                client_proto,
+                6,
+                11,
+                req,
+                req_n,
+                1000,
+                ceid_path,
+                1,
+                NULL,
+                1,
+                &reply,
+                &has_req,
+                &req_ceid,
+                &has_rep,
+                &rep_ceid);
+            expect_err("secs_protocol_session_request_with_ceid_list_path(U2 multi)",
+                       err);
+            if (err.value != 4) {
+                failf("ceid multi expected secs.core invalid_argument", err);
+            }
+            if (reply.body != NULL || reply.body_n != 0) {
+                fprintf(stderr,
+                        "FAIL: CEID multi expected empty reply (not sent)\n");
+                ++g_failures;
+                secs_data_message_free(&reply);
+            }
+            if (has_req || has_rep) {
+                fprintf(stderr, "FAIL: CEID multi expected has_req/has_rep==0\n");
+                ++g_failures;
+            }
+
+            secs_free(req);
+        }
+        {
+            uint8_t *req = NULL;
+            size_t req_n = 0;
+            const uint64_t too_big = (uint64_t)UINT32_MAX + 1ULL;
+            expect_ok("build_ceid_request_body_with_ceid_values(U8 too big)",
+                      build_ceid_request_body_with_ceid_values(
+                          CEID_NUM_U8, &too_big, 1, &req, &req_n));
+
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            int has_req = 1;
+            uint32_t req_ceid = 0;
+            int has_rep = 1;
+            uint32_t rep_ceid = 0;
+
+            secs_error_t err = secs_protocol_session_request_with_ceid_list_path(
+                client_proto,
+                6,
+                11,
+                req,
+                req_n,
+                1000,
+                ceid_path,
+                1,
+                NULL,
+                1,
+                &reply,
+                &has_req,
+                &req_ceid,
+                &has_rep,
+                &rep_ceid);
+            expect_err("secs_protocol_session_request_with_ceid_list_path(U8 too big)",
+                       err);
+            if (err.value != 4) {
+                failf("ceid too big expected secs.core invalid_argument", err);
+            }
+            if (reply.body != NULL || reply.body_n != 0) {
+                fprintf(stderr,
+                        "FAIL: CEID too big expected empty reply (not sent)\n");
+                ++g_failures;
+                secs_data_message_free(&reply);
+            }
+            if (has_req || has_rep) {
+                fprintf(stderr,
+                        "FAIL: CEID too big expected has_req/has_rep==0\n");
+                ++g_failures;
+            }
+
+            secs_free(req);
+        }
+
         expect_ok("secs_protocol_session_erase_handler(ceid dispatcher)",
                   secs_protocol_session_erase_handler(server_proto, 6, 11));
+        expect_ok("secs_ceid_dispatcher_erase_handler(777)",
+                  secs_ceid_dispatcher_erase_handler(cd, 777));
+        expect_ok("secs_ceid_dispatcher_clear_default_handler",
+                  secs_ceid_dispatcher_clear_default_handler(cd));
         secs_ceid_dispatcher_destroy(cd);
     }
 
@@ -2766,7 +3763,13 @@ int main(void) {
     test_ii_all_types_and_views();
     test_sml_runtime_basic();
     test_sml_runtime_placeholders();
+    test_sml_render_context_lifecycle();
+    test_sml_runtime_encode_message_body_with_context();
+    test_sml_runtime_match_response_with_context();
+    test_sml_runtime_match_response_with_trace();
+    test_sml_runtime_match_response_with_trace_empty_rules();
     test_hsms_open_passive_ip_invalid_cases();
+    test_hsms_open_ip_smoke();
     test_hsms_protocol_loopback();
 
     if (g_failures == 0) {
