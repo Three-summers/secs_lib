@@ -1,7 +1,7 @@
 # C API 易用性改进计划 (C API Usability Improvement Plan)
 
 > 文档创建日期：2026-01-18
-> 状态：P0/P1 已实现；P2 提案 (Partially Implemented)
+> 状态：P0/P1 已实现；P2（Sticky Error Context）仍为提案；另新增若干“对齐 C++ 易用性”的补强项
 
 本文档基于对当前 `secs_c_api` 的审查以及 `examples/c_api_sml_ceid_complete.c` 的痛点分析，旨在提出一套切实可行的改进方案，使 C API 的开发体验接近 C++，降低使用门槛。
 
@@ -143,6 +143,38 @@ if (secs_sml_ctx_get_last_error(ctx) != SECS_OK) {
     // 处理错误
 }
 ```
+
+### 3.5 Phase 5: Protocol Router 易用性对齐（stream default）[P0]
+
+**动机**：C++ 端 `secs::protocol::Router` 支持 3 级匹配（精确 / stream default / default），C 端此前只能设置“精确 + default”，导致大量 handler 被迫重复注册。
+
+**新增 C API（`include/secs/c_api.h`）**：
+
+- `secs_protocol_session_set_stream_default_handler()`
+- `secs_protocol_session_clear_stream_default_handler()`
+- `secs_protocol_session_set_sml_stream_default_handler()`（仅对某个 stream 使用 SML 自动回包）
+
+### 3.6 Phase 6: decoded handler（自动 decode/encode，贴近 C++ TypedHandler）[P1]
+
+**动机**：C++ 端 `TypedHandler` 自动处理“decode request body / encode reply body”，业务逻辑只需处理强类型/结构化数据。C 端此前需要在回调内手动调用 `secs_ii_decode_one/secs_ii_encode`，样板代码与内存管理噪音较高。
+
+**新增 C API（`include/secs/c_api.h`）**：
+
+- `secs_protocol_session_set_decoded_handler()`
+- `secs_protocol_session_set_decoded_stream_default_handler()`
+- `secs_protocol_session_set_decoded_default_handler()`
+
+**配套**：
+
+- `secs_ii_item_clone()`：如需在回调外保留 `decoded_body`，可克隆一份再持有。
+
+### 3.7 Phase 7: 提取 API 去 varargs（at_list_path）[P1]
+
+**动机**：`...` 的 `at_path` 系列要求每个 index 必须以 `size_t` 传入，否则可能触发未定义行为；同时动态路径也不适合 varargs。
+
+**新增 C API（`include/secs/c_api.h`）**：
+
+- `secs_ii_item_*_at_list_path()`：用 `indices[] + indices_n` 替代 varargs，语义与 `*_at_path` 对齐。
 
 ## 4. 实施策略
 

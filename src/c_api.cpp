@@ -810,6 +810,16 @@ secs_error_t secs_ii_item_create_ascii(const char *bytes,
     });
 }
 
+secs_error_t secs_ii_item_create_ascii_cstr(const char *value,
+                                            secs_ii_item_t **out_item) {
+    return guard_error([&]() -> secs_error_t {
+        if (!value) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        return secs_ii_item_create_ascii(value, std::strlen(value), out_item);
+    });
+}
+
 secs_error_t secs_ii_item_create_binary(const uint8_t *bytes,
                                         size_t n,
                                         secs_ii_item_t **out_item) {
@@ -972,6 +982,16 @@ secs_ii_item_create_f8(const double *v, size_t n, secs_ii_item_t **out_item) {
 
 void secs_ii_item_destroy(secs_ii_item_t *item) {
     guard_void([&]() { delete item; });
+}
+
+secs_error_t secs_ii_item_clone(const secs_ii_item_t *src,
+                                secs_ii_item_t **out_item) {
+    return guard_error([&]() -> secs_error_t {
+        if (!src) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        return new_item(src->item, out_item);
+    });
 }
 
 secs_error_t secs_ii_item_get_type(const secs_ii_item_t *item,
@@ -1340,6 +1360,39 @@ ii_item_at_path_va(const secs_ii_item_t *root,
     return cur;
 }
 
+[[nodiscard]] const secs::ii::Item *
+ii_item_at_list_path(const secs_ii_item_t *root,
+                     const size_t *indices,
+                     size_t indices_n,
+                     secs_error_t &out_err) noexcept {
+    if (!root) {
+        out_err = c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        return nullptr;
+    }
+    if (!indices && indices_n != 0) {
+        out_err = c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        return nullptr;
+    }
+
+    const secs::ii::Item *cur = &root->item;
+    for (size_t i = 0; i < indices_n; ++i) {
+        const size_t idx = indices[i];
+        const auto *list = cur->get_if<secs::ii::List>();
+        if (!list) {
+            out_err = c_api_err(SECS_C_API_INVALID_ARGUMENT);
+            return nullptr;
+        }
+        if (idx >= list->size()) {
+            out_err = c_api_err(SECS_C_API_INVALID_ARGUMENT);
+            return nullptr;
+        }
+        cur = &(*list)[idx];
+    }
+
+    out_err = ok();
+    return cur;
+}
+
 } // namespace
 
 secs_error_t secs_ii_item_get_ascii_at(const secs_ii_item_t *list,
@@ -1628,6 +1681,237 @@ secs_error_t secs_ii_item_get_boolean_at_path(const secs_ii_item_t *root,
     return ret;
 }
 
+// ---- *_at_list_path（array 版本，避免 C varargs UB） ---------------------------
+
+secs_error_t secs_ii_item_ascii_view_at_list_path(const secs_ii_item_t *root,
+                                                  const char **out_ptr,
+                                                  size_t *out_n,
+                                                  const size_t *indices,
+                                                  size_t indices_n) {
+    if (!root || !out_ptr || !out_n) {
+        return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+    }
+    *out_ptr = nullptr;
+    *out_n = 0;
+
+    return guard_error([&]() -> secs_error_t {
+        secs_error_t err = ok();
+        const auto *item = ii_item_at_list_path(root, indices, indices_n, err);
+        if (!secs_error_is_ok(err) || !item) {
+            return err;
+        }
+
+        const auto *a = item->get_if<secs::ii::ASCII>();
+        if (!a) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_ptr = a->value.data();
+        *out_n = a->value.size();
+        return ok();
+    });
+}
+
+secs_error_t secs_ii_item_binary_view_at_list_path(const secs_ii_item_t *root,
+                                                   const uint8_t **out_ptr,
+                                                   size_t *out_n,
+                                                   const size_t *indices,
+                                                   size_t indices_n) {
+    if (!root || !out_ptr || !out_n) {
+        return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+    }
+    *out_ptr = nullptr;
+    *out_n = 0;
+
+    return guard_error([&]() -> secs_error_t {
+        secs_error_t err = ok();
+        const auto *item = ii_item_at_list_path(root, indices, indices_n, err);
+        if (!secs_error_is_ok(err) || !item) {
+            return err;
+        }
+
+        const auto *b = item->get_if<secs::ii::Binary>();
+        if (!b) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_ptr = reinterpret_cast<const uint8_t *>(b->value.data());
+        *out_n = b->value.size();
+        return ok();
+    });
+}
+
+secs_error_t secs_ii_item_boolean_copy_at_list_path(const secs_ii_item_t *root,
+                                                    uint8_t **out_values01,
+                                                    size_t *out_n,
+                                                    const size_t *indices,
+                                                    size_t indices_n) {
+    if (!root || !out_values01 || !out_n) {
+        return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+    }
+    *out_values01 = nullptr;
+    *out_n = 0;
+
+    return guard_error([&]() -> secs_error_t {
+        secs_error_t err = ok();
+        const auto *item = ii_item_at_list_path(root, indices, indices_n, err);
+        if (!secs_error_is_ok(err) || !item) {
+            return err;
+        }
+
+        const auto *v = item->get_if<secs::ii::Boolean>();
+        if (!v) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        if (v->values.empty()) {
+            return ok();
+        }
+
+        auto *buf = static_cast<uint8_t *>(secs_malloc(v->values.size()));
+        if (!buf) {
+            return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+        }
+        for (size_t i = 0; i < v->values.size(); ++i) {
+            buf[i] = v->values[i] ? 1u : 0u;
+        }
+        *out_values01 = buf;
+        *out_n = v->values.size();
+        return ok();
+    });
+}
+
+#define SECS_II_VIEW_AT_LIST_PATH_IMPL(c_type, cpp_type, tag)                   \
+    secs_error_t secs_ii_item_##tag##_view_at_list_path(                        \
+        const secs_ii_item_t *root,                                             \
+        const c_type **out_ptr,                                                 \
+        size_t *out_n,                                                          \
+        const size_t *indices,                                                  \
+        size_t indices_n) {                                                     \
+        if (!root || !out_ptr || !out_n) {                                      \
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);                      \
+        }                                                                       \
+        *out_ptr = nullptr;                                                     \
+        *out_n = 0;                                                             \
+                                                                                \
+        return guard_error([&]() -> secs_error_t {                               \
+            secs_error_t err = ok();                                            \
+            const auto *item =                                                  \
+                ii_item_at_list_path(root, indices, indices_n, err);            \
+            if (!secs_error_is_ok(err) || !item) {                              \
+                return err;                                                     \
+            }                                                                   \
+                                                                                \
+            const auto *v = item->get_if<cpp_type>();                           \
+            if (!v) {                                                           \
+                return c_api_err(SECS_C_API_INVALID_ARGUMENT);                  \
+            }                                                                   \
+            *out_ptr = reinterpret_cast<const c_type *>(v->values.data());      \
+            *out_n = v->values.size();                                          \
+            return ok();                                                        \
+        });                                                                     \
+    }
+
+SECS_II_VIEW_AT_LIST_PATH_IMPL(int8_t, secs::ii::I1, i1)
+SECS_II_VIEW_AT_LIST_PATH_IMPL(int16_t, secs::ii::I2, i2)
+SECS_II_VIEW_AT_LIST_PATH_IMPL(int32_t, secs::ii::I4, i4)
+SECS_II_VIEW_AT_LIST_PATH_IMPL(int64_t, secs::ii::I8, i8)
+SECS_II_VIEW_AT_LIST_PATH_IMPL(uint8_t, secs::ii::U1, u1)
+SECS_II_VIEW_AT_LIST_PATH_IMPL(uint16_t, secs::ii::U2, u2)
+SECS_II_VIEW_AT_LIST_PATH_IMPL(uint32_t, secs::ii::U4, u4)
+SECS_II_VIEW_AT_LIST_PATH_IMPL(uint64_t, secs::ii::U8, u8)
+SECS_II_VIEW_AT_LIST_PATH_IMPL(float, secs::ii::F4, f4)
+SECS_II_VIEW_AT_LIST_PATH_IMPL(double, secs::ii::F8, f8)
+
+#undef SECS_II_VIEW_AT_LIST_PATH_IMPL
+
+secs_error_t secs_ii_item_get_u2_at_list_path(const secs_ii_item_t *root,
+                                             uint16_t *out_val,
+                                             const size_t *indices,
+                                             size_t indices_n) {
+    if (!root || !out_val) {
+        return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+    }
+    *out_val = 0;
+
+    return guard_error([&]() -> secs_error_t {
+        secs_error_t err = ok();
+        const auto *item = ii_item_at_list_path(root, indices, indices_n, err);
+        if (!secs_error_is_ok(err) || !item) {
+            return err;
+        }
+
+        const auto *u2 = item->get_if<secs::ii::U2>();
+        if (!u2 || u2->values.size() != 1) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_val = u2->values[0];
+        return ok();
+    });
+}
+
+#define SECS_II_GET_SCALAR_AT_LIST_PATH_IMPL(c_type, cpp_type, tag, convert_expr) \
+    secs_error_t secs_ii_item_get_##tag##_at_list_path(                          \
+        const secs_ii_item_t *root,                                              \
+        c_type *out_val,                                                         \
+        const size_t *indices,                                                   \
+        size_t indices_n) {                                                      \
+        if (!root || !out_val) {                                                 \
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);                       \
+        }                                                                        \
+        *out_val = {};                                                           \
+                                                                                 \
+        return guard_error([&]() -> secs_error_t {                                \
+            secs_error_t err = ok();                                             \
+            const auto *item =                                                   \
+                ii_item_at_list_path(root, indices, indices_n, err);             \
+            if (!secs_error_is_ok(err) || !item) {                               \
+                return err;                                                      \
+            }                                                                    \
+                                                                                 \
+            const auto *v = item->get_if<cpp_type>();                            \
+            if (!v || v->values.size() != 1) {                                   \
+                return c_api_err(SECS_C_API_INVALID_ARGUMENT);                   \
+            }                                                                    \
+            *out_val = (convert_expr);                                           \
+            return ok();                                                         \
+        });                                                                      \
+    }
+
+SECS_II_GET_SCALAR_AT_LIST_PATH_IMPL(int8_t, secs::ii::I1, i1, v->values[0])
+SECS_II_GET_SCALAR_AT_LIST_PATH_IMPL(int16_t, secs::ii::I2, i2, v->values[0])
+SECS_II_GET_SCALAR_AT_LIST_PATH_IMPL(int32_t, secs::ii::I4, i4, v->values[0])
+SECS_II_GET_SCALAR_AT_LIST_PATH_IMPL(int64_t, secs::ii::I8, i8, v->values[0])
+SECS_II_GET_SCALAR_AT_LIST_PATH_IMPL(uint8_t, secs::ii::U1, u1, v->values[0])
+SECS_II_GET_SCALAR_AT_LIST_PATH_IMPL(uint32_t, secs::ii::U4, u4, v->values[0])
+SECS_II_GET_SCALAR_AT_LIST_PATH_IMPL(uint64_t, secs::ii::U8, u8, v->values[0])
+SECS_II_GET_SCALAR_AT_LIST_PATH_IMPL(float, secs::ii::F4, f4, v->values[0])
+SECS_II_GET_SCALAR_AT_LIST_PATH_IMPL(double, secs::ii::F8, f8, v->values[0])
+
+#undef SECS_II_GET_SCALAR_AT_LIST_PATH_IMPL
+
+secs_error_t secs_ii_item_get_boolean_at_list_path(const secs_ii_item_t *root,
+                                                  uint8_t *out_val01,
+                                                  const size_t *indices,
+                                                  size_t indices_n) {
+    if (!root || !out_val01) {
+        return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+    }
+    *out_val01 = 0;
+
+    return guard_error([&]() -> secs_error_t {
+        secs_error_t err = ok();
+        const auto *item = ii_item_at_list_path(root, indices, indices_n, err);
+        if (!secs_error_is_ok(err) || !item) {
+            return err;
+        }
+
+        const auto *v = item->get_if<secs::ii::Boolean>();
+        if (!v || v->values.size() != 1) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_val01 = v->values[0] ? 1u : 0u;
+        return ok();
+    });
+}
+
 secs_error_t
 secs_ii_encode(const secs_ii_item_t *item, uint8_t **out_bytes, size_t *out_n) {
     return guard_error([&]() -> secs_error_t {
@@ -1768,6 +2052,16 @@ secs_error_t secs_sml_runtime_load(secs_sml_runtime_t *rt,
             return c_api_err(SECS_C_API_INVALID_ARGUMENT);
         const std::string_view sv{source ? source : "", source ? source_n : 0};
         return from_error_code(rt->rt.load(sv));
+    });
+}
+
+secs_error_t secs_sml_runtime_load_cstr(secs_sml_runtime_t *rt,
+                                        const char *source) {
+    return guard_error([&]() -> secs_error_t {
+        if (!rt || !source) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        return secs_sml_runtime_load(rt, source, std::strlen(source));
     });
 }
 
@@ -3186,6 +3480,218 @@ void secs_protocol_session_destroy(secs_protocol_session_t *sess) {
     });
 }
 
+namespace {
+
+[[nodiscard]] secs::protocol::Handler
+make_protocol_raw_handler(secs_protocol_handler_fn cb, void *user_data) {
+    return [cb, user_data](const secs::protocol::DataMessage &msg)
+               -> asio::awaitable<secs::protocol::HandlerResult> {
+        uint8_t *out_body = nullptr;
+        size_t out_n = 0;
+        try {
+            secs_data_message_view_t view{};
+            view.stream = msg.stream;
+            view.function = msg.function;
+            view.w_bit = msg.w_bit ? 1 : 0;
+            view.system_bytes = msg.system_bytes;
+            view.body = reinterpret_cast<const uint8_t *>(msg.body.data());
+            view.body_n = msg.body.size();
+
+            secs_error_t cec = cb(user_data, &view, &out_body, &out_n);
+
+            if (!secs_error_is_ok(cec)) {
+                if (out_body) {
+                    secs_free(out_body);
+                }
+                co_return secs::protocol::HandlerResult{
+                    make_error_code(errc::invalid_argument), {}};
+            }
+
+            if (!out_body && out_n != 0) {
+                co_return secs::protocol::HandlerResult{
+                    make_error_code(errc::invalid_argument), {}};
+            }
+
+            std::vector<byte> rsp;
+            rsp.resize(out_n);
+            if (out_n != 0) {
+                std::memcpy(rsp.data(), out_body, out_n);
+            }
+            if (out_body) {
+                secs_free(out_body);
+            }
+            co_return secs::protocol::HandlerResult{std::error_code{},
+                                                    std::move(rsp)};
+        } catch (...) {
+            if (out_body) {
+                secs_free(out_body);
+            }
+            co_return secs::protocol::HandlerResult{
+                make_error_code(errc::invalid_argument), {}};
+        }
+    };
+}
+
+[[nodiscard]] secs::protocol::Handler make_protocol_decoded_handler(
+    secs_protocol_decoded_handler_fn cb,
+    void *user_data,
+    secs::ii::DecodeLimits limits,
+    bool strict_consumed) {
+    return [cb,
+            user_data,
+            limits = std::move(limits),
+            strict_consumed](const secs::protocol::DataMessage &msg)
+               -> asio::awaitable<secs::protocol::HandlerResult> {
+        secs_ii_item_t *out_item_body = nullptr;
+        try {
+            secs_data_message_view_t view{};
+            view.stream = msg.stream;
+            view.function = msg.function;
+            view.w_bit = msg.w_bit ? 1 : 0;
+            view.system_bytes = msg.system_bytes;
+            view.body = reinterpret_cast<const uint8_t *>(msg.body.data());
+            view.body_n = msg.body.size();
+
+            secs::ii::Item decoded{secs::ii::List{}};
+            std::size_t consumed = 0;
+            const auto dec_ec = secs::ii::decode_one(
+                bytes_view{msg.body.data(), msg.body.size()},
+                decoded,
+                consumed,
+                limits);
+            if (dec_ec) {
+                co_return secs::protocol::HandlerResult{dec_ec, {}};
+            }
+            if (strict_consumed && consumed != msg.body.size()) {
+                co_return secs::protocol::HandlerResult{
+                    make_error_code(errc::invalid_argument), {}};
+            }
+
+            auto *decoded_handle =
+                new (std::nothrow) secs_ii_item(std::move(decoded));
+            if (!decoded_handle) {
+                co_return secs::protocol::HandlerResult{
+                    make_error_code(errc::out_of_memory), {}};
+            }
+            std::unique_ptr<secs_ii_item_t, void (*)(secs_ii_item_t *)>
+                decoded_guard(decoded_handle, secs_ii_item_destroy);
+
+            secs_error_t cec =
+                cb(user_data, &view, decoded_handle, &out_item_body);
+
+            std::unique_ptr<secs_ii_item_t, void (*)(secs_ii_item_t *)> rsp_item{
+                out_item_body, secs_ii_item_destroy};
+            // rsp_item 取得所有权后，避免异常路径/兜底清理重复释放。
+            out_item_body = nullptr;
+
+            if (!secs_error_is_ok(cec)) {
+                // 回调拒绝处理：不回包；同时确保清理 out_item_body（若有）。
+                co_return secs::protocol::HandlerResult{
+                    make_error_code(errc::invalid_argument), {}};
+            }
+
+            if (!rsp_item) {
+                co_return secs::protocol::HandlerResult{std::error_code{}, {}};
+            }
+
+            std::vector<byte> rsp;
+            const auto enc_ec = secs::ii::encode(rsp_item->item, rsp);
+            if (enc_ec) {
+                co_return secs::protocol::HandlerResult{enc_ec, {}};
+            }
+
+            co_return secs::protocol::HandlerResult{std::error_code{},
+                                                    std::move(rsp)};
+        } catch (const std::bad_alloc &) {
+            if (out_item_body) {
+                secs_ii_item_destroy(out_item_body);
+            }
+            co_return secs::protocol::HandlerResult{
+                make_error_code(errc::out_of_memory), {}};
+        } catch (...) {
+            if (out_item_body) {
+                secs_ii_item_destroy(out_item_body);
+            }
+            co_return secs::protocol::HandlerResult{
+                make_error_code(errc::invalid_argument), {}};
+        }
+    };
+}
+
+[[nodiscard]] secs::protocol::Handler make_protocol_sml_auto_reply_handler(
+    std::shared_ptr<secs::sml::Runtime> runtime) {
+    return [runtime = std::move(runtime)](const secs::protocol::DataMessage &msg)
+               -> asio::awaitable<secs::protocol::HandlerResult> {
+        try {
+            // protocol::Session 的 auto-reply 仅在 W=1 时发送 secondary，因此这里
+            // 对 W=0 直接短路，避免不必要的解码开销。
+            if (!msg.w_bit) {
+                co_return secs::protocol::HandlerResult{std::error_code{}, {}};
+            }
+            if (msg.function == 0xFFu) {
+                co_return secs::protocol::HandlerResult{
+                    make_error_code(errc::invalid_argument), {}};
+            }
+
+            secs::ii::Item decoded{secs::ii::List{}};
+            std::size_t consumed = 0;
+            const auto dec_ec = secs::ii::decode_one(
+                bytes_view{msg.body.data(), msg.body.size()}, decoded, consumed);
+            if (dec_ec) {
+                co_return secs::protocol::HandlerResult{dec_ec, {}};
+            }
+
+            // Data Capture：允许在条件里用 `<pattern>` 抓取 `$NAME`，并把捕获结果
+            // 作为渲染上下文注入到响应模板（实现“配置即解析”）。
+            secs::sml::RenderContext captured{};
+            auto matched = runtime->match_response_with_capture(
+                msg.stream, msg.function, decoded, captured);
+            if (!matched.has_value()) {
+                co_return secs::protocol::HandlerResult{
+                    make_error_code(errc::invalid_argument), {}};
+            }
+
+            const auto *rsp = runtime->get_message(*matched);
+            if (!rsp) {
+                co_return secs::protocol::HandlerResult{
+                    make_error_code(errc::invalid_argument), {}};
+            }
+
+            const auto expected_function =
+                static_cast<std::uint8_t>(msg.function + 1u);
+            if (rsp->stream != msg.stream || rsp->function != expected_function ||
+                rsp->w_bit) {
+                co_return secs::protocol::HandlerResult{
+                    make_error_code(errc::invalid_argument), {}};
+            }
+
+            secs::ii::Item rendered{secs::ii::List{}};
+            const auto render_ec =
+                secs::sml::render_item(rsp->item, captured, rendered);
+            if (render_ec) {
+                co_return secs::protocol::HandlerResult{render_ec, {}};
+            }
+
+            std::vector<byte> out;
+            const auto enc_ec = secs::ii::encode(rendered, out);
+            if (enc_ec) {
+                co_return secs::protocol::HandlerResult{enc_ec, {}};
+            }
+
+            co_return secs::protocol::HandlerResult{std::error_code{},
+                                                    std::move(out)};
+        } catch (const std::bad_alloc &) {
+            co_return secs::protocol::HandlerResult{
+                make_error_code(errc::out_of_memory), {}};
+        } catch (...) {
+            co_return secs::protocol::HandlerResult{
+                make_error_code(errc::invalid_argument), {}};
+        }
+    };
+}
+
+} // namespace
+
 secs_error_t secs_protocol_session_set_handler(secs_protocol_session_t *sess,
                                                uint8_t stream,
                                                uint8_t function,
@@ -3194,57 +3700,98 @@ secs_error_t secs_protocol_session_set_handler(secs_protocol_session_t *sess,
     return guard_error([&]() -> secs_error_t {
         if (!sess || !sess->state || !sess->state->sess || !cb)
             return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        sess->state->sess->router().set(
+            stream, function, make_protocol_raw_handler(cb, user_data));
+        return ok();
+    });
+}
 
-        auto make_handler =
-            [cb, user_data](const secs::protocol::DataMessage &msg)
-            -> asio::awaitable<secs::protocol::HandlerResult> {
-            uint8_t *out_body = nullptr;
-            size_t out_n = 0;
-            try {
-                secs_data_message_view_t view{};
-                view.stream = msg.stream;
-                view.function = msg.function;
-                view.w_bit = msg.w_bit ? 1 : 0;
-                view.system_bytes = msg.system_bytes;
-                view.body = reinterpret_cast<const uint8_t *>(msg.body.data());
-                view.body_n = msg.body.size();
+secs_error_t
+secs_protocol_session_set_stream_default_handler(secs_protocol_session_t *sess,
+                                                 uint8_t stream,
+                                                 secs_protocol_handler_fn cb,
+                                                 void *user_data) {
+    return guard_error([&]() -> secs_error_t {
+        if (!sess || !sess->state || !sess->state->sess || !cb) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        sess->state->sess->router().set_stream_default(
+            stream, make_protocol_raw_handler(cb, user_data));
+        return ok();
+    });
+}
 
-                secs_error_t cec = cb(user_data, &view, &out_body, &out_n);
+secs_error_t
+secs_protocol_session_clear_stream_default_handler(secs_protocol_session_t *sess,
+                                                   uint8_t stream) {
+    return guard_error([&]() -> secs_error_t {
+        if (!sess || !sess->state || !sess->state->sess) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        sess->state->sess->router().clear_stream_default(stream);
+        return ok();
+    });
+}
 
-                if (!secs_error_is_ok(cec)) {
-                    if (out_body) {
-                        secs_free(out_body);
-                    }
-                    co_return secs::protocol::HandlerResult{
-                        make_error_code(errc::invalid_argument), {}};
-                }
+secs_error_t secs_protocol_session_set_decoded_handler(
+    secs_protocol_session_t *sess,
+    uint8_t stream,
+    uint8_t function,
+    const secs_ii_decode_limits_t *decode_limits,
+    int strict_consumed,
+    secs_protocol_decoded_handler_fn cb,
+    void *user_data) {
+    return guard_error([&]() -> secs_error_t {
+        if (!sess || !sess->state || !sess->state->sess || !cb) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        sess->state->sess->router().set(
+            stream,
+            function,
+            make_protocol_decoded_handler(cb,
+                                          user_data,
+                                          make_decode_limits(decode_limits),
+                                          strict_consumed != 0));
+        return ok();
+    });
+}
 
-                if (!out_body && out_n != 0) {
-                    co_return secs::protocol::HandlerResult{
-                        make_error_code(errc::invalid_argument), {}};
-                }
+secs_error_t secs_protocol_session_set_decoded_stream_default_handler(
+    secs_protocol_session_t *sess,
+    uint8_t stream,
+    const secs_ii_decode_limits_t *decode_limits,
+    int strict_consumed,
+    secs_protocol_decoded_handler_fn cb,
+    void *user_data) {
+    return guard_error([&]() -> secs_error_t {
+        if (!sess || !sess->state || !sess->state->sess || !cb) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        sess->state->sess->router().set_stream_default(
+            stream,
+            make_protocol_decoded_handler(cb,
+                                          user_data,
+                                          make_decode_limits(decode_limits),
+                                          strict_consumed != 0));
+        return ok();
+    });
+}
 
-                std::vector<byte> rsp;
-                rsp.resize(out_n);
-                if (out_n != 0) {
-                    std::memcpy(rsp.data(), out_body, out_n);
-                }
-                if (out_body) {
-                    secs_free(out_body);
-                }
-                co_return secs::protocol::HandlerResult{std::error_code{},
-                                                        std::move(rsp)};
-            } catch (...) {
-                if (out_body) {
-                    secs_free(out_body);
-                }
-                co_return secs::protocol::HandlerResult{
-                    make_error_code(errc::invalid_argument), {}};
-            }
-        };
-
-        sess->state->sess->router().set(stream, function, std::move(make_handler));
-
+secs_error_t secs_protocol_session_set_decoded_default_handler(
+    secs_protocol_session_t *sess,
+    const secs_ii_decode_limits_t *decode_limits,
+    int strict_consumed,
+    secs_protocol_decoded_handler_fn cb,
+    void *user_data) {
+    return guard_error([&]() -> secs_error_t {
+        if (!sess || !sess->state || !sess->state->sess || !cb) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        sess->state->sess->router().set_default(
+            make_protocol_decoded_handler(cb,
+                                          user_data,
+                                          make_decode_limits(decode_limits),
+                                          strict_consumed != 0));
         return ok();
     });
 }
@@ -3479,56 +4026,8 @@ secs_protocol_session_set_default_handler(secs_protocol_session_t *sess,
     return guard_error([&]() -> secs_error_t {
         if (!sess || !sess->state || !sess->state->sess || !cb)
             return c_api_err(SECS_C_API_INVALID_ARGUMENT);
-
-        auto make_handler =
-            [cb, user_data](const secs::protocol::DataMessage &msg)
-            -> asio::awaitable<secs::protocol::HandlerResult> {
-            uint8_t *out_body = nullptr;
-            size_t out_n = 0;
-            try {
-                secs_data_message_view_t view{};
-                view.stream = msg.stream;
-                view.function = msg.function;
-                view.w_bit = msg.w_bit ? 1 : 0;
-                view.system_bytes = msg.system_bytes;
-                view.body = reinterpret_cast<const uint8_t *>(msg.body.data());
-                view.body_n = msg.body.size();
-
-                secs_error_t cec = cb(user_data, &view, &out_body, &out_n);
-
-                if (!secs_error_is_ok(cec)) {
-                    if (out_body) {
-                        secs_free(out_body);
-                    }
-                    co_return secs::protocol::HandlerResult{
-                        make_error_code(errc::invalid_argument), {}};
-                }
-
-                if (!out_body && out_n != 0) {
-                    co_return secs::protocol::HandlerResult{
-                        make_error_code(errc::invalid_argument), {}};
-                }
-
-                std::vector<byte> rsp;
-                rsp.resize(out_n);
-                if (out_n != 0) {
-                    std::memcpy(rsp.data(), out_body, out_n);
-                }
-                if (out_body) {
-                    secs_free(out_body);
-                }
-                co_return secs::protocol::HandlerResult{std::error_code{},
-                                                        std::move(rsp)};
-            } catch (...) {
-                if (out_body) {
-                    secs_free(out_body);
-                }
-                co_return secs::protocol::HandlerResult{
-                    make_error_code(errc::invalid_argument), {}};
-            }
-        };
-
-        sess->state->sess->router().set_default(std::move(make_handler));
+        sess->state->sess->router().set_default(
+            make_protocol_raw_handler(cb, user_data));
         return ok();
     });
 }
@@ -3557,78 +4056,30 @@ secs_protocol_session_set_sml_default_handler(secs_protocol_session_t *sess,
         // 拷贝 runtime：避免 C 侧销毁 rt 导致 handler UAF。
         auto runtime =
             std::make_shared<secs::sml::Runtime>(rt->rt); // 可能分配/失败
+        sess->state->sess->router().set_default(
+            make_protocol_sml_auto_reply_handler(runtime));
+        return ok();
+    });
+}
 
-        auto make_handler =
-            [runtime](const secs::protocol::DataMessage &msg)
-            -> asio::awaitable<secs::protocol::HandlerResult> {
-            try {
-                // protocol::Session 的 auto-reply 仅在 W=1 时发送 secondary，因此这里
-                // 对 W=0 直接短路，避免不必要的解码开销。
-                if (!msg.w_bit) {
-                    co_return secs::protocol::HandlerResult{std::error_code{}, {}};
-                }
-                if (msg.function == 0xFFu) {
-                    co_return secs::protocol::HandlerResult{
-                        make_error_code(errc::invalid_argument), {}};
-                }
+secs_error_t secs_protocol_session_set_sml_stream_default_handler(
+    secs_protocol_session_t *sess,
+    uint8_t stream,
+    const secs_sml_runtime_t *rt) {
+    return guard_error([&]() -> secs_error_t {
+        if (!sess || !sess->state || !sess->state->sess || !rt) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        if (!rt->rt.loaded()) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
 
-                secs::ii::Item decoded{secs::ii::List{}};
-                std::size_t consumed = 0;
-                const auto dec_ec = secs::ii::decode_one(
-                    bytes_view{msg.body.data(), msg.body.size()}, decoded, consumed);
-                if (dec_ec) {
-                    co_return secs::protocol::HandlerResult{dec_ec, {}};
-                }
+        // 拷贝 runtime：避免 C 侧销毁 rt 导致 handler UAF。
+        auto runtime =
+            std::make_shared<secs::sml::Runtime>(rt->rt); // 可能分配/失败
 
-                // Data Capture：允许在条件里用 `<pattern>` 抓取 `$NAME`，并把捕获结果
-                // 作为渲染上下文注入到响应模板（实现“配置即解析”）。
-                secs::sml::RenderContext captured{};
-                auto matched = runtime->match_response_with_capture(
-                    msg.stream, msg.function, decoded, captured);
-                if (!matched.has_value()) {
-                    co_return secs::protocol::HandlerResult{
-                        make_error_code(errc::invalid_argument), {}};
-                }
-
-                const auto *rsp = runtime->get_message(*matched);
-                if (!rsp) {
-                    co_return secs::protocol::HandlerResult{
-                        make_error_code(errc::invalid_argument), {}};
-                }
-
-                const auto expected_function =
-                    static_cast<std::uint8_t>(msg.function + 1u);
-                if (rsp->stream != msg.stream || rsp->function != expected_function ||
-                    rsp->w_bit) {
-                    co_return secs::protocol::HandlerResult{
-                        make_error_code(errc::invalid_argument), {}};
-                }
-
-                secs::ii::Item rendered{secs::ii::List{}};
-                const auto render_ec =
-                    secs::sml::render_item(rsp->item, captured, rendered);
-                if (render_ec) {
-                    co_return secs::protocol::HandlerResult{render_ec, {}};
-                }
-
-                std::vector<byte> out;
-                const auto enc_ec = secs::ii::encode(rendered, out);
-                if (enc_ec) {
-                    co_return secs::protocol::HandlerResult{enc_ec, {}};
-                }
-
-                co_return secs::protocol::HandlerResult{std::error_code{},
-                                                        std::move(out)};
-            } catch (const std::bad_alloc &) {
-                co_return secs::protocol::HandlerResult{
-                    make_error_code(errc::out_of_memory), {}};
-            } catch (...) {
-                co_return secs::protocol::HandlerResult{
-                    make_error_code(errc::invalid_argument), {}};
-            }
-        };
-
-        sess->state->sess->router().set_default(std::move(make_handler));
+        sess->state->sess->router().set_stream_default(
+            stream, make_protocol_sml_auto_reply_handler(runtime));
         return ok();
     });
 }

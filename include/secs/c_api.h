@@ -147,6 +147,9 @@ secs_error_t secs_ii_item_create_list(secs_ii_item_t **out_item);
 secs_error_t secs_ii_item_create_ascii(const char *bytes,
                                        size_t n,
                                        secs_ii_item_t **out_item);
+/* 便捷：按 NUL 结尾字符串创建 ASCII（等价于 create_ascii(value, strlen(value), ...)） */
+secs_error_t secs_ii_item_create_ascii_cstr(const char *value,
+                                            secs_ii_item_t **out_item);
 secs_error_t secs_ii_item_create_binary(const uint8_t *bytes,
                                         size_t n,
                                         secs_ii_item_t **out_item);
@@ -176,6 +179,10 @@ secs_ii_item_create_f4(const float *v, size_t n, secs_ii_item_t **out_item);
 secs_error_t
 secs_ii_item_create_f8(const double *v, size_t n, secs_ii_item_t **out_item);
 void secs_ii_item_destroy(secs_ii_item_t *item);
+
+/* 克隆一个 Item（深拷贝，out_item 需用 secs_ii_item_destroy 释放）。 */
+secs_error_t secs_ii_item_clone(const secs_ii_item_t *src,
+                                secs_ii_item_t **out_item);
 
 /* 类型与访问 */
 secs_error_t secs_ii_item_get_type(const secs_ii_item_t *item,
@@ -431,6 +438,128 @@ secs_error_t secs_ii_item_get_boolean_at_path(const secs_ii_item_t *root,
                                              size_t depth,
                                              ...);
 
+/*
+ * List-path（array）版本：用 indices[] 替代 C varargs，避免 “未以 size_t 传入”
+ * 导致的未定义行为；也便于动态路径（例如从配置/脚本读取）。
+ *
+ * 约定：
+ * - indices_n==0：表示选择 root 本身（此时 indices 可为 NULL）；
+ * - indices_n!=0：indices 不得为 NULL；
+ * - *out_ptr 指向 root 内部内存（与 *_at_path 保持一致），生命周期由 root 持有；
+ * - get_* 系列（返回单个值）要求目标 Item 为对应类型，且数组长度必须为 1。
+ */
+secs_error_t secs_ii_item_ascii_view_at_list_path(const secs_ii_item_t *root,
+                                                  const char **out_ptr,
+                                                  size_t *out_n,
+                                                  const size_t *indices,
+                                                  size_t indices_n);
+secs_error_t secs_ii_item_binary_view_at_list_path(const secs_ii_item_t *root,
+                                                   const uint8_t **out_ptr,
+                                                   size_t *out_n,
+                                                   const size_t *indices,
+                                                   size_t indices_n);
+secs_error_t secs_ii_item_boolean_copy_at_list_path(const secs_ii_item_t *root,
+                                                    uint8_t **out_values01,
+                                                    size_t *out_n,
+                                                    const size_t *indices,
+                                                    size_t indices_n);
+
+secs_error_t secs_ii_item_i1_view_at_list_path(const secs_ii_item_t *root,
+                                               const int8_t **out_ptr,
+                                               size_t *out_n,
+                                               const size_t *indices,
+                                               size_t indices_n);
+secs_error_t secs_ii_item_i2_view_at_list_path(const secs_ii_item_t *root,
+                                               const int16_t **out_ptr,
+                                               size_t *out_n,
+                                               const size_t *indices,
+                                               size_t indices_n);
+secs_error_t secs_ii_item_i4_view_at_list_path(const secs_ii_item_t *root,
+                                               const int32_t **out_ptr,
+                                               size_t *out_n,
+                                               const size_t *indices,
+                                               size_t indices_n);
+secs_error_t secs_ii_item_i8_view_at_list_path(const secs_ii_item_t *root,
+                                               const int64_t **out_ptr,
+                                               size_t *out_n,
+                                               const size_t *indices,
+                                               size_t indices_n);
+secs_error_t secs_ii_item_u1_view_at_list_path(const secs_ii_item_t *root,
+                                               const uint8_t **out_ptr,
+                                               size_t *out_n,
+                                               const size_t *indices,
+                                               size_t indices_n);
+secs_error_t secs_ii_item_u2_view_at_list_path(const secs_ii_item_t *root,
+                                               const uint16_t **out_ptr,
+                                               size_t *out_n,
+                                               const size_t *indices,
+                                               size_t indices_n);
+secs_error_t secs_ii_item_u4_view_at_list_path(const secs_ii_item_t *root,
+                                               const uint32_t **out_ptr,
+                                               size_t *out_n,
+                                               const size_t *indices,
+                                               size_t indices_n);
+secs_error_t secs_ii_item_u8_view_at_list_path(const secs_ii_item_t *root,
+                                               const uint64_t **out_ptr,
+                                               size_t *out_n,
+                                               const size_t *indices,
+                                               size_t indices_n);
+secs_error_t secs_ii_item_f4_view_at_list_path(const secs_ii_item_t *root,
+                                               const float **out_ptr,
+                                               size_t *out_n,
+                                               const size_t *indices,
+                                               size_t indices_n);
+secs_error_t secs_ii_item_f8_view_at_list_path(const secs_ii_item_t *root,
+                                               const double **out_ptr,
+                                               size_t *out_n,
+                                               const size_t *indices,
+                                               size_t indices_n);
+
+secs_error_t secs_ii_item_get_u2_at_list_path(const secs_ii_item_t *root,
+                                             uint16_t *out_val,
+                                             const size_t *indices,
+                                             size_t indices_n);
+secs_error_t secs_ii_item_get_i1_at_list_path(const secs_ii_item_t *root,
+                                             int8_t *out_val,
+                                             const size_t *indices,
+                                             size_t indices_n);
+secs_error_t secs_ii_item_get_i2_at_list_path(const secs_ii_item_t *root,
+                                             int16_t *out_val,
+                                             const size_t *indices,
+                                             size_t indices_n);
+secs_error_t secs_ii_item_get_i4_at_list_path(const secs_ii_item_t *root,
+                                             int32_t *out_val,
+                                             const size_t *indices,
+                                             size_t indices_n);
+secs_error_t secs_ii_item_get_i8_at_list_path(const secs_ii_item_t *root,
+                                             int64_t *out_val,
+                                             const size_t *indices,
+                                             size_t indices_n);
+secs_error_t secs_ii_item_get_u1_at_list_path(const secs_ii_item_t *root,
+                                             uint8_t *out_val,
+                                             const size_t *indices,
+                                             size_t indices_n);
+secs_error_t secs_ii_item_get_u4_at_list_path(const secs_ii_item_t *root,
+                                             uint32_t *out_val,
+                                             const size_t *indices,
+                                             size_t indices_n);
+secs_error_t secs_ii_item_get_u8_at_list_path(const secs_ii_item_t *root,
+                                             uint64_t *out_val,
+                                             const size_t *indices,
+                                             size_t indices_n);
+secs_error_t secs_ii_item_get_f4_at_list_path(const secs_ii_item_t *root,
+                                             float *out_val,
+                                             const size_t *indices,
+                                             size_t indices_n);
+secs_error_t secs_ii_item_get_f8_at_list_path(const secs_ii_item_t *root,
+                                             double *out_val,
+                                             const size_t *indices,
+                                             size_t indices_n);
+secs_error_t secs_ii_item_get_boolean_at_list_path(const secs_ii_item_t *root,
+                                                  uint8_t *out_val01,
+                                                  const size_t *indices,
+                                                  size_t indices_n);
+
 /* 编解码（返回的 out_bytes 需用 secs_free 释放） */
 secs_error_t
 secs_ii_encode(const secs_ii_item_t *item, uint8_t **out_bytes, size_t *out_n);
@@ -475,6 +604,9 @@ void secs_sml_runtime_destroy(secs_sml_runtime_t *rt);
 secs_error_t secs_sml_runtime_load(secs_sml_runtime_t *rt,
                                    const char *source,
                                    size_t source_n);
+/* 便捷：按 NUL 结尾字符串加载（等价于 load(rt, source, strlen(source))） */
+secs_error_t secs_sml_runtime_load_cstr(secs_sml_runtime_t *rt,
+                                        const char *source);
 
 /*
  * 匹配条件响应：
@@ -876,6 +1008,19 @@ typedef secs_error_t (*secs_protocol_handler_fn)(
     uint8_t **out_body,
     size_t *out_body_n);
 
+/*
+ * decoded handler 回调（更贴近 C++ TypedHandler）：
+ * - 框架先把 request.body 解码为 SECS-II Item（decoded_body），再调用回调；
+ * - 回调返回 OK 表示“已处理”，非 OK 表示“拒绝处理”（库不回包）；
+ * - out_item_body（可选）由回调创建并返回，框架会负责 encode 并销毁该 Item；
+ * - decoded_body 生命周期仅在回调期间有效；如需跨回调保存，请调用 secs_ii_item_clone。
+ */
+typedef secs_error_t (*secs_protocol_decoded_handler_fn)(
+    void *user_data,
+    const secs_data_message_view_t *request,
+    const secs_ii_item_t *decoded_body,
+    secs_ii_item_t **out_item_body);
+
 /* ----------------------------- CEID：简易处理层（不引入 GEM）
  * ----------------------------- */
 
@@ -1002,6 +1147,17 @@ secs_error_t secs_protocol_session_set_handler(secs_protocol_session_t *sess,
                                                secs_protocol_handler_fn cb,
                                                void *user_data);
 
+/* 设置 stream default handler：当未找到精确 (stream,function) handler 时回退到该 stream 的默认 handler。 */
+secs_error_t secs_protocol_session_set_stream_default_handler(
+    secs_protocol_session_t *sess,
+    uint8_t stream,
+    secs_protocol_handler_fn cb,
+    void *user_data);
+
+secs_error_t secs_protocol_session_clear_stream_default_handler(
+    secs_protocol_session_t *sess,
+    uint8_t stream);
+
 /* 设置 default handler：当未找到精确 (stream,function) handler 时回退到 default。 */
 secs_error_t
 secs_protocol_session_set_default_handler(secs_protocol_session_t *sess,
@@ -1031,6 +1187,46 @@ secs_protocol_session_clear_default_handler(secs_protocol_session_t *sess);
 secs_error_t
 secs_protocol_session_set_sml_default_handler(secs_protocol_session_t *sess,
                                               const secs_sml_runtime_t *rt);
+
+/*
+ * 使用 SML runtime 设置 stream default handler（仅对指定 stream 生效）。
+ * 语义与 secs_protocol_session_set_sml_default_handler 一致，但注册位置从 “global default” 变为 “stream default”。
+ */
+secs_error_t secs_protocol_session_set_sml_stream_default_handler(
+    secs_protocol_session_t *sess,
+    uint8_t stream,
+    const secs_sml_runtime_t *rt);
+
+/*
+ * decoded handler 注册：框架负责 decode/encode；业务只处理 Item。
+ *
+ * - decode_limits：NULL 表示使用库默认限制；
+ * - strict_consumed!=0：要求 consumed==body_n，否则视为 invalid_argument 并不回包；
+ * - out_item_body：回调创建的响应 body（可为 NULL 表示空 body），框架会在 encode 后 destroy。
+ */
+secs_error_t secs_protocol_session_set_decoded_handler(
+    secs_protocol_session_t *sess,
+    uint8_t stream,
+    uint8_t function,
+    const secs_ii_decode_limits_t *decode_limits,
+    int strict_consumed,
+    secs_protocol_decoded_handler_fn cb,
+    void *user_data);
+
+secs_error_t secs_protocol_session_set_decoded_stream_default_handler(
+    secs_protocol_session_t *sess,
+    uint8_t stream,
+    const secs_ii_decode_limits_t *decode_limits,
+    int strict_consumed,
+    secs_protocol_decoded_handler_fn cb,
+    void *user_data);
+
+secs_error_t secs_protocol_session_set_decoded_default_handler(
+    secs_protocol_session_t *sess,
+    const secs_ii_decode_limits_t *decode_limits,
+    int strict_consumed,
+    secs_protocol_decoded_handler_fn cb,
+    void *user_data);
 
 secs_error_t secs_protocol_session_erase_handler(secs_protocol_session_t *sess,
                                                  uint8_t stream,

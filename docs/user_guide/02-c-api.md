@@ -185,6 +185,40 @@ typedef secs_error_t (*secs_protocol_handler_fn)(
 - 对 `w_bit==0` 的请求：直接返回 OK 且 `out_body=NULL/out_body_n=0`（表示“我处理了但无需回包”）
 - 如果你的逻辑“只想处理部分 SxFy”：对不处理的分支返回非 OK（让库不回包）
 
+### 2.3 Router 匹配顺序（精确 / stream-default / default）
+
+Protocol Session 的 handler 匹配顺序与 C++ 端一致：
+
+1) 精确匹配 `(stream,function)`
+2) stream default（同一 stream 的兜底：`SxF*`）
+3) default handler（全局兜底）
+4) 都没有：视为未处理，不回包
+
+对应 C API：
+
+- 精确：`secs_protocol_session_set_handler()` / `secs_protocol_session_erase_handler()`
+- stream default：`secs_protocol_session_set_stream_default_handler()` / `secs_protocol_session_clear_stream_default_handler()`
+- default：`secs_protocol_session_set_default_handler()` / `secs_protocol_session_clear_default_handler()`
+
+如果你想把 SML 自动回包只挂在某一个 stream 上，可用：
+
+- `secs_protocol_session_set_sml_stream_default_handler(proto, stream, rt)`
+
+### 2.4 decoded handler（自动 decode/encode，贴近 C++ TypedHandler）
+
+如果你希望业务回调直接拿到“解码后的 SECS-II Item”，减少样板代码，可用：
+
+- `secs_protocol_session_set_decoded_handler()`（精确）
+- `secs_protocol_session_set_decoded_stream_default_handler()`（SxF* 兜底）
+- `secs_protocol_session_set_decoded_default_handler()`（全局兜底）
+
+decoded handler 回调语义要点：
+
+- 框架先把 `request.body` 解码为 `decoded_body` 再调用回调
+- 回调返回 OK 表示“已处理”；非 OK 表示“拒绝处理”（库不回包）
+- 回调若返回 `out_item_body`，框架会负责 `encode + destroy`（避免泄漏）
+- `decoded_body` 仅在回调期间有效；如需跨回调保存，调用 `secs_ii_item_clone()`
+
 ---
 
 ## 3. SECS-II：Item 构造 / 编码 / 解码（C 侧最常用）
@@ -195,7 +229,10 @@ typedef secs_error_t (*secs_protocol_handler_fn)(
 
 ```
 构造：
-  secs_ii_item_create_list / create_ascii / create_u2 / ...
+  secs_ii_item_create_list / create_ascii / create_ascii_cstr / create_u2 / ...
+
+克隆：
+  secs_ii_item_clone(src, &dst)
 
 拼 List：
   secs_ii_item_list_append(list, child)
@@ -213,6 +250,11 @@ typedef secs_error_t (*secs_protocol_handler_fn)(
 
 - `secs_ii_decode_limits_init_default(&limits)`
 - `secs_ii_decode_one_with_limits(in, in_n, &limits, &consumed, &out_item)`
+
+提取便捷 API（避免 C varargs 误用）：
+
+- varargs 版本：`secs_ii_item_get_u2_at_path(root, &out, depth, (size_t)0, ...)`
+- list-path（array）版本：`secs_ii_item_get_u2_at_list_path(root, &out, indices, indices_n)`
 
 ---
 
@@ -246,6 +288,10 @@ char* text = read_all_text(\"docs/sml_sample/sample.sml\", &n);
 secs_sml_runtime_load(rt, text, n);
 free(text); // 注意：这里是你自己分配的内存，用你自己的 free
 ```
+
+如果你手里已经是 NUL 结尾的字符串，也可以用：
+
+- `secs_sml_runtime_load_cstr(rt, text)`
 
 ### 4.2 推荐：一行挂载 SML 自动回包
 

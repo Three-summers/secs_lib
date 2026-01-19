@@ -519,6 +519,10 @@ static void test_invalid_argument_fast_fail(void) {
                    secs_ii_item_create_ascii("x", 1, NULL));
         expect_err("secs_ii_item_create_ascii(NULL,n>0)",
                    secs_ii_item_create_ascii(NULL, 1, &item));
+        expect_err("secs_ii_item_create_ascii_cstr(NULL value)",
+                   secs_ii_item_create_ascii_cstr(NULL, &item));
+        expect_err("secs_ii_item_create_ascii_cstr(NULL out)",
+                   secs_ii_item_create_ascii_cstr("x", NULL));
         expect_err("secs_ii_item_create_binary(NULL,n>0)",
                    secs_ii_item_create_binary(NULL, 1, &item));
         expect_err("secs_ii_item_create_boolean(NULL,n>0)",
@@ -544,6 +548,16 @@ static void test_invalid_argument_fast_fail(void) {
         expect_err("secs_ii_item_create_f8(NULL,n>0)",
                    secs_ii_item_create_f8(NULL, 1, &item));
 
+        expect_err("secs_ii_item_clone(NULL src)", secs_ii_item_clone(NULL, &item));
+        {
+            secs_ii_item_t *tmp = NULL;
+            expect_ok("secs_ii_item_create_list(clone tmp)",
+                      secs_ii_item_create_list(&tmp));
+            expect_err("secs_ii_item_clone(NULL out)",
+                       secs_ii_item_clone(tmp, NULL));
+            secs_ii_item_destroy(tmp);
+        }
+
         secs_ii_item_type_t ty;
         expect_err("secs_ii_item_get_type(NULL)",
                    secs_ii_item_get_type(NULL, &ty));
@@ -556,6 +570,22 @@ static void test_invalid_argument_fast_fail(void) {
         size_t consumed = 0;
         expect_err("secs_ii_decode_one(NULL, n>0)",
                    secs_ii_decode_one(NULL, 1, &consumed, &item));
+
+        /* at_list_path 参数校验 */
+        {
+            const uint8_t *bp = NULL;
+            size_t bn = 0;
+            expect_err("secs_ii_item_binary_view_at_list_path(NULL root)",
+                       secs_ii_item_binary_view_at_list_path(NULL, &bp, &bn, NULL, 0));
+
+            int32_t i4 = 0;
+            expect_err("secs_ii_item_get_i4_at_list_path(NULL root)",
+                       secs_ii_item_get_i4_at_list_path(NULL, &i4, NULL, 0));
+
+            uint8_t b01 = 0;
+            expect_err("secs_ii_item_get_boolean_at_list_path(NULL root)",
+                       secs_ii_item_get_boolean_at_list_path(NULL, &b01, NULL, 0));
+        }
     }
 
     /* SML 参数校验 */
@@ -565,6 +595,10 @@ static void test_invalid_argument_fast_fail(void) {
                   secs_sml_runtime_create(&rt));
         expect_err("secs_sml_runtime_load(NULL)",
                    secs_sml_runtime_load(NULL, "x", 1));
+        expect_err("secs_sml_runtime_load_cstr(NULL)",
+                   secs_sml_runtime_load_cstr(NULL, "x"));
+        expect_err("secs_sml_runtime_load_cstr(NULL source)",
+                   secs_sml_runtime_load_cstr(rt, NULL));
 
         expect_err("secs_sml_render_context_create(NULL)",
                    secs_sml_render_context_create(NULL));
@@ -1018,9 +1052,25 @@ static void test_invalid_argument_fast_fail(void) {
             secs_protocol_session_create_from_hsms(NULL, NULL, 0, NULL, &ps));
         expect_err("secs_protocol_session_set_handler(NULL)",
                    secs_protocol_session_set_handler(NULL, 1, 1, NULL, NULL));
+        expect_err("secs_protocol_session_set_stream_default_handler(NULL)",
+                   secs_protocol_session_set_stream_default_handler(
+                       NULL, 1, NULL, NULL));
+        expect_err("secs_protocol_session_clear_stream_default_handler(NULL)",
+                   secs_protocol_session_clear_stream_default_handler(NULL, 1));
         expect_err(
             "secs_protocol_session_set_sml_default_handler(NULL)",
             secs_protocol_session_set_sml_default_handler(NULL, NULL));
+        expect_err("secs_protocol_session_set_sml_stream_default_handler(NULL)",
+                   secs_protocol_session_set_sml_stream_default_handler(NULL, 1, NULL));
+        expect_err("secs_protocol_session_set_decoded_handler(NULL)",
+                   secs_protocol_session_set_decoded_handler(
+                       NULL, 1, 1, NULL, 1, NULL, NULL));
+        expect_err("secs_protocol_session_set_decoded_stream_default_handler(NULL)",
+                   secs_protocol_session_set_decoded_stream_default_handler(
+                       NULL, 1, NULL, 1, NULL, NULL));
+        expect_err("secs_protocol_session_set_decoded_default_handler(NULL)",
+                   secs_protocol_session_set_decoded_default_handler(
+                       NULL, NULL, 1, NULL, NULL));
         expect_err("secs_protocol_session_send(NULL)",
                    secs_protocol_session_send(NULL, 1, 1, NULL, 0));
         expect_err("secs_protocol_session_request(NULL)",
@@ -2034,6 +2084,265 @@ static void test_ii_extraction_helpers(void) {
     }
 }
 
+static void test_ii_clone_and_list_path_array_helpers(void) {
+    /* create_ascii_cstr + ascii_view */
+    {
+        secs_ii_item_t *a = NULL;
+        expect_ok("secs_ii_item_create_ascii_cstr",
+                  secs_ii_item_create_ascii_cstr("abc", &a));
+        const char *p = NULL;
+        size_t n = 0;
+        expect_ok("secs_ii_item_ascii_view(cstr)",
+                  secs_ii_item_ascii_view(a, &p, &n));
+        if (!p || n != 3u || memcmp(p, "abc", 3) != 0) {
+            fprintf(stderr, "FAIL: create_ascii_cstr/ascii_view mismatch\n");
+            ++g_failures;
+        }
+        secs_ii_item_destroy(a);
+    }
+
+    /* clone：深拷贝后销毁原对象不影响 clone */
+    {
+        secs_ii_item_t *src = NULL;
+        expect_ok("secs_ii_item_create_ascii(src)",
+                  secs_ii_item_create_ascii("hello", 5, &src));
+
+        secs_ii_item_t *cl = NULL;
+        expect_ok("secs_ii_item_clone", secs_ii_item_clone(src, &cl));
+        secs_ii_item_destroy(src);
+
+        const char *p = NULL;
+        size_t n = 0;
+        expect_ok("secs_ii_item_ascii_view(clone)",
+                  secs_ii_item_ascii_view(cl, &p, &n));
+        if (!p || n != 5u || memcmp(p, "hello", 5) != 0) {
+            fprintf(stderr, "FAIL: clone/ascii_view mismatch\n");
+            ++g_failures;
+        }
+        secs_ii_item_destroy(cl);
+    }
+
+    /* at_list_path：array 版本（避免 C varargs UB） */
+    {
+        secs_ii_item_t *root = NULL;
+        expect_ok("secs_ii_item_create_list(list_path)",
+                  secs_ii_item_create_list(&root));
+        expect_ok("secs_ii_item_list_append_ascii(list_path)",
+                  secs_ii_item_list_append_ascii(root, "hello"));
+
+        secs_ii_item_t *inner = NULL;
+        expect_ok("secs_ii_item_create_list(inner)", secs_ii_item_create_list(&inner));
+        expect_ok("secs_ii_item_list_append_u2(inner)",
+                  secs_ii_item_list_append_u2(inner, 9u));
+        expect_ok("secs_ii_item_list_append_take(inner->root)",
+                  secs_ii_item_list_append_take(root, &inner));
+
+        /* root[0] == "hello" */
+        {
+            const size_t path0[] = {0u};
+            const char *p = NULL;
+            size_t n = 0;
+            expect_ok("secs_ii_item_ascii_view_at_list_path(root[0])",
+                      secs_ii_item_ascii_view_at_list_path(
+                          root, &p, &n, path0, sizeof(path0) / sizeof(path0[0])));
+            if (!p || n != 5u || memcmp(p, "hello", 5) != 0) {
+                fprintf(stderr, "FAIL: ascii_view_at_list_path mismatch\n");
+                ++g_failures;
+            }
+        }
+
+        /* root[1][0] == U2(9) */
+        {
+            const size_t path[] = {1u, 0u};
+            uint16_t out = 0;
+            expect_ok("secs_ii_item_get_u2_at_list_path(root[1][0])",
+                      secs_ii_item_get_u2_at_list_path(
+                          root, &out, path, sizeof(path) / sizeof(path[0])));
+            if (out != 9u) {
+                fprintf(stderr, "FAIL: get_u2_at_list_path mismatch\n");
+                ++g_failures;
+            }
+
+            const uint16_t *p = NULL;
+            size_t n = 0;
+            expect_ok("secs_ii_item_u2_view_at_list_path(root[1][0])",
+                      secs_ii_item_u2_view_at_list_path(
+                          root, &p, &n, path, sizeof(path) / sizeof(path[0])));
+            if (!p || n != 1u || p[0] != 9u) {
+                fprintf(stderr, "FAIL: u2_view_at_list_path mismatch\n");
+                ++g_failures;
+            }
+        }
+
+        /* indices==NULL 且 indices_n!=0：必须报错 */
+        {
+            const char *p = NULL;
+            size_t n = 0;
+            expect_err("secs_ii_item_ascii_view_at_list_path(NULL indices)",
+                       secs_ii_item_ascii_view_at_list_path(root, &p, &n, NULL, 1));
+        }
+
+        secs_ii_item_destroy(root);
+    }
+
+    /* indices_n==0：选择 root 本身 */
+    {
+        secs_ii_item_t *u2 = NULL;
+        const uint16_t v = 7u;
+        expect_ok("secs_ii_item_create_u2(root)", secs_ii_item_create_u2(&v, 1, &u2));
+
+        uint16_t out = 0;
+        expect_ok("secs_ii_item_get_u2_at_list_path(depth0)",
+                  secs_ii_item_get_u2_at_list_path(u2, &out, NULL, 0));
+        if (out != v) {
+            fprintf(stderr, "FAIL: get_u2_at_list_path(depth0) mismatch\n");
+            ++g_failures;
+        }
+        secs_ii_item_destroy(u2);
+    }
+
+    /* 覆盖其它 *_at_list_path：各数值类型 + binary/boolean */
+    {
+#define TEST_NUMERIC_AT_LIST_PATH(tag, c_type, create_fn, view_at_fn, get_at_fn, v0) \
+    do {                                                                            \
+        secs_ii_item_t *item = NULL;                                                \
+        const c_type in = (c_type)(v0);                                             \
+        expect_ok(#create_fn "(list_path)", create_fn(&in, 1, &item));              \
+        const c_type *p = NULL;                                                     \
+        size_t n = 0;                                                               \
+        expect_ok(#view_at_fn "(depth0)", view_at_fn(item, &p, &n, NULL, 0));       \
+        if (!p || n != 1u || p[0] != in) {                                          \
+            fprintf(stderr, "FAIL: " #tag " view_at_list_path mismatch\n");         \
+            ++g_failures;                                                           \
+        }                                                                           \
+        c_type out = (c_type)0;                                                     \
+        expect_ok(#get_at_fn "(depth0)", get_at_fn(item, &out, NULL, 0));           \
+        if (out != in) {                                                            \
+            fprintf(stderr, "FAIL: " #tag " get_at_list_path mismatch\n");          \
+            ++g_failures;                                                           \
+        }                                                                           \
+        secs_ii_item_destroy(item);                                                 \
+    } while (0)
+
+        TEST_NUMERIC_AT_LIST_PATH(i1,
+                                  int8_t,
+                                  secs_ii_item_create_i1,
+                                  secs_ii_item_i1_view_at_list_path,
+                                  secs_ii_item_get_i1_at_list_path,
+                                  -3);
+        TEST_NUMERIC_AT_LIST_PATH(i2,
+                                  int16_t,
+                                  secs_ii_item_create_i2,
+                                  secs_ii_item_i2_view_at_list_path,
+                                  secs_ii_item_get_i2_at_list_path,
+                                  -300);
+        TEST_NUMERIC_AT_LIST_PATH(i4,
+                                  int32_t,
+                                  secs_ii_item_create_i4,
+                                  secs_ii_item_i4_view_at_list_path,
+                                  secs_ii_item_get_i4_at_list_path,
+                                  -123456);
+        TEST_NUMERIC_AT_LIST_PATH(i8,
+                                  int64_t,
+                                  secs_ii_item_create_i8,
+                                  secs_ii_item_i8_view_at_list_path,
+                                  secs_ii_item_get_i8_at_list_path,
+                                  -1234567890);
+        TEST_NUMERIC_AT_LIST_PATH(u1,
+                                  uint8_t,
+                                  secs_ii_item_create_u1,
+                                  secs_ii_item_u1_view_at_list_path,
+                                  secs_ii_item_get_u1_at_list_path,
+                                  7);
+        TEST_NUMERIC_AT_LIST_PATH(u2,
+                                  uint16_t,
+                                  secs_ii_item_create_u2,
+                                  secs_ii_item_u2_view_at_list_path,
+                                  secs_ii_item_get_u2_at_list_path,
+                                  9);
+        TEST_NUMERIC_AT_LIST_PATH(u4,
+                                  uint32_t,
+                                  secs_ii_item_create_u4,
+                                  secs_ii_item_u4_view_at_list_path,
+                                  secs_ii_item_get_u4_at_list_path,
+                                  12345);
+        TEST_NUMERIC_AT_LIST_PATH(u8,
+                                  uint64_t,
+                                  secs_ii_item_create_u8,
+                                  secs_ii_item_u8_view_at_list_path,
+                                  secs_ii_item_get_u8_at_list_path,
+                                  123456);
+        TEST_NUMERIC_AT_LIST_PATH(f4,
+                                  float,
+                                  secs_ii_item_create_f4,
+                                  secs_ii_item_f4_view_at_list_path,
+                                  secs_ii_item_get_f4_at_list_path,
+                                  0.5f);
+        TEST_NUMERIC_AT_LIST_PATH(f8,
+                                  double,
+                                  secs_ii_item_create_f8,
+                                  secs_ii_item_f8_view_at_list_path,
+                                  secs_ii_item_get_f8_at_list_path,
+                                  -2.5);
+
+#undef TEST_NUMERIC_AT_LIST_PATH
+
+        /* binary_view_at_list_path(depth0) */
+        {
+            const uint8_t in[3] = {1u, 2u, 3u};
+            secs_ii_item_t *b = NULL;
+            expect_ok("secs_ii_item_create_binary(list_path)",
+                      secs_ii_item_create_binary(in, sizeof(in), &b));
+            const uint8_t *p = NULL;
+            size_t n = 0;
+            expect_ok("secs_ii_item_binary_view_at_list_path(depth0)",
+                      secs_ii_item_binary_view_at_list_path(b, &p, &n, NULL, 0));
+            if (!p || n != sizeof(in) || memcmp(p, in, sizeof(in)) != 0) {
+                fprintf(stderr, "FAIL: binary_view_at_list_path mismatch\n");
+                ++g_failures;
+            }
+            secs_ii_item_destroy(b);
+        }
+
+        /* boolean_copy_at_list_path(depth0) */
+        {
+            const uint8_t in01[3] = {1u, 0u, 1u};
+            secs_ii_item_t *b = NULL;
+            expect_ok("secs_ii_item_create_boolean(list_path)",
+                      secs_ii_item_create_boolean(in01, sizeof(in01), &b));
+
+            uint8_t *out = NULL;
+            size_t n = 0;
+            expect_ok("secs_ii_item_boolean_copy_at_list_path(depth0)",
+                      secs_ii_item_boolean_copy_at_list_path(b, &out, &n, NULL, 0));
+            if (!out || n != sizeof(in01) || memcmp(out, in01, sizeof(in01)) != 0) {
+                fprintf(stderr, "FAIL: boolean_copy_at_list_path mismatch\n");
+                ++g_failures;
+            }
+            if (out) {
+                secs_free(out);
+            }
+            secs_ii_item_destroy(b);
+        }
+
+        /* get_boolean_at_list_path(depth0) */
+        {
+            const uint8_t v01 = 1u;
+            secs_ii_item_t *b = NULL;
+            expect_ok("secs_ii_item_create_boolean(scalar)",
+                      secs_ii_item_create_boolean(&v01, 1, &b));
+            uint8_t out = 0;
+            expect_ok("secs_ii_item_get_boolean_at_list_path(depth0)",
+                      secs_ii_item_get_boolean_at_list_path(b, &out, NULL, 0));
+            if (out != 1u) {
+                fprintf(stderr, "FAIL: get_boolean_at_list_path mismatch\n");
+                ++g_failures;
+            }
+            secs_ii_item_destroy(b);
+        }
+    }
+}
+
 static void test_sml_runtime_basic(void) {
     secs_sml_runtime_t *rt = NULL;
     expect_ok("secs_sml_runtime_create", secs_sml_runtime_create(&rt));
@@ -2041,8 +2350,8 @@ static void test_sml_runtime_basic(void) {
     const char *sml = "s1f1: S1F1 W <L>.\n"
                       "s1f2: S1F2 <L <A \"Hello\">>.\n"
                       "if (s1f1) s1f2.\n";
-    expect_ok("secs_sml_runtime_load",
-              secs_sml_runtime_load(rt, sml, strlen(sml)));
+    expect_ok("secs_sml_runtime_load_cstr",
+              secs_sml_runtime_load_cstr(rt, sml));
 
     /* 查模板：应返回 SECS-II body bytes（不贴源码，只验证结构） */
     {
@@ -2854,6 +3163,68 @@ static secs_error_t client_echo_handler(void *user_data,
         ok.category = "secs.c_api";
         return ok;
     }
+}
+
+static secs_error_t protocol_append_tag_handler(void *user_data,
+                                                const secs_data_message_view_t *request,
+                                                uint8_t **out_body,
+                                                size_t *out_body_n) {
+    if (!user_data || !request || !out_body || !out_body_n) {
+        secs_error_t err;
+        err.value = (int)SECS_C_API_INVALID_ARGUMENT;
+        err.category = "secs.c_api";
+        return err;
+    }
+
+    const uint8_t tag = *(const uint8_t *)user_data;
+
+    const size_t n = request->body_n + 1u;
+    *out_body_n = n;
+    *out_body = (uint8_t *)secs_malloc(n);
+    if (!*out_body) {
+        secs_error_t oom;
+        oom.value = (int)SECS_C_API_OUT_OF_MEMORY;
+        oom.category = "secs.c_api";
+        return oom;
+    }
+
+    if (request->body_n > 0 && request->body) {
+        memcpy(*out_body, request->body, request->body_n);
+    }
+    (*out_body)[n - 1u] = tag;
+
+    {
+        secs_error_t ok;
+        ok.value = 0;
+        ok.category = "secs.c_api";
+        return ok;
+    }
+}
+
+static secs_error_t
+protocol_decoded_add_one_u2_handler(void *user_data,
+                                    const secs_data_message_view_t *request,
+                                    const secs_ii_item_t *decoded_body,
+                                    secs_ii_item_t **out_item_body) {
+    (void)user_data;
+    (void)request;
+    if (!decoded_body || !out_item_body) {
+        secs_error_t err;
+        err.value = (int)SECS_C_API_INVALID_ARGUMENT;
+        err.category = "secs.c_api";
+        return err;
+    }
+
+    *out_item_body = NULL;
+
+    uint16_t in = 0;
+    secs_error_t e = secs_ii_item_get_u2_at_list_path(decoded_body, &in, NULL, 0);
+    if (e.value != 0) {
+        return e;
+    }
+
+    uint16_t out = (uint16_t)(in + 1u);
+    return secs_ii_item_create_u2(&out, 1, out_item_body);
 }
 
 struct hsms_wrong_thread_ud {
@@ -4302,6 +4673,114 @@ static void test_hsms_protocol_loopback(void) {
                   secs_protocol_session_clear_default_handler(server_proto));
     }
 
+    /* stream default handler：SxF* fallback（对齐 C++ Router 行为：精确 > stream-default > default） */
+    {
+        uint8_t tag_exact = 0xE1u;
+        uint8_t tag_stream = 0xE2u;
+        uint8_t tag_default = 0xD3u;
+
+        expect_ok("secs_protocol_session_set_default_handler(tag_default)",
+                  secs_protocol_session_set_default_handler(
+                      server_proto, protocol_append_tag_handler, &tag_default));
+        expect_ok("secs_protocol_session_set_stream_default_handler(tag_stream)",
+                  secs_protocol_session_set_stream_default_handler(
+                      server_proto,
+                      21,
+                      protocol_append_tag_handler,
+                      &tag_stream));
+        expect_ok("secs_protocol_session_set_handler(tag_exact)",
+                  secs_protocol_session_set_handler(
+                      server_proto, 21, 1, protocol_append_tag_handler, &tag_exact));
+
+        /* 精确匹配：S21F1 -> tag_exact */
+        {
+            const uint8_t req_body[1] = {0xAAu};
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+
+            expect_ok("secs_protocol_session_request(stream-default exact)",
+                      secs_protocol_session_request(
+                          client_proto, 21, 1, req_body, sizeof(req_body), 1000, &reply));
+            if (reply.stream != 21u || reply.function != 2u || reply.w_bit != 0) {
+                fprintf(stderr, "FAIL: stream-default exact reply header mismatch\n");
+                ++g_failures;
+            }
+            if (reply.body_n != 2u || !reply.body || reply.body[0] != 0xAAu ||
+                reply.body[1] != tag_exact) {
+                fprintf(stderr, "FAIL: stream-default exact reply body mismatch\n");
+                ++g_failures;
+            }
+            secs_data_message_free(&reply);
+        }
+
+        /* stream-default：S21F3 -> tag_stream */
+        {
+            const uint8_t req_body[1] = {0xBBu};
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+
+            expect_ok("secs_protocol_session_request(stream-default fallback)",
+                      secs_protocol_session_request(
+                          client_proto, 21, 3, req_body, sizeof(req_body), 1000, &reply));
+            if (reply.stream != 21u || reply.function != 4u || reply.w_bit != 0) {
+                fprintf(stderr, "FAIL: stream-default fallback reply header mismatch\n");
+                ++g_failures;
+            }
+            if (reply.body_n != 2u || !reply.body || reply.body[0] != 0xBBu ||
+                reply.body[1] != tag_stream) {
+                fprintf(stderr, "FAIL: stream-default fallback reply body mismatch\n");
+                ++g_failures;
+            }
+            secs_data_message_free(&reply);
+        }
+
+        /* default：S22F1 -> tag_default */
+        {
+            const uint8_t req_body[1] = {0xCCu};
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+
+            expect_ok("secs_protocol_session_request(default fallback)",
+                      secs_protocol_session_request(
+                          client_proto, 22, 1, req_body, sizeof(req_body), 1000, &reply));
+            if (reply.stream != 22u || reply.function != 2u || reply.w_bit != 0) {
+                fprintf(stderr, "FAIL: default fallback reply header mismatch\n");
+                ++g_failures;
+            }
+            if (reply.body_n != 2u || !reply.body || reply.body[0] != 0xCCu ||
+                reply.body[1] != tag_default) {
+                fprintf(stderr, "FAIL: default fallback reply body mismatch\n");
+                ++g_failures;
+            }
+            secs_data_message_free(&reply);
+        }
+
+        /* clear stream-default：S21F3 应回退到 default */
+        expect_ok("secs_protocol_session_clear_stream_default_handler",
+                  secs_protocol_session_clear_stream_default_handler(server_proto, 21));
+        {
+            const uint8_t req_body[1] = {0xDDu};
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+
+            expect_ok("secs_protocol_session_request(stream-default cleared)",
+                      secs_protocol_session_request(
+                          client_proto, 21, 3, req_body, sizeof(req_body), 1000, &reply));
+            if (reply.body_n != 2u || !reply.body || reply.body[0] != 0xDDu ||
+                reply.body[1] != tag_default) {
+                fprintf(stderr,
+                        "FAIL: stream-default cleared reply should fall back to default\n");
+                ++g_failures;
+            }
+            secs_data_message_free(&reply);
+        }
+
+        expect_ok("secs_protocol_session_erase_handler(tag_exact)",
+                  secs_protocol_session_erase_handler(server_proto, 21, 1));
+        expect_ok("secs_protocol_session_clear_default_handler(tag_default)",
+                  secs_protocol_session_clear_default_handler(server_proto));
+    }
+
     /* SML default handler：用规则/模板批量定义回包，避免 C 侧写大量分发代码 */
     {
         secs_sml_runtime_t *rt = NULL;
@@ -4397,6 +4876,268 @@ static void test_hsms_protocol_loopback(void) {
         secs_free(exp21);
         expect_ok("secs_protocol_session_clear_default_handler(sml)",
                   secs_protocol_session_clear_default_handler(server_proto));
+    }
+
+    /* SML stream default handler：仅对指定 stream 生效 */
+    {
+        secs_sml_runtime_t *rt = NULL;
+        expect_ok("secs_sml_runtime_create(proto sml stream)",
+                  secs_sml_runtime_create(&rt));
+
+        const char *sml = "s30f1: S30F1 W <L>.\n"
+                          "s30f2: S30F2 <L <A \"OK\">>.\n"
+                          "if (s30f1) s30f2.\n";
+        expect_ok("secs_sml_runtime_load_cstr(proto sml stream)",
+                  secs_sml_runtime_load_cstr(rt, sml));
+
+        uint8_t *exp = NULL;
+        size_t exp_n = 0;
+        expect_ok("secs_sml_runtime_get_message_body_by_name(s30f2)",
+                  secs_sml_runtime_get_message_body_by_name(
+                      rt, "s30f2", &exp, &exp_n, NULL, NULL, NULL));
+
+        expect_ok("secs_protocol_session_set_sml_stream_default_handler",
+                  secs_protocol_session_set_sml_stream_default_handler(
+                      server_proto, 30, rt));
+        secs_sml_runtime_destroy(rt);
+        rt = NULL;
+
+        /* request body：空 List（必须是有效 SECS-II 编码，不能是空 bytes） */
+        secs_ii_item_t *req_item = NULL;
+        expect_ok("secs_ii_item_create_list(sml stream req)",
+                  secs_ii_item_create_list(&req_item));
+        uint8_t *req_body = NULL;
+        size_t req_body_n = 0;
+        expect_ok("secs_ii_encode(sml stream req)",
+                  secs_ii_encode(req_item, &req_body, &req_body_n));
+        secs_ii_item_destroy(req_item);
+
+        /* S30F1 -> S30F2（命中 stream default） */
+        {
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            expect_ok("secs_protocol_session_request(sml stream default)",
+                      secs_protocol_session_request(
+                          client_proto, 30, 1, req_body, req_body_n, 1000, &reply));
+            if (reply.stream != 30u || reply.function != 2u || reply.w_bit != 0) {
+                fprintf(stderr, "FAIL: sml stream default reply header mismatch\n");
+                ++g_failures;
+            }
+            if (reply.body_n != exp_n || (exp_n != 0u && !reply.body) ||
+                (exp_n != 0u && memcmp(reply.body, exp, exp_n) != 0)) {
+                fprintf(stderr, "FAIL: sml stream default reply body mismatch\n");
+                ++g_failures;
+            }
+            secs_data_message_free(&reply);
+        }
+
+        /* 其它 stream：不应命中，客户端超时返回错误 */
+        {
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            expect_err("secs_protocol_session_request(sml stream no match)",
+                       secs_protocol_session_request(
+                           client_proto, 31, 1, req_body, req_body_n, 200, &reply));
+            secs_data_message_free(&reply);
+        }
+
+        secs_free(req_body);
+        secs_free(exp);
+        expect_ok("secs_protocol_session_clear_stream_default_handler(sml stream)",
+                  secs_protocol_session_clear_stream_default_handler(server_proto, 30));
+    }
+
+    /* decoded handler：框架自动 decode/encode（贴近 C++ TypedHandler） */
+    {
+        /* request body：<U2 41> */
+        const uint16_t v = 41u;
+        secs_ii_item_t *u2 = NULL;
+        expect_ok("secs_ii_item_create_u2(decoded req)",
+                  secs_ii_item_create_u2(&v, 1, &u2));
+
+        uint8_t *body = NULL;
+        size_t body_n = 0;
+        expect_ok("secs_ii_encode(decoded req)", secs_ii_encode(u2, &body, &body_n));
+        secs_ii_item_destroy(u2);
+
+        /* 带尾随 bytes：用于 strict_consumed 分支 */
+        uint8_t *body_tail = (uint8_t *)secs_malloc(body_n + 1u);
+        if (!body_tail) {
+            fprintf(stderr, "FAIL: secs_malloc(body_tail) out of memory\n");
+            ++g_failures;
+        } else {
+            memcpy(body_tail, body, body_n);
+            body_tail[body_n] = 0xFFu;
+        }
+
+        /* strict_consumed=1：正常应答 + 尾随 bytes 应超时 */
+        expect_ok("secs_protocol_session_set_decoded_handler(strict)",
+                  secs_protocol_session_set_decoded_handler(
+                      server_proto,
+                      40,
+                      1,
+                      NULL,
+                      1,
+                      protocol_decoded_add_one_u2_handler,
+                      NULL));
+        {
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            expect_ok("secs_protocol_session_request(decoded strict ok)",
+                      secs_protocol_session_request(
+                          client_proto, 40, 1, body, body_n, 1000, &reply));
+
+            size_t consumed = 0;
+            secs_ii_item_t *decoded = NULL;
+            expect_ok("secs_ii_decode_one(decoded reply)",
+                      secs_ii_decode_one(reply.body,
+                                         reply.body_n,
+                                         &consumed,
+                                         &decoded));
+            if (consumed != reply.body_n) {
+                fprintf(stderr, "FAIL: decoded reply consumed mismatch\n");
+                ++g_failures;
+            }
+            const uint16_t *p = NULL;
+            size_t n = 0;
+            expect_ok("secs_ii_item_u2_view(decoded reply)",
+                      secs_ii_item_u2_view(decoded, &p, &n));
+            if (!p || n != 1u || p[0] != 42u) {
+                fprintf(stderr, "FAIL: decoded strict reply value mismatch\n");
+                ++g_failures;
+            }
+            secs_ii_item_destroy(decoded);
+            secs_data_message_free(&reply);
+        }
+        if (body_tail) {
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            expect_err("secs_protocol_session_request(decoded strict tail -> timeout)",
+                       secs_protocol_session_request(
+                           client_proto, 40, 1, body_tail, body_n + 1u, 200, &reply));
+            secs_data_message_free(&reply);
+        }
+        expect_ok("secs_protocol_session_erase_handler(decoded strict)",
+                  secs_protocol_session_erase_handler(server_proto, 40, 1));
+
+        /* strict_consumed=0：允许尾随 bytes */
+        expect_ok("secs_protocol_session_set_decoded_handler(nonstrict)",
+                  secs_protocol_session_set_decoded_handler(
+                      server_proto,
+                      41,
+                      1,
+                      NULL,
+                      0,
+                      protocol_decoded_add_one_u2_handler,
+                      NULL));
+        if (body_tail) {
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            expect_ok("secs_protocol_session_request(decoded nonstrict tail ok)",
+                      secs_protocol_session_request(
+                          client_proto, 41, 1, body_tail, body_n + 1u, 1000, &reply));
+
+            size_t consumed = 0;
+            secs_ii_item_t *decoded = NULL;
+            expect_ok("secs_ii_decode_one(decoded nonstrict reply)",
+                      secs_ii_decode_one(reply.body,
+                                         reply.body_n,
+                                         &consumed,
+                                         &decoded));
+            const uint16_t *p = NULL;
+            size_t n = 0;
+            expect_ok("secs_ii_item_u2_view(decoded nonstrict reply)",
+                      secs_ii_item_u2_view(decoded, &p, &n));
+            if (!p || n != 1u || p[0] != 42u) {
+                fprintf(stderr, "FAIL: decoded nonstrict reply value mismatch\n");
+                ++g_failures;
+            }
+            secs_ii_item_destroy(decoded);
+            secs_data_message_free(&reply);
+        }
+        expect_ok("secs_protocol_session_erase_handler(decoded nonstrict)",
+                  secs_protocol_session_erase_handler(server_proto, 41, 1));
+
+        /* decoded stream default：S42F* */
+        expect_ok("secs_protocol_session_set_decoded_stream_default_handler",
+                  secs_protocol_session_set_decoded_stream_default_handler(
+                      server_proto,
+                      42,
+                      NULL,
+                      1,
+                      protocol_decoded_add_one_u2_handler,
+                      NULL));
+        {
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            expect_ok("secs_protocol_session_request(decoded stream default)",
+                      secs_protocol_session_request(
+                          client_proto, 42, 1, body, body_n, 1000, &reply));
+            {
+                size_t consumed = 0;
+                secs_ii_item_t *decoded = NULL;
+                expect_ok("secs_ii_decode_one(decoded stream default reply)",
+                          secs_ii_decode_one(reply.body,
+                                             reply.body_n,
+                                             &consumed,
+                                             &decoded));
+                const uint16_t *p = NULL;
+                size_t n = 0;
+                expect_ok("secs_ii_item_u2_view(decoded stream default reply)",
+                          secs_ii_item_u2_view(decoded, &p, &n));
+                if (!p || n != 1u || p[0] != 42u) {
+                    fprintf(stderr,
+                            "FAIL: decoded stream default reply value mismatch\n");
+                    ++g_failures;
+                }
+                secs_ii_item_destroy(decoded);
+            }
+            secs_data_message_free(&reply);
+        }
+        expect_ok("secs_protocol_session_clear_stream_default_handler(decoded stream default)",
+                  secs_protocol_session_clear_stream_default_handler(server_proto, 42));
+
+        /* decoded default：全局兜底 */
+        expect_ok("secs_protocol_session_set_decoded_default_handler",
+                  secs_protocol_session_set_decoded_default_handler(
+                      server_proto,
+                      NULL,
+                      1,
+                      protocol_decoded_add_one_u2_handler,
+                      NULL));
+        {
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            expect_ok("secs_protocol_session_request(decoded default)",
+                      secs_protocol_session_request(
+                          client_proto, 43, 1, body, body_n, 1000, &reply));
+            {
+                size_t consumed = 0;
+                secs_ii_item_t *decoded = NULL;
+                expect_ok("secs_ii_decode_one(decoded default reply)",
+                          secs_ii_decode_one(reply.body,
+                                             reply.body_n,
+                                             &consumed,
+                                             &decoded));
+                const uint16_t *p = NULL;
+                size_t n = 0;
+                expect_ok("secs_ii_item_u2_view(decoded default reply)",
+                          secs_ii_item_u2_view(decoded, &p, &n));
+                if (!p || n != 1u || p[0] != 42u) {
+                    fprintf(stderr, "FAIL: decoded default reply value mismatch\n");
+                    ++g_failures;
+                }
+                secs_ii_item_destroy(decoded);
+            }
+            secs_data_message_free(&reply);
+        }
+        expect_ok("secs_protocol_session_clear_default_handler(decoded default)",
+                  secs_protocol_session_clear_default_handler(server_proto));
+
+        secs_free(body);
+        if (body_tail) {
+            secs_free(body_tail);
+        }
     }
 
     /* 通过 protocol handler 在 io 线程内误用 HSMS 阻塞式 API：必须返回 WRONG_THREAD */
@@ -4551,6 +5292,7 @@ int main(void) {
     test_ii_all_types_and_views();
     test_ii_list_builder_helpers();
     test_ii_extraction_helpers();
+    test_ii_clone_and_list_path_array_helpers();
     test_sml_runtime_basic();
     test_sml_runtime_placeholders();
     test_sml_render_context_lifecycle();
