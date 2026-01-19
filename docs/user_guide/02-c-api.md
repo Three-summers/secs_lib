@@ -102,8 +102,9 @@ secs_error_t my_handler(void *user_data,
     secs_ii_builder_finalize(b, &rsp_item);
     secs_ii_builder_destroy(b); // 记得销毁 builder
     
-    // 3. 编码响应 (重要: 必须用 secs_free 释放 out_body)
-    // 库会自动负责 secs_free，你只需要分配
+    // 3. 编码响应
+    // - secs_ii_encode 会用 secs_malloc 分配 out_body；
+    // - 框架会在复制后调用 secs_free 释放 out_body（回调里不要释放）。
     secs_ii_encode(rsp_item, out_body, out_body_n);
     
     // 4. 销毁中间 Item
@@ -111,6 +112,67 @@ secs_error_t my_handler(void *user_data,
     
     return (secs_error_t){0, NULL}; // OK
 }
+```
+
+### 4. Decoded Handler（推荐：自动 decode/encode）
+
+当你希望像 C++ 的 `TypedHandler` 一样“业务逻辑只处理 Item”，可以使用 decoded handler：
+
+- 框架先把 `request.body` 解码为 `decoded_body` 再回调；
+- 你只需要构造 `out_item_body`（一个 `secs_ii_item_t*`）；
+- 框架会负责 `encode + destroy(out_item_body)`。
+
+对应 API：`secs_protocol_session_set_decoded_handler()` / `secs_protocol_session_set_decoded_stream_default_handler()` / `secs_protocol_session_set_decoded_default_handler()`。
+
+> 注意：`decoded_body` 仅在回调期间有效；如需跨回调保存，请调用 `secs_ii_item_clone()`。
+
+```c
+static secs_error_t on_decoded(void* user,
+                              const secs_data_message_view_t* req,
+                              const secs_ii_item_t* decoded_body,
+                              secs_ii_item_t** out_item_body) {
+    (void)user;
+    (void)req;
+    (void)decoded_body;
+
+    // 业务：构造一个要回复的 Item（框架会负责 encode + destroy）
+    return secs_ii_item_create_list(out_item_body);
+}
+
+// 注册（示例：精确匹配 S6F11）
+secs_protocol_session_set_decoded_handler(proto, 6, 11, on_decoded, NULL);
+```
+
+### 5. CEID dispatcher（按 CEID 分发，不引入 GEM）
+
+对于 `S6F11` 这类“body 中包含 CEID”的消息，可以用 C API 的 CEID dispatcher 收敛 decode + CEID 提取 + 分发：
+
+- 创建：`secs_ceid_dispatcher_create_list_path()`（用 list path 指定 CEID 位置）
+- 挂载：`secs_protocol_session_set_ceid_dispatcher(sess, stream, function, disp)`
+
+典型布局（S6F11-like）：`<L <DATAID> <CEID> <...>>`，CEID 位于索引 1，因此 `indices={1}`。
+
+```c
+static secs_error_t on_ceid(void* user,
+                           uint32_t ceid,
+                           const secs_data_message_view_t* req,
+                           uint8_t** out_body,
+                           size_t* out_body_n) {
+    (void)user;
+    (void)req;
+    // TODO: 按 ceid 构造不同回复（out_body 必须由 secs_malloc 分配，框架会负责释放）
+    // 这里示意：回一个空 body 的 secondary
+    (void)ceid;
+    *out_body = NULL;
+    *out_body_n = 0;
+    return (secs_error_t){0, NULL}; // OK
+}
+
+size_t ceid_indices[] = {(size_t)1};
+secs_ceid_dispatcher_t* disp = NULL;
+secs_ceid_dispatcher_create_list_path(ceid_indices, 1, NULL, 1, &disp);
+secs_ceid_dispatcher_set_handler(disp, 0x1001, on_ceid, NULL);
+secs_protocol_session_set_ceid_dispatcher(proto, 6, 11, disp);
 ```
 
 ---
@@ -188,5 +250,5 @@ if (rsp_name) {
 
 1.  **句柄销毁**：所有 `_create` 出来的对象 (`ctx`, `sess`, `item`, `builder`, `rt`) 必须调用对应的 `_destroy`。
 2.  **库分配字符串**：`secs_error_message`, `match_response` 返回的 char* 必须用 `secs_free`。
-3.  **编码输出**：`secs_ii_encode` 返回的字节数组必须用 `secs_free`。
-4.  **Handler 输出**：赋值给 `*out_body` 的指针必须是 `secs_malloc` 分配的（或由库函数如 `encode` 分配的）。严禁使用系统 `malloc`。
+3.  **编码输出**：在“普通调用场景”下（例如你主动发起 request），`secs_ii_encode` 返回的字节数组必须用 `secs_free`；在 protocol handler 回调里则由框架负责释放（回调里不要释放）。
+4.  **Handler 输出**：赋值给 `*out_body` 的指针必须是 `secs_malloc` 分配的（或由库函数如 `secs_ii_encode` / `secs_sml_runtime_encode_message_body` 分配的）。严禁使用系统 `malloc`。

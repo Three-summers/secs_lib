@@ -1,7 +1,7 @@
 # C_API 模块详细实现原理
 
-> 文档生成日期：2026-01-07
-> 基于源码版本：当前 main 分支
+> 文档更新：2026-01-19（Codex）  
+> 对应实现：`main`（CMake：`project(secs VERSION 0.1.0)`）
 
 ## 1. 模块概述
 
@@ -12,6 +12,7 @@
 - **内存管理**：`secs_malloc/secs_free` 统一分配/释放
 - **阻塞桥接**：`run_blocking()` 将协程结果同步返回 C 调用方
 - **异常隔离**：C++ 异常禁止跨越 C 边界
+- **易用性 API**：builder / list append helpers / path access / decoded handler / CEID dispatcher（减少样板代码）
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -399,21 +400,23 @@ typedef struct secs_error {
 │     ├── 防止 ioc.run() 在无任务时退出                                   │
 │     └── asio::make_work_guard(ioc)                                      │
 │                                                                         │
-│  3. 启动 io 线程                                                        │
+│  3. 启动 io 线程（N 个，默认 1）                                         │
 │     ┌─────────────────────────────────────────────────────────────┐    │
-│     │  std::promise<void> started;                                 │    │
-│     │  ctx->io_thread = std::thread([ctx, p]() mutable {           │    │
-│     │      ctx->io_thread_id = std::this_thread::get_id();         │    │
-│     │      p.set_value();   // 通知主线程 id 已记录                 │    │
-│     │      ctx->ioc.run();  // 阻塞运行事件循环                     │    │
-│     │  });                                                         │    │
-│     │  started.get_future().wait();  // 等待 id 记录完成            │    │
+│     │  for i in [0..io_threads):                                  │    │
+│     │    启动 std::thread：                                       │    │
+│     │      - 记录 thread_id 到 io_thread_ids                      │    │
+│     │      - 调用 ioc.run() 运行事件循环                           │    │
 │     └─────────────────────────────────────────────────────────────┘    │
 │                                                                         │
 │  4. 返回句柄                                                            │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+说明：
+
+- `secs_context_create()` 等价于 `secs_context_create_with_options()` 使用默认参数（`io_threads=1`）。
+- “阻塞式 API”会把协程调度到 context 的 io 线程执行，并在调用线程等待结果；若在 io 线程内调用这些阻塞式 API，会返回 `WRONG_THREAD`（避免死锁）。
 
 ### 7.2 销毁流程
 
@@ -424,7 +427,7 @@ typedef struct secs_error {
 │                                                                         │
 │  1. ctx->work.reset()      // 释放 work_guard，允许 ioc.run() 退出      │
 │  2. ctx->ioc.stop()        // 强制停止事件循环                          │
-│  3. ctx->io_thread.join()  // 等待 io 线程退出                          │
+│  3. join 所有 io_threads    // 等待 io 线程退出                          │
 │  4. delete ctx             // 释放对象                                  │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -493,6 +496,22 @@ typedef struct secs_error {
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+### 8.3 易用性 API（Builder / Append / Path）
+
+为了减少 C 侧构造/解析嵌套 List 时的样板代码，本库在 “Raw Access” 的基础上新增三类易用性 API：
+
+- **List append helpers**：`secs_ii_item_list_append_*()` / `secs_ii_item_list_append_take()`  
+  直接追加字面量值，或以 take 语义自动 `destroy` 临时 Item，降低错误路径泄漏风险。
+- **Builder**：`secs_ii_builder_*()`  
+  用 `list_begin/list_end/add_*` 的栈式方式构建嵌套 List；支持“首错记忆（Error Sinking）”，在 `finalize` 统一返回错误。
+- **Path access**：`secs_ii_item_*_at_path()` / `secs_ii_item_*_at_list_path()`  
+  用 “List 路径索引”直达深层字段，避免一层层 `list_get()` 剥洋葱；`at_list_path` 版本用数组参数替代 varargs，便于动态路径且更安全。
+
+对应示例：
+
+- Code-First：`examples/c_api_hsms_custom.c`、`examples/c_api_secs1_custom.c`
+- SMLX：`examples/c_api_hsms_smlx.c`、`examples/c_api_secs1_smlx.c`
 
 ---
 
@@ -783,21 +802,19 @@ typedef struct secs_error {
 
 | API | 功能 |
 |-----|------|
-| `secs_ii_item_create_list(&item)` | 创建空 List |
-| `secs_ii_item_create_ascii(s, n, &item)` | 创建 ASCII 字符串 |
-| `secs_ii_item_create_binary(b, n, &item)` | 创建 Binary 数组 |
-| `secs_ii_item_create_boolean(v, n, &item)` | 创建 Boolean 数组 |
-| `secs_ii_item_create_i1~i8(v, n, &item)` | 创建有符号整数数组 |
-| `secs_ii_item_create_u1~u8(v, n, &item)` | 创建无符号整数数组 |
-| `secs_ii_item_create_f4/f8(v, n, &item)` | 创建浮点数组 |
+| `secs_ii_item_create_*()` | 创建各种类型的 Item（List/ASCII/Binary/Boolean/I*/U*/F*） |
 | `secs_ii_item_destroy(item)` | 销毁 Item |
+| `secs_ii_item_clone(src, &out)` | clone（深拷贝） |
 | `secs_ii_item_get_type(item, &type)` | 获取类型 |
-| `secs_ii_item_list_size/get/append` | List 操作 |
-| `secs_ii_item_*_view(item, &ptr, &n)` | 获取数据视图 |
-| `secs_ii_item_boolean_copy(item, &v, &n)` | 拷贝 Boolean 数据 |
-| `secs_ii_encode(item, &bytes, &n)` | 编码为字节流 |
-| `secs_ii_decode_one(bytes, n, &consumed, &item)` | 解码单个 Item |
-| `secs_ii_decode_one_with_limits(...)` | 带资源限制解码 |
+| `secs_ii_item_list_size/get/append` | List 基础操作（append 为拷贝语义） |
+| `secs_ii_item_list_append_take(list, &elem)` | take 语义追加（内部 copy 后自动 destroy+置空） |
+| `secs_ii_item_list_append_*()` | 向 List 追加字面量值/数组值（内部创建临时 Item 并 append） |
+| `secs_ii_builder_*()` | 栈式构建嵌套 List（Error Sinking + finalize） |
+| `secs_ii_item_*_view/_copy` | 访问数据（view 无拷贝；Boolean 用 copy） |
+| `secs_ii_item_*_at_path` / `*_at_list_path` | 通过 List 路径索引提取/视图访问 |
+| `secs_ii_encode(item, &bytes, &n)` | 编码为 bytes（bytes 用 `secs_free` 释放） |
+| `secs_ii_decode_one(...)` / `_with_limits` | 解码一个 Item（流式） |
+| `secs_ii_decode_limits_init_default(&limits)` | 初始化默认 decode 限制 |
 
 ### 12.4 SML Runtime
 
@@ -805,9 +822,15 @@ typedef struct secs_error {
 |-----|------|
 | `secs_sml_runtime_create(&rt)` | 创建 Runtime |
 | `secs_sml_runtime_destroy(rt)` | 销毁 Runtime |
-| `secs_sml_runtime_load(rt, src, n)` | 加载 SML 脚本 |
-| `secs_sml_runtime_match_response(...)` | 匹配条件响应 |
-| `secs_sml_runtime_get_message_body_by_name(...)` | 获取消息模板 |
+| `secs_sml_runtime_load(rt, src, n)` / `secs_sml_runtime_load_cstr(rt, s)` | 加载 SML 源文本 |
+| `secs_sml_render_context_create/destroy` | RenderContext 生命周期 |
+| `secs_sml_render_context_set` / `set_*` / `get` | 变量注入与读取 |
+| `secs_sml_runtime_match_response(...)` | 条件响应匹配（不带 ctx） |
+| `secs_sml_runtime_match_response_with_context(...)` | 条件响应匹配（带 ctx，用于期望值渲染） |
+| `secs_sml_runtime_match_response_with_capture(...)` | 匹配并捕获 `$NAME` 到 RenderContext |
+| `secs_sml_runtime_match_response_with_trace(...)` | 未命中时返回失败轨迹（调试用） |
+| `secs_sml_runtime_encode_message_body(...)` | 渲染并编码消息模板为 body bytes |
+| `secs_sml_runtime_get_message_body_by_name(...)` | 获取消息模板（不渲染变量） |
 
 ### 12.5 HSMS
 
@@ -831,16 +854,25 @@ typedef struct secs_error {
 
 | API | 功能 | 阻塞 |
 |-----|------|------|
-| `secs_protocol_session_create_from_hsms(...)` | 从 HSMS 创建 | 否 |
+| `secs_protocol_session_create_from_hsms[_v2](...)` | 从 HSMS 创建（v2 支持更多选项，如 dump） | 否 |
+| `secs_protocol_session_create_from_secs1_serial[_v2](...)` | 从串口创建（SECS-I；内部打开串口） | 是 |
+| `secs_protocol_session_create_from_secs1_memory_duplex[_v2](...)` | 创建一对内存互联 SECS-I session（loopback） | 否 |
 | `secs_protocol_session_destroy(sess)` | 销毁会话 | 是 |
 | `secs_protocol_session_stop(sess)` | 停止会话 | 否 |
 | `secs_protocol_session_set_handler(...)` | 注册 handler | 否 |
+| `secs_protocol_session_set_stream_default_handler(...)` | 注册 stream default handler（SxF*） | 否 |
+| `secs_protocol_session_clear_stream_default_handler(...)` | 清除 stream default handler | 否 |
 | `secs_protocol_session_set_default_handler(...)` | 注册默认 handler | 否 |
+| `secs_protocol_session_set_sml_stream_default_handler(...)` | SML 自动回包（stream default） | 否 |
 | `secs_protocol_session_set_sml_default_handler(...)` | SML 自动回包 | 否 |
+| `secs_protocol_session_set_decoded_*_handler(...)` | decoded handler（框架负责 decode/encode） | 否 |
 | `secs_protocol_session_clear_default_handler(...)` | 清除默认 handler | 否 |
 | `secs_protocol_session_erase_handler(...)` | 移除 handler | 否 |
+| `secs_protocol_session_poll_once(...)` | 单步轮询处理入站（常用于 SECS-I equipment 主循环） | 是 |
 | `secs_protocol_session_send(...)` | 发送消息 | 是 |
 | `secs_protocol_session_request(...)` | 请求-响应 | 是 |
+| `secs_protocol_session_request_with_ceid_list_path(...)` | request/reply CEID 提取与校验 helper | 是 |
+| `secs_ceid_dispatcher_*` + `secs_protocol_session_set_ceid_dispatcher(...)` | CEID 简易分发（不引入 GEM） | 否 |
 
 ---
 
@@ -848,89 +880,18 @@ typedef struct secs_error {
 
 | 文件 | 行数 | 说明 |
 |------|------|------|
-| `include/secs/c_api.h` | 604 | C 语言头文件（接口声明） |
-| `src/c_api.cpp` | 2311 | C API 实现 |
+| `include/secs/c_api.h` | 1396 | C 语言头文件（接口声明） |
+| `src/c_api.cpp` | 4898 | C API 实现 |
 
 ---
 
-## 14. 使用示例
+## 14. 使用示例（推荐）
 
-### 14.1 基本 SECS-II 编解码
+本仓库已提供与接口契约同步维护的可运行示例，建议直接从这些入口理解 C API 的线程/内存模型：
 
-```c
-#include <secs/c_api.h>
-#include <stdio.h>
+- HSMS + custom（Code-First）：`examples/c_api_hsms_custom.c`
+- HSMS + SMLX（Rule-Based）：`examples/c_api_hsms_smlx.c`
+- SECS-I + custom（Code-First）：`examples/c_api_secs1_custom.c`
+- SECS-I + SMLX（Rule-Based）：`examples/c_api_secs1_smlx.c`
 
-int main() {
-    // 创建 List: L[A"hello", U2[1, 2, 3]]
-    secs_ii_item_t *list, *ascii, *u2;
-    secs_ii_item_create_list(&list);
-    secs_ii_item_create_ascii("hello", 5, &ascii);
-
-    uint16_t vals[] = {1, 2, 3};
-    secs_ii_item_create_u2(vals, 3, &u2);
-
-    secs_ii_item_list_append(list, ascii);
-    secs_ii_item_list_append(list, u2);
-
-    // 编码
-    uint8_t *bytes; size_t n;
-    secs_ii_encode(list, &bytes, &n);
-
-    // 解码
-    secs_ii_item_t *decoded; size_t consumed;
-    secs_ii_decode_one(bytes, n, &consumed, &decoded);
-
-    // 清理
-    secs_free(bytes);
-    secs_ii_item_destroy(decoded);
-    secs_ii_item_destroy(u2);
-    secs_ii_item_destroy(ascii);
-    secs_ii_item_destroy(list);
-    return 0;
-}
-```
-
-### 14.2 HSMS 通信
-
-```c
-#include <secs/c_api.h>
-
-int main() {
-    secs_context_t *ctx;
-    secs_context_create(&ctx);
-
-    // 创建会话
-    secs_hsms_session_options_t opts = {
-        .session_id = 0,
-        .t3_ms = 45000,
-        .t5_ms = 10000,
-        .t6_ms = 5000,
-        .t7_ms = 10000,
-        .t8_ms = 5000,
-    };
-    secs_hsms_session_t *sess;
-    secs_hsms_session_create(ctx, &opts, &sess);
-
-    // 连接
-    secs_error_t err = secs_hsms_session_open_active_ip(sess, "192.168.1.100", 5000);
-    if (!secs_error_is_ok(err)) {
-        char *msg = secs_error_message(err);
-        printf("连接失败: %s\n", msg);
-        secs_free(msg);
-    }
-
-    // 发送请求
-    uint8_t body[] = { /* SECS-II 编码数据 */ };
-    secs_hsms_data_message_t reply;
-    secs_hsms_session_request_data(sess, 1, 1, body, sizeof(body), 0, &reply);
-
-    // 处理响应
-    // ...
-
-    secs_hsms_data_message_free(&reply);
-    secs_hsms_session_destroy(sess);
-    secs_context_destroy(ctx);
-    return 0;
-}
-```
+历史示例已归档到 `examples/legacy/`（默认不再构建）。

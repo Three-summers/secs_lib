@@ -1,7 +1,7 @@
 # SECS-I 模块详细实现原理
 
-> 文档更新：2026-01-08（Codex）
-> 基于源码版本：当前 main 分支
+> 文档更新：2026-01-19（Codex）  
+> 对应实现：`main`（CMake：`project(secs VERSION 0.1.0)`）
 > 对应标准：SEMI E4（SECS-I Message Transfer）
 
 ## 1. 模块概述

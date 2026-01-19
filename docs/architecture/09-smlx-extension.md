@@ -1,9 +1,8 @@
 # SML 扩展提案：占位符（变量注入）与脚本化收发（SMLX）
 
-> 文档生成日期：2026-01-09  
-> 执行者：Codex  
+> 文档更新：2026-01-19（Codex）  
 > 状态：已实现部分（SMLX v0，见“当前实现状态”）  
-> 关联：现有 SML 子集与运行时说明见 `docs/architecture/06-sml-module.md`
+> 关联：现有 SML 子集与运行时说明见 [06-sml-module.md](06-sml-module.md)
 
 ## 0. 当前实现状态（SMLX v0）
 
@@ -11,6 +10,9 @@
 
 - **消息模板支持占位符**（值位置写标识符）：`<A MDLN>`、`<U2 1 SVIDS 3>`、`<B BYTES>` 等
 - **条件期望值支持占位符**：`if (...) ==<Item>` 的 `<Item>` 允许写标识符，占位符由 `RenderContext` 提供并在匹配时渲染后比较
+- **数据捕获（Data Capture）**：条件规则支持 `<pattern>` 捕获 `$NAME` 到 `RenderContext`
+  - `include/secs/sml/runtime.hpp`：`Runtime::match_response_with_capture()` / `match_response_with_trace()`
+  - `include/secs/c_api.h`：`secs_sml_runtime_match_response_with_capture()`（C API 对应能力）
 - **渲染接口**：
   - `include/secs/sml/render.hpp`：`secs::sml::RenderContext` + `secs::sml::render_item()`
   - `include/secs/sml/runtime.hpp`：`secs::sml::Runtime::encode_message_body()`（面向“代码主动发送”）

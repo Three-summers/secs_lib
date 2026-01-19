@@ -1,7 +1,7 @@
 # Protocol 模块详细实现原理
 
-> 文档更新：2026-01-08（Codex）
-> 基于源码版本：当前 main 分支
+> 文档更新：2026-01-19（Codex）  
+> 对应实现：`main`（CMake：`project(secs VERSION 0.1.0)`）
 
 ## 1. 模块概述
 
@@ -11,6 +11,7 @@
 - **单步轮询**：`Session::async_poll_once()` 单步接收并处理一条入站消息（SECS-I 半双工场景推荐）
 - **消息路由**：`Router` 基于 (Stream, Function) 分发入站消息到处理器
 - **事务标识**：`SystemBytes` 分配器保证请求-响应匹配的唯一性
+- **CEID 简易分发（可选）**：`CeidDispatcher` 将 “decode + CEID 提取 + 分发” 收敛为可复用处理层（不引入 GEM）
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -766,7 +767,7 @@ for (;;) {
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    协议层使用示例                                   │
-├──────────────��──────────────────────────────────────────────────────┤
+├─────────────────────────────────────────────────────────────────────┤
 │                                                                     │
 │  【Host 端示例 - 发起请求】                                         │
 │  ┌────────────────────────────────────────────────────────────┐    │
@@ -816,6 +817,29 @@ for (;;) {
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+### 8.1 CEID dispatcher（不引入 GEM）
+
+当你的厂商文档把“事件/请求类型”编码在消息体里（典型如 `S6F11` 的 `<L <DATAID> <CEID> <...>>`），你往往会写出：
+
+1. `decode_one(body)`；
+2. 从 List 的某个位置提取 CEID；
+3. `switch(ceid)` 分发到不同 handler；
+
+为了把这一段样板代码收敛为可复用模块，本仓库提供：
+
+- `include/secs/protocol/ceid_dispatcher.hpp`：`secs::protocol::CeidDispatcher`
+- `include/secs/utils/ceid_helpers.hpp`：一些最小的 CEID 提取/校验 helper（不引入 GEM 语义）
+
+设计要点：
+
+- `CeidDispatcher` 的 extractor 由你提供（体现“厂商文档定义的布局”），库只负责调用；
+- handler 可返回 bytes（直接作为 secondary body），也可返回 `secs::ii::Item`（由 dispatcher 负责 encode）。
+
+对应可运行示例：
+
+- Code-First：`examples/hsms_custom.cpp`、`examples/secs1_custom.cpp`
+- SMLX：`examples/hsms_smlx.cpp`、`examples/secs1_smlx.cpp`
 
 ---
 

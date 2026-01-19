@@ -109,7 +109,7 @@ struct CustomMsg {
 使用 `TypedHandler` 实现类型安全的消息处理。
 
 ```cpp
-#include "secs/protocol/typed_handler.hpp"
+#include <secs/protocol/typed_handler.hpp>
 
 // 定义 Handler：接收 Request，返回 Response
 class MyS1F1Handler : public secs::protocol::TypedHandler<S1F1Request, S1F2Response> {
@@ -135,8 +135,42 @@ secs::protocol::Router router;
 auto handler = std::make_shared<MyS1F1Handler>(my_device);
 secs::protocol::register_typed_handler(router, 1, 1, handler);
 
-// 或直接注册到 Session
-proto.router().set(1, 1, handler);
+// 或直接注册到 Session 的 Router
+secs::protocol::register_typed_handler(proto.router(), 1, 1, handler);
+```
+
+#### CEID 分发（可选，不引入 GEM）
+
+对于“消息体携带 CEID”的场景（典型如 `S6F11/S6F12`），可以使用 `secs::protocol::CeidDispatcher` 将：
+
+1. decode body -> `secs::ii::Item`
+2. 提取 CEID（按厂商文档定义）
+3. 按 CEID 分发到不同 handler
+
+收敛为一个可复用的处理层（不引入 GEM 语义）。
+
+- 头文件：`<secs/protocol/ceid_dispatcher.hpp>`、`<secs/utils/ceid_helpers.hpp>`
+- 对应示例：`examples/hsms_custom.cpp`、`examples/secs1_custom.cpp`
+
+```cpp
+#include <secs/protocol/ceid_dispatcher.hpp>
+#include <secs/utils/ceid_helpers.hpp>
+
+auto disp = std::make_shared<secs::protocol::CeidDispatcher>(
+    [](const secs::protocol::DataMessage&, const secs::ii::Item& body)
+        -> std::optional<std::uint32_t> {
+        return secs::utils::extract_ceid_s6f11_like(body);
+    });
+
+disp->set_item(0x1001, [](std::uint32_t ceid, const secs::ii::Item& req_body,
+                          const secs::protocol::DataMessage&) -> asio::awaitable<
+                              std::pair<std::error_code, secs::ii::Item>> {
+    (void)ceid;
+    (void)req_body;
+    co_return std::pair{std::error_code{}, secs::ii::Item::list({})};
+});
+
+secs::protocol::register_ceid_dispatcher(proto.router(), 6, 11, disp);
 ```
 
 ### 3. 主动发送消息
@@ -144,7 +178,7 @@ proto.router().set(1, 1, handler);
 #### 发送不需要回复的消息（W=0）
 
 ```cpp
-#include "secs/utils/protocol_helpers.hpp"
+#include <secs/utils/protocol_helpers.hpp>
 
 S6F11Event event;
 event.dataid = 0;
@@ -169,6 +203,8 @@ auto [ec, out] = co_await secs::utils::async_request_decoded(
 
 if (ec) {
     // 处理请求错误
+} else if (!out.decoded.has_value()) {
+    // 合法场景：对端回复空 body
 } else {
     // 解析回复
     auto rsp = secs::ii::from_item<S2F14Response>(out.decoded->item);
@@ -211,7 +247,7 @@ if (s1f1) s1f2.
 ### 2. 加载与集成
 
 ```cpp
-#include "secs/sml/runtime.hpp"
+#include <secs/sml/runtime.hpp>
 
 secs::sml::Runtime rt;
 
@@ -223,19 +259,15 @@ if (auto ec = rt.load(sml_content); ec) {
     return;
 }
 
-// 2. 挂载为 Default Handler（自动回复）
-// 注意：这会创建一个自动回复 handler，收到 W=1 的消息时按 SML 规则匹配并回复
-proto.router().set_default(
-    [rt_copy = rt](const secs::protocol::DataMessage& req)
-        -> asio::awaitable<secs::protocol::HandlerResult> {
-        // 这里需要实现自动回复逻辑
-        // 参考 examples/hsms_sml_peer.cpp:323-413 的 make_sml_auto_reply()
-        co_return secs::protocol::HandlerResult{
-            secs::core::make_error_code(secs::core::errc::not_implemented), {}};
-    });
+// 2. 集成方式（推荐）：在 Router 上注册一个“规则驱动”的 handler
+// - 典型场景：S6F11(W=1) -> S6F12（按 CEID/参数分支）
+// - 参考实现：examples/hsms_smlx.cpp、examples/secs1_smlx.cpp
+//
+// 关键点：
+// - match_response_with_capture：按条件规则匹配响应模板，并捕获 $DATAID/$PARAMS 等
+// - 在捕获上下文上继续注入业务变量（DEVICE_NAME、温度、报警…）
+// - encode_message_body：渲染并编码响应模板，返回可直接用于回包的 body bytes
 ```
-
-**重要说明**：`make_sml_auto_reply()` 不是库 API，而是示例代码中的实现模式。你需要参考 `examples/hsms_sml_peer.cpp:323-413` 自己实现类似的逻辑。
 
 ### 3. 变量注入（RenderContext）
 
@@ -244,7 +276,7 @@ SML 模板中的占位符（如 `$MDLN`）需要通过 `RenderContext` 注入值
 #### 场景 A：主动发送消息时注入变量
 
 ```cpp
-#include "secs/sml/render.hpp"
+#include <secs/sml/render.hpp>
 
 secs::sml::RenderContext ctx;
 ctx.set("MDLN", secs::ii::Item::ascii("MyDevice"));
@@ -297,58 +329,58 @@ proto.router().set(1, 1,
 
 ### 4. 实现自动回复 Handler
 
-参考 `examples/hsms_sml_peer.cpp:323-413` 的完整实现：
+参考实现：`examples/hsms_smlx.cpp`（HSMS）与 `examples/secs1_smlx.cpp`（SECS-I）。
 
 ```cpp
-secs::protocol::Handler make_sml_auto_reply(std::shared_ptr<secs::sml::Runtime> rt) {
-    return [rt](const secs::protocol::DataMessage& req)
+proto.router().set(6, 11,
+    [&rt, &device](const secs::protocol::DataMessage& req)
         -> asio::awaitable<secs::protocol::HandlerResult> {
 
-        // 只处理 W=1 的请求
         if (!req.w_bit) {
             co_return secs::protocol::HandlerResult{std::error_code{}, {}};
         }
 
-        // 解码请求 body
-        secs::ii::Item decoded{secs::ii::List{}};
-        if (!req.body.empty()) {
-            auto [dec_ec, decoded_opt] = secs::utils::decode_one_item_if_any(
-                secs::core::bytes_view{req.body.data(), req.body.size()});
-            if (dec_ec) {
-                co_return secs::protocol::HandlerResult{dec_ec, {}};
-            }
-            if (decoded_opt.has_value()) {
-                decoded = std::move(decoded_opt->item);
-            }
-        }
-
-        // 匹配响应规则
-        auto matched = rt->match_response(req.stream, req.function, decoded);
-        if (!matched.has_value()) {
+        // 1) decode body -> Item（示例中要求 fully_consumed）
+        auto [dec_ec, decoded] = secs::utils::decode_one_item(
+            secs::core::bytes_view{req.body.data(), req.body.size()});
+        if (dec_ec || !decoded.fully_consumed) {
             co_return secs::protocol::HandlerResult{
                 secs::core::make_error_code(secs::core::errc::invalid_argument), {}};
         }
 
-        // 获取响应模板
-        const auto* rsp = rt->get_message(*matched);
-        if (!rsp) {
+        // 2) 匹配并捕获（capture 写入 ctx）
+        secs::sml::RenderContext ctx;
+        const auto response_name =
+            rt.match_response_with_capture(req.stream, req.function, decoded.item, ctx);
+        if (!response_name.has_value()) {
             co_return secs::protocol::HandlerResult{
                 secs::core::make_error_code(secs::core::errc::invalid_argument), {}};
         }
 
-        // 渲染响应（使用空上下文，或根据需要注入变量）
-        secs::sml::RenderContext ctx{};
-        secs::ii::Item rendered{secs::ii::List{}};
-        auto render_ec = secs::sml::render_item(rsp->item, ctx, rendered);
-        if (render_ec) {
-            co_return secs::protocol::HandlerResult{render_ec, {}};
+        // 3) 在 ctx 上继续注入业务变量（示意）
+        fill_context_for_response(*response_name, device, ctx);
+
+        // 4) 渲染并编码响应模板（得到 body bytes）
+        std::vector<secs::core::byte> rsp_body;
+        std::uint8_t rsp_stream = 0;
+        std::uint8_t rsp_function = 0;
+        bool rsp_w = false;
+        auto enc_ec = rt.encode_message_body(
+            *response_name, ctx, rsp_body, &rsp_stream, &rsp_function, &rsp_w);
+        if (enc_ec) {
+            co_return secs::protocol::HandlerResult{enc_ec, {}};
         }
 
-        // 编码响应
-        auto result = secs::utils::make_handler_result(rendered);
-        co_return result;
-    };
-}
+        // 5) 防呆：确保返回的是 “SxF(y+1) 且 W=0”
+        const auto expected_function =
+            static_cast<std::uint8_t>(req.function + 1u);
+        if (rsp_stream != req.stream || rsp_function != expected_function || rsp_w) {
+            co_return secs::protocol::HandlerResult{
+                secs::core::make_error_code(secs::core::errc::invalid_argument), {}};
+        }
+
+        co_return secs::protocol::HandlerResult{std::error_code{}, std::move(rsp_body)};
+    });
 ```
 
 ---
@@ -389,8 +421,14 @@ opt.dump.dump_secs2_decode = true;    // 打印解码后的 SML 树结构（推�
 
 ## 完整示例
 
-参考以下示例代码：
-- **TypedHandler 用法**：`examples/typed_handler_example.cpp`
-- **SMLX 主动发送**：`examples/smlx_active_send_example.cpp`
-- **SMLX 自动回复**：`examples/hsms_sml_peer.cpp`（特别是 `make_sml_auto_reply()` 函数）
-- **自定义回复逻辑**：`examples/protocol_custom_reply_example.cpp`
+主示例集合（推荐，目录顶层）：
+
+- HSMS：`examples/hsms_custom.cpp`、`examples/hsms_smlx.cpp`
+- SECS-I：`examples/secs1_custom.cpp`、`examples/secs1_smlx.cpp`
+- SML 模板：`examples/ceid_demo.sml`
+
+深入示例（已归档到 legacy，便于参考更细的模式与实验性功能）：
+
+- TypedHandler：`examples/legacy/typed_handler_example.cpp`
+- SMLX 主动发送：`examples/legacy/smlx_active_send_example.cpp`
+- 自定义回复逻辑：`examples/legacy/protocol_custom_reply_example.cpp`

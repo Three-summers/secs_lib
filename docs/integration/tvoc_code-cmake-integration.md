@@ -1,7 +1,6 @@
 # 在纯 C 工程（tvoc_code 类项目）中集成 secs_lib（C ABI）
 
-> 文档生成日期：2026-01-07  
-> 执行者：Codex  
+> 文档更新：2026-01-19（Codex）  
 > 参考工程（仅只读分析，不修改）：`/home/say/code_bak/tvoc_code`  
 > 目标：让“纯 C 工程”可以稳定使用 `secs_lib` 的 C ABI（`#include <secs/c_api.h>`），并给出从 Makefile 迁移到 CMake 的可落地做法。
 

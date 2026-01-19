@@ -1,7 +1,7 @@
 # Utils 模块详细实现原理
 
-> 文档生成日期：2026-01-07
-> 基于源码版本：当前 main 分支
+> 文档更新：2026-01-19（Codex）  
+> 对应实现：`main`（CMake：`project(secs VERSION 0.1.0)`）
 
 ## 1. 模块概述
 
@@ -12,6 +12,10 @@
 - 从抓包/日志复制一段十六进制字符串 -> 解析为 bytes -> 输出字段解析与 hexdump
 - 将 SECS-II Item 以可读格式输出（避免日志被二进制淹没）
 - 在运行时对 `protocol::Session` 的收发报文做动态解析与打印（`SessionOptions::dump` 内部复用本模块的 dump）
+- 提供一组“薄封装” helper（header-only），把常见样板代码收敛到可复用函数：
+  - `ii_helpers.hpp`：`encode_item` / `decode_one_item` 等
+  - `protocol_helpers.hpp`：`async_send_item` / `async_request_decoded` 等
+  - `ceid_helpers.hpp`：CEID 提取与 request/reply 一致性校验辅助
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐

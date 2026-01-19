@@ -1,182 +1,110 @@
-# SML + CEID 完整示例说明
+# （Legacy）SML + CEID 示例说明
 
-## 概述
+> 更新时间：2026-01-19  
+> 状态：Legacy（本目录示例默认不再构建）
 
-本示例展示如何结合 **SML 模板**、**CEID dispatcher** 和**变量注入**，实现一个灵活的设备状态查询系统。
+## 推荐替代（主示例集合）
 
-## 核心特性
+当前仓库目录顶层的主示例已覆盖 “SMLX + Data Capture + 变量注入 + 自动回包” 的完整链路，且默认构建：
 
-### 1. SML 模板定义（带占位符）
+- C++：`examples/hsms_smlx.cpp`、`examples/secs1_smlx.cpp`
+- C API：`examples/c_api_hsms_smlx.c`、`examples/c_api_secs1_smlx.c`
+- SMLX 模板：`examples/ceid_demo.sml`
+
+如果你只是想跑通与联调，请优先使用这些示例（见 `examples/README.md`）。
+
+---
+
+## 本文档定位
+
+本文件用于解释 `examples/legacy/` 下的 “SML + CEID” 历史示例思路，便于你在阅读旧实现/旧接口时快速对照：
+
+- SMLX 模板：定义请求/响应消息体结构与条件规则
+- CEID：作为“业务分支键”（按厂商文档定义，通常位于 `S6F11` body 中）
+- RenderContext：把动态数据注入到模板占位符
+
+注意：本示例不引入 GEM（E30）语义，仅用于演示“按 CEID 分支的事件/请求-响应”类型消息。
+
+---
+
+## 当前实现中的 SMLX 写法（与 `ceid_demo.sml` 一致）
+
+### 1) 响应模板（带占位符）
 
 ```sml
 status_response: S6F12
 <L
-  <U2 DATAID>           /* 变量：从请求中提取 */
-  <U2 0x1001>           /* CEID 回显 */
+  <U2 DATAID>
+  <U2 0x1001>
   <L
-    <A DEVICE_NAME>     /* 变量：设备名称 */
-    <U1 STATUS_CODE>    /* 变量：状态码 */
-    <U4 UPTIME_SECONDS> /* 变量：运行时间 */
+    <A DEVICE_NAME>
+    <U1 STATUS_CODE>
+    <U4 UPTIME_SECONDS>
   >
 >.
 ```
 
-### 2. 条件响应规则（根据 CEID 自动选择）
+### 2) 条件规则（自动选择响应 + 捕获变量）
+
+这里使用 **Data Capture**（`$NAME`）在匹配时捕获请求中的字段（例如 `$DATAID`、`$PARAMS`）：
 
 ```sml
-/* 条件中的 s6f11 会被自动解析为 stream=6, function=11 */
-/* 新语法：[i] 为 0-based List 下标（取根 List 的第 i 个子元素） */
-if (s6f11[1]==<U2 0x1001>) status_response.
-if (s6f11[1]==<U2 0x1002>) temperature_response.
-if (s6f11[1]==<U2 0x1003>) alarm_response.
-if (s6f11[1]==<U2 0x1004>) production_response.
-
-/* 兼容旧语法：(n) 为 1-based 先序遍历编号（包含根节点） */
-// if (s6f11(3)==<U2 0x1001>) status_response.
+if (S6F11 <L [3] <U2 $DATAID> <U2 0x1001> <L $PARAMS>>) status_response.
 ```
 
-**关键点：**
-- `[i]` 是 **0-based 数组下标**，更贴近日常对 List 的访问；`(n)` 仍保持完全兼容（1-based 先序遍历编号）
-- `(n)` 与 `[i]` **互斥**，不能写成 `s6f11(3)[1]`
-- S6F11 结构: `<L <U2 DATAID> <U2 CEID> <L>>`
-  - `[0]` = `<U2 DATAID>`
-  - `[1]` = `<U2 CEID>` ← CEID 在这里
-  - `[2]` = `<L>` params
-  - `(3)` = `<U2 CEID>`（等价于 `[1]`，用于向后兼容/复杂嵌套场景）
+匹配成功后：
 
-**期望值占位符示例：**
+- `match_response_with_capture(...)` 返回 `status_response`；
+- 捕获到的 `$DATAID/$PARAMS` 会写入一个 `RenderContext`（变量名不包含 `$`）。
 
-```sml
-/* 期望值也支持占位符：由 RenderContext 注入并在匹配时渲染后比较 */
-if (s6f11[1]==<U2 EXPECTED_CEID>) status_response.
-```
-
-### 3. 运行时变量注入
+### 3) 运行时变量注入（示意）
 
 ```cpp
-// 根据 CEID 填充不同的数据
-sml::RenderContext ctx;
-ctx.set("DATAID", ii::Item::u2({dataid}));
-// 可选：用于条件期望值占位符（例如 if (...==<U2 EXPECTED_CEID>)）
-ctx.set("EXPECTED_CEID", ii::Item::u2({0x1001}));
+secs::sml::RenderContext ctx;
 
-switch (ceid) {
-case 0x1001: // 设备状态查询
-    ctx.set("DEVICE_NAME", ii::Item::ascii(data.device_name));
-    ctx.set("STATUS_CODE", ii::Item::u1({data.status_code}));
-    ctx.set("UPTIME_SECONDS", ii::Item::u4({data.uptime_seconds}));
-    break;
+// 捕获变量：例如 ctx["DATAID"] 已存在（由 match_response_with_capture 写入）
 
-case 0x1002: // 温度数据查询
-    ctx.set("TEMP_SENSOR_1", ii::Item::f4({data.temp_sensor_1}));
-    ctx.set("TEMP_SENSOR_2", ii::Item::f4({data.temp_sensor_2}));
-    ctx.set("TEMP_SENSOR_3", ii::Item::f4({data.temp_sensor_3}));
-    break;
-
-// ... 其他 CEID
-}
+// 业务注入：按 CEID/响应模板补齐其它占位符
+ctx.set("DEVICE_NAME", secs::ii::Item::ascii("EQUIPMENT-001"));
+ctx.set("STATUS_CODE", secs::ii::Item::u1({1}));
+ctx.set("UPTIME_SECONDS", secs::ii::Item::u4({12345}));
 ```
 
-### 4. 自动渲染并回包
+### 4) 自动渲染并回包（关键流程）
 
-```cpp
-// SML Runtime 自动匹配条件并返回响应模板名称
-// 当条件期望值包含占位符时，需要把 ctx 传给 match_response()
-auto response_name = rt.match_response(req.stream, req.function, decoded.item, ctx);
+典型 handler 流程（C++）：
 
-// 渲染模板（注入变量）
-std::vector<core::byte> response_body;
-auto enc_ec = rt.encode_message_body(*response_name, ctx, response_body);
+1. `decode_one(body)` 解码请求 body -> `secs::ii::Item`
+2. `match_response_with_capture(stream, function, item, captures)` 匹配并捕获
+3. 在 `captures` 上继续注入业务变量
+4. `encode_message_body(response_name, captures, out_body, &s, &f, &w)` 得到响应 body bytes
+5. 返回 `HandlerResult{ec, body}`，由 `protocol::Session` 自动回 secondary
 
-// 返回给 protocol::Session，自动回包
-co_return protocol::HandlerResult{std::error_code{}, std::move(response_body)};
-```
+对应可运行参考：`examples/hsms_smlx.cpp` 与 `examples/secs1_smlx.cpp`。
 
-## 运行示例
+---
 
-```bash
-cd build/examples
-./sml_ceid_complete
-```
+## 本目录相关文件
 
-## 输出示例
+- `examples/legacy/sml_ceid_complete.cpp`：历史 C++ 示例
+- `examples/legacy/sml_ceid_complete.sml`：历史 SML 模板（与 `examples/ceid_demo.sml` 不同）
+- `examples/legacy/c_api_sml_ceid_complete.c`：历史 C API 示例
+- `examples/legacy/SML_CEID_README.md`：本文档
 
-```
-=== Test 1: CEID=0x1001 ===
-[Host] Sending S6F11 (W=1), DATAID=1, CEID=0x1001
-[Equipment] Received S6F11
-[Equipment] DATAID=1, CEID=0x1001
-[Equipment] Matched response: status_response
-[Equipment] Response rendered, size=36 bytes
+---
 
-[Host] Received S6F12
-[Host] Response body:
-  <L> (3 items)
-    <U2 1>
-    <U2 4097>
-    <L> (3 items)
-      <A "EQUIPMENT-001">
-      <U1 1>
-      <U4 12345>
-```
+## 运行说明（如需）
 
-## 架构优势
+本目录示例默认不再构建；如需运行，可以：
 
-### 1. 关注点分离
+1. 参考 `examples/CMakeLists.txt` 的主示例写法，将某个 legacy 源文件临时加入 build 目标；
+2. 或直接把 legacy 源码当作“可读参考”，迁移关键逻辑到主示例集合。
 
-- **SML 文件**：定义消息结构和路由规则（配置）
-- **C++ 代码**：提供动态数据和业务逻辑（代码）
-
-### 2. 易于维护
-
-- 新增 CEID：只需在 SML 文件中添加模板和条件规则
-- 修改响应格式：只需修改 SML 模板
-- 无需重新编译（SML 文件在运行时加载）
-
-### 3. 类型安全
-
-- 变量类型在渲染时检查
-- 编译期保证 SECS-II 编解码正确性
-
-## 适用场景
-
-✅ **推荐使用 SML + CEID 的场景：**
-- 多个 CEID，每个 CEID 对应不同的响应格式
-- 响应格式相对固定，只有少数字段需要动态填充
-- 需要快速迭代和调试（修改 SML 无需重新编译）
-
-❌ **不推荐使用 SML 的场景：**
-- 响应逻辑非常复杂（多层条件判断、状态机）
-- 需要访问外部资源（数据库、文件系统）
-- 响应格式完全动态（无法预先定义模板）
-
-对于复杂场景，直接使用 C++ 的 `CeidDispatcher`：
-
-```cpp
-auto disp = std::make_shared<protocol::CeidDispatcher>(extractor);
-disp->set(0x1001, [](auto ceid, auto& item, auto& msg) {
-    // 复杂逻辑在这里
-    return build_complex_response(ceid, item);
-});
-```
-
-## 文件清单
-
-- `sml_ceid_complete.cpp` - 完整的 C++ 示例代码
-- `sml_ceid_complete.sml` - SML 模板文件
-- `SML_CEID_README.md` - 本说明文档
-
-## 关键技术点总结
-
-1. **SML 条件匹配**：`if (s6f11[1]==<U2 0x1001>)` 自动解析 stream/function
-2. **索引语义**：`[i]` 为 0-based List 下标；`(n)` 为 1-based 先序遍历编号（向后兼容）
-3. **变量注入**：`RenderContext` 为消息渲染与条件期望值渲染提供运行时数据
-4. **自动渲染**：`Runtime::encode_message_body()` 一步完成渲染+编码
-5. **Router 集成**：`match_response(..., ctx)` 返回响应模板名称（需要占位符条件时传入 ctx）
+---
 
 ## 扩展阅读
 
-- `docs/architecture/09-smlx-extension.md` - SMLX 扩展设计文档
-- `docs/architecture/06-sml-module.md` - SML 模块说明
-- `include/secs/protocol/ceid_dispatcher.hpp` - CEID dispatcher API
-- `examples/ceid_dispatcher_tvoc_style.cpp` - 纯 C++ 的 CEID 示例
+- SML 模块实现：`docs/architecture/06-sml-module.md`
+- SMLX 扩展提案：`docs/architecture/09-smlx-extension.md`
+- CEID 分发（C++）：`include/secs/protocol/ceid_dispatcher.hpp`
+- CEID 辅助（C++）：`include/secs/utils/ceid_helpers.hpp`

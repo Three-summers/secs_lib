@@ -1,7 +1,7 @@
 # HSMS 模块详细实现原理
 
-> 文档生成日期：2026-01-06
-> 基于源码版本：当前 main 分支
+> 文档更新：2026-01-19（Codex）  
+> 对应实现：`main`（CMake：`project(secs VERSION 0.1.0)`）
 > 对应标准：SEMI E37（HSMS - High-Speed SECS Message Services）
 
 ## 1. 模块概述

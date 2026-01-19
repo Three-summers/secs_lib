@@ -3,7 +3,12 @@
 > 文档创建日期：2026-01-18
 > 状态：P0/P1 已实现；P2（Sticky Error Context）仍为提案；另新增若干“对齐 C++ 易用性”的补强项
 
-本文档基于对当前 `secs_c_api` 的审查以及 `examples/c_api_sml_ceid_complete.c` 的痛点分析，旨在提出一套切实可行的改进方案，使 C API 的开发体验接近 C++，降低使用门槛。
+本文档基于对当前 `secs_c_api` 的审查以及历史示例 `examples/legacy/c_api_sml_ceid_complete.c` 的痛点分析，旨在提出一套切实可行的改进方案，使 C API 的开发体验接近 C++，降低使用门槛。
+
+说明：
+
+- 原始痛点示例已归档到 `examples/legacy/`（默认不再构建，便于对照历史问题）。
+- 当前推荐从目录顶层的主示例集合 `examples/c_api_*.c` 理解最新用法与最佳实践。
 
 ## 1. 现状痛点分析
 
@@ -182,16 +187,16 @@ if (secs_sml_ctx_get_last_error(ctx) != SECS_OK) {
 理由：
 1.  **需求最迫切**：SML 的核心就是变量注入，这部分代码在业务逻辑中占比最高。
 2.  **实现成本低**：只需对现有 API 进行简单的包装。
-3.  **收益立竿见影**：能立即简化 `examples/c_api_sml_ceid_complete.c` 中的大部分代码。
+3.  **收益立竿见影**：能立即简化 `examples/legacy/c_api_sml_ceid_complete.c` 中的大部分代码。
 
 已完成落地：
 
-- `secs_sml_render_context_set_*()` 便捷注入函数已在 C API 中提供，并已用于重写后的 `examples/c_api_sml_ceid_complete.c`。
-- Phase 2（List Builder）与 Phase 3（Extraction Helpers）已在 C API 中提供，并已用于重写后的 `examples/c_api_sml_ceid_complete.c`。
+- `secs_sml_render_context_set_*()` 便捷注入函数已在 C API 中提供，并用于主示例集合与历史示例 `examples/legacy/c_api_sml_ceid_complete.c`。
+- Phase 2（List Builder）与 Phase 3（Extraction Helpers）已在 C API 中提供，并用于主示例集合与历史示例 `examples/legacy/c_api_sml_ceid_complete.c`。
 
 ## 5. 验收标准
 
-以重构后的 `c_api_sml_ceid_complete.c` 为准：
+以主示例集合（`examples/c_api_*.c`）与历史示例 `examples/legacy/c_api_sml_ceid_complete.c` 为准：
 *   代码行数减少 30% 以上。
 *   `secs_ii_item_destroy` 的调用次数减少 80%。
 *   业务逻辑（变量注入）部分不再夹杂 `secs_ii_item_create` 等底层操作。

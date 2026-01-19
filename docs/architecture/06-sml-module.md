@@ -1,8 +1,8 @@
 # SML 模块详细实现原理
 
-> 文档更新日期：2026-01-09（Codex）  
-> 基于源码版本：当前 main 分支  
-> 说明：本文覆盖当前实现的 SML 子集 + SMLX v0（占位符/渲染/主动发送）；扩展背景与提案见 `docs/architecture/09-smlx-extension.md`。
+> 文档更新：2026-01-19（Codex）  
+> 对应实现：`main`（CMake：`project(secs VERSION 0.1.0)`）  
+> 说明：本文覆盖当前实现的 SML 子集 + SMLX v0（占位符/渲染/主动发送）；扩展背景与提案见 [09-smlx-extension.md](09-smlx-extension.md)。
 
 ## 1. 模块概述
 
@@ -995,7 +995,7 @@ ec = runtime.encode_message_body("req", ctx, body, &s, &f, &w);
 补充：
 
 - `render_item()` 的错误码域为 `sml.render`（missing_variable/type_mismatch），并会在 OOM 等异常场景下返回 `secs.core/out_of_memory`（见 `src/sml/render.cpp`）。
-- 代码侧完整用法可参考示例：`examples/smlx_active_send_example.cpp`。
+- 代码侧完整用法可参考示例：`examples/hsms_smlx.cpp`（client 侧使用 req_* 模板主动发送）或 `examples/legacy/smlx_active_send_example.cpp`（更聚焦主动发送）。
 
 ---
 

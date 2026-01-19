@@ -1,7 +1,7 @@
 # SECS-II 模块详细实现原理
 
-> 文档生成日期：2026-01-06
-> 基于源码版本：当前 main 分支
+> 文档更新：2026-01-19（Codex）  
+> 对应实现：`main`（CMake：`project(secs VERSION 0.1.0)`）  
 > 对应标准：SEMI E5（SECS-II Message Content）
 
 ## 1. 模块概述
@@ -11,6 +11,7 @@
 - **数据模型**：`Item` 类型系统（强类型 AST）
 - **编解码**：`encode()` / `decode_one()` 函数
 - **资源限制**：`DecodeLimits` 防止恶意输入
+- **声明式映射（可选）**：`struct_codec.hpp` 提供 `to_item/from_item<T>`，用于 TypedHandler 场景减少样板代码
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -207,6 +208,25 @@
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+### 3.4 struct_codec：struct <-> Item 的声明式映射（用于 TypedHandler）
+
+在“业务侧希望以结构体表示消息体”的场景，`secs::ii` 额外提供一个可选的声明式映射层：
+
+- 文件：`include/secs/ii/struct_codec.hpp`
+- API：`secs::ii::to_item(obj)` / `secs::ii::from_item<T>(item)`
+- 典型用途：配合 `secs::protocol::TypedHandler`（见 `include/secs/protocol/typed_handler.hpp`）减少手写 `to_item/from_item` 的样板代码
+
+默认规则（概览）：
+
+1. `T::secs_members()` 返回 N 个“成员指针”：
+   - `to_item(obj)` -> `<L field0 field1 ... fieldN-1>`
+   - `from_item<T>(item)` 要求输入为 List 且 length==N，逐一 decode，否则返回 `nullopt`
+2. 若 `secs_members()` 只返回 1 个成员指针，且该成员类型为 `std::vector<U>`：
+   - `to_item(obj)` -> `<L elem...>`（逐个编码）
+   - `from_item<T>(item)` 要求输入为 List，逐个解码进 vector
+
+更多细节与边界行为以头文件注释与单元测试为准：`tests/test_struct_codec.cpp`。
 
 ---
 

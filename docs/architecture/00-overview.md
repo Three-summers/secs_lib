@@ -1,7 +1,15 @@
 # secs_lib 架构总览
 
-> 文档更新：2026-01-11（Codex）
-> 基于源码版本：当前 main 分支
+> 文档更新：2026-01-19（Codex）  
+> 对应实现：`main`（CMake：`project(secs VERSION 0.1.0)`）
+
+## 阅读顺序（推荐）
+
+- 文档总入口：`../index.md`
+- 使用指南：`../user_guide/01-cpp-api.md`（C++） / `../user_guide/02-c-api.md`（C）
+- 示例（可运行）：`../../examples/README.md`
+- 联调测试：`../../integration_tests/README.md`
+- 如果你更关心“怎么实现”：从本文开始，按模块文档逐个阅读
 
 ## 项目简介
 
@@ -86,7 +94,7 @@ ii        -> core
 
 ---
 
-## 文档清单
+## 架构文档清单
 
 | 序号 | 模块 | 文档 | 主要内容 |
 |------|------|------|----------|
@@ -98,13 +106,19 @@ ii        -> core
 | 06 | sml | [06-sml-module.md](06-sml-module.md) | SML 语法、词法/语法分析、运行时 |
 | 07 | c_api | [07-c-api-module.md](07-c-api-module.md) | C 语言绑定、不透明句柄、阻塞式桥接 |
 | 08 | utils | [08-utils-module.md](08-utils-module.md) | 调试工具：hex/Item dump/HSMS/SECS-I 报文解析 |
-| 09 | sml（提案） | [09-smlx-extension.md](09-smlx-extension.md) | SML 扩展提案：占位符/变量注入、脚本化收发 |
+| 09 | sml（提案） | [09-smlx-extension.md](09-smlx-extension.md) | SMLX 扩展提案：占位符/捕获/脚本化收发 |
+| 10 | sml（路线图） | [10-sml-usability-roadmap.md](10-sml-usability-roadmap.md) | SML 可用性增强路线图（提案） |
+| 11 | c_api（计划） | [11-c-api-improvement-plan.md](11-c-api-improvement-plan.md) | C API 易用性改进计划（已落地 P0/P1） |
 
 ---
 
 ## 可选组件
 
 - `include/secs/messages/standard.hpp`：常用/标准消息类型（基于 `secs::ii::Item` 的 `from_item/to_item`），用于减少重复样板代码
+- `include/secs/ii/struct_codec.hpp`：struct <-> Item 的声明式映射（`secs_members()`），用于 TypedHandler 场景减少手写编解码
+- `include/secs/protocol/ceid_dispatcher.hpp`：CEID 简易处理层（不引入 GEM，仅做 body 解码 + CEID 提取 + 分发）
+- `include/secs/utils/ceid_helpers.hpp`：CEID 提取与 request/reply 一致性校验辅助
+- `include/secs/utils/protocol_helpers.hpp`：`protocol::Session` 的易用包装（bytes <-> Item 的样板代码收敛）
 
 ---
 

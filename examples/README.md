@@ -19,7 +19,7 @@ cmake --build build --target examples
 - C（C API）：
   - `c_api_hsms_custom` / `c_api_hsms_smlx`
   - `c_api_secs1_custom` / `c_api_secs1_smlx`
-- 共享 SMLX 模板：`ceid_demo.sml`（构建后会复制到 `build/examples/`，便于直接运行）
+- 共享 SMLX 模板：`examples/ceid_demo.sml`（构建后会复制到 `build/examples/ceid_demo.sml`，便于直接运行）
 
 所有主示例均支持 `--role <server|client|loopback>`，业务统一为：
 - Host 发送 `S6F11(W=1)`：`<L[3] <U2 DATAID> <U2 CEID> <L PARAMS>>`
@@ -31,19 +31,21 @@ cmake --build build --target examples
 ### HSMS（TCP）
 
 ```bash
+cd build/examples
+
 # custom（C++）
-./build/examples/hsms_custom --role server --listen 0.0.0.0 --port 5000 --session-id 0x0001
-./build/examples/hsms_custom --role client --connect 127.0.0.1 --port 5000 --session-id 0x0001
-./build/examples/hsms_custom --role loopback
+./hsms_custom --role server --listen 0.0.0.0 --port 5000 --session-id 0x0001
+./hsms_custom --role client --connect 127.0.0.1 --port 5000 --session-id 0x0001
+./hsms_custom --role loopback
 
 # smlx（C++）
-./build/examples/hsms_smlx --role server --listen 0.0.0.0 --port 5000 --session-id 0x0001 --sml ceid_demo.sml
-./build/examples/hsms_smlx --role client --connect 127.0.0.1 --port 5000 --session-id 0x0001 --sml ceid_demo.sml
-./build/examples/hsms_smlx --role loopback --sml ceid_demo.sml
+./hsms_smlx --role server --listen 0.0.0.0 --port 5000 --session-id 0x0001 --sml ceid_demo.sml
+./hsms_smlx --role client --connect 127.0.0.1 --port 5000 --session-id 0x0001 --sml ceid_demo.sml
+./hsms_smlx --role loopback --sml ceid_demo.sml
 
 # 对应 C API（loopback 快速验证）
-./build/examples/c_api_hsms_custom --role loopback
-./build/examples/c_api_hsms_smlx   --role loopback --sml ceid_demo.sml
+./c_api_hsms_custom --role loopback
+./c_api_hsms_smlx   --role loopback --sml ceid_demo.sml
 ```
 
 ### SECS-I（串口 / 虚拟串口）
@@ -52,19 +54,21 @@ cmake --build build --target examples
 > 需要一对互联串口：Windows 推荐 com0com（COM5 <-> COM6）；Linux 可用 socat 创建 pty pair。
 
 ```bash
+cd build/examples
+
 # custom（C++）
-./build/examples/secs1_custom --role server --serial COM5 --baud 9600 --device-id 0x0001
-./build/examples/secs1_custom --role client --serial COM6 --baud 9600 --device-id 0x0001
-./build/examples/secs1_custom --role loopback --device-id 0x0001
+./secs1_custom --role server --serial COM5 --baud 9600 --device-id 0x0001
+./secs1_custom --role client --serial COM6 --baud 9600 --device-id 0x0001
+./secs1_custom --role loopback --device-id 0x0001
 
 # smlx（C++）
-./build/examples/secs1_smlx --role server --serial COM5 --baud 9600 --device-id 0x0001 --sml ceid_demo.sml
-./build/examples/secs1_smlx --role client --serial COM6 --baud 9600 --device-id 0x0001 --sml ceid_demo.sml
-./build/examples/secs1_smlx --role loopback --device-id 0x0001 --sml ceid_demo.sml
+./secs1_smlx --role server --serial COM5 --baud 9600 --device-id 0x0001 --sml ceid_demo.sml
+./secs1_smlx --role client --serial COM6 --baud 9600 --device-id 0x0001 --sml ceid_demo.sml
+./secs1_smlx --role loopback --device-id 0x0001 --sml ceid_demo.sml
 
 # 对应 C API（loopback 快速验证）
-./build/examples/c_api_secs1_custom --role loopback --device-id 0x0001
-./build/examples/c_api_secs1_smlx   --role loopback --device-id 0x0001 --sml ceid_demo.sml
+./c_api_secs1_custom --role loopback --device-id 0x0001
+./c_api_secs1_smlx   --role loopback --device-id 0x0001 --sml ceid_demo.sml
 ```
 
 ## Legacy（旧示例归档）
@@ -78,5 +82,7 @@ cmake --build build --target examples
 
 ```bash
 ctest --test-dir build -R hsms_pipe_examples --output-on-failure
-```
 
+# 或者在 build/examples 目录下：
+# ctest --test-dir .. -R hsms_pipe_examples --output-on-failure
+```
