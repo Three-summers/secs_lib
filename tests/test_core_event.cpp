@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <utility>
 
 namespace {
 
@@ -180,6 +181,24 @@ void test_max_waiters_limit() {
     TEST_EXPECT(waiter2_done.load());
 }
 
+void test_moved_from_event_is_safe() {
+    asio::io_context ioc;
+
+    Event ev;
+    Event moved = std::move(ev);
+
+    // moved-from 的 ev 允许被调用且不应崩溃（覆盖 state_==nullptr 分支）
+    TEST_EXPECT(!ev.is_set());
+    ev.set();
+    ev.reset();
+    ev.cancel();
+    TEST_EXPECT(!ev.is_set());
+
+    // moved 仍应保持可用
+    moved.set();
+    TEST_EXPECT(moved.is_set());
+}
+
 } // namespace
 
 int main() {
@@ -189,5 +208,6 @@ int main() {
     test_multi_waiters();
     test_reset();
     test_max_waiters_limit();
+    test_moved_from_event_is_safe();
     return ::secs::tests::run_and_report();
 }

@@ -277,6 +277,22 @@ void test_system_bytes_exhaustion_small_space() {
     TEST_EXPECT_EQ(sb.in_use_count(), 3U);
 }
 
+void test_system_bytes_max_value_zero_and_invalid_queries() {
+    // max_value=0：归一化为 UINT32_MAX，且 initial=0 归一化为 1。
+    SystemBytes sb(0U, 0U);
+    std::uint32_t v = 0;
+    TEST_EXPECT_OK(sb.allocate(v));
+    TEST_EXPECT(v != 0U);
+    sb.release(v);
+
+    // is_in_use/release：非法 system_bytes（0 或 >max）应被忽略/返回 false。
+    SystemBytes small(1U, 3U);
+    TEST_EXPECT(!small.is_in_use(0U));
+    TEST_EXPECT(!small.is_in_use(4U));
+    small.release(0U);
+    small.release(4U);
+}
+
 void test_router_set_find_erase_clear() {
     Router r;
     TEST_EXPECT(!r.find(1, 1).has_value());
@@ -1812,6 +1828,7 @@ void test_protocol_runtime_dump_hsms_and_secs1() {
 int main() {
     test_system_bytes_unique_release_reuse_and_wrap();
     test_system_bytes_exhaustion_small_space();
+    test_system_bytes_max_value_zero_and_invalid_queries();
     test_router_set_find_erase_clear();
     test_hsms_protocol_pending_filters();
     test_hsms_protocol_stop_cancels_pending();

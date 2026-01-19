@@ -2,15 +2,10 @@
 
 #include "secs/core/common.hpp"
 
-#include <asio/as_tuple.hpp>
 #include <asio/awaitable.hpp>
-#include <asio/steady_timer.hpp>
-#include <asio/this_coro.hpp>
-#include <asio/use_awaitable.hpp>
 
 #include <cstddef>
 #include <cstdint>
-#include <list>
 #include <memory>
 #include <optional>
 #include <system_error>
@@ -33,14 +28,19 @@ namespace secs::core {
  */
 class Event final {
 public:
-    Event() = default;
-    explicit Event(std::size_t max_waiters) noexcept : max_waiters_(max_waiters) {}
+    Event();
+    explicit Event(std::size_t max_waiters);
+
+    Event(const Event &) = delete;
+    Event &operator=(const Event &) = delete;
+    Event(Event &&) noexcept = default;
+    Event &operator=(Event &&) noexcept = default;
 
     void set() noexcept;
     void reset() noexcept;
     void cancel() noexcept;
 
-    [[nodiscard]] bool is_set() const noexcept { return signaled_; }
+    [[nodiscard]] bool is_set() const noexcept;
 
     asio::awaitable<std::error_code>
     async_wait(std::optional<steady_clock::duration> timeout = std::nullopt);
@@ -48,16 +48,8 @@ public:
 private:
     void cancel_waiters_() noexcept;
 
-    bool signaled_{false};
-    std::uint64_t set_generation_{0};
-    std::uint64_t cancel_generation_{0};
-    std::size_t max_waiters_{1024};
-
-    // asio::steady_timer 基于单调时钟，一般用 async_wait 来异步等待
-    // 可以使用 expires_after 和 expires_at 来分别设置相对和绝对等待时间
-    // 可以使用 cancel 取消所有挂起的等待，已挂起的 async_wait 会尽快
-    // 完成并返回 operation_aborted，挂起表示还未完成，回调还未被调用
-    std::list<std::shared_ptr<asio::steady_timer>> waiters_{};
+    struct State;
+    std::shared_ptr<State> state_;
 };
 
 } // namespace secs::core

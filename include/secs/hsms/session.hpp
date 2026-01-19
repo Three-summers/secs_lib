@@ -88,6 +88,12 @@ struct SessionOptions final {
     // - 达到上限时，事务类 API 会快速失败，避免 pending_ 无界增长。
     std::size_t max_pending_requests{256};
 
+    // 入站 data message 队列上限（0 表示不限制）：
+    // - 当上层长时间不调用 async_receive_data() 且对端持续发送 data 时，
+    //   inbound_data_ 可能无界增长；
+    // - 达到上限后会触发断线收敛（errc::buffer_overflow），避免内存被打爆。
+    std::size_t max_inbound_data_messages{1024};
+
     // 控制消息观测回调（可选）：
     // - 在 Session 内部收到/发送控制消息时触发；
     // - 仅用于联调/统计，不建议在回调内执行阻塞或重入 Session API。
@@ -207,6 +213,7 @@ private:
 
     SessionState state_{SessionState::disconnected};
     std::atomic<std::uint64_t> selected_generation_{0};
+    std::optional<std::error_code> disconnected_reason_{};
 
     bool stop_requested_{false};
     bool reader_running_{false};

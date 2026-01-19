@@ -60,6 +60,7 @@ Session::Session(asio::any_io_executor ex, SessionOptions options)
 
 void Session::reset_state_() noexcept {
     state_ = SessionState::connected;
+    disconnected_reason_.reset();
     connection_.disable_data_writes(core::make_error_code(core::errc::cancelled));
 
     selected_event_.reset();
@@ -118,6 +119,7 @@ void Session::set_not_selected_() noexcept {
 void Session::on_disconnected_(std::error_code reason) noexcept {
     SPDLOG_DEBUG("hsms disconnected: ec={}({})", reason.value(), reason.message());
     state_ = SessionState::disconnected;
+    disconnected_reason_ = reason;
     connection_.disable_data_writes(reason);
 
     // 唤醒所有等待者：已选择（selected）状态等待、入站队列等待、挂起事务等待。
@@ -223,6 +225,12 @@ asio::awaitable<void> Session::reader_loop_() {
             if (state_ != SessionState::selected) {
                 // NOT_SELECTED 期间收到 data：按协议不向上层交付（直接丢弃）。
                 continue;
+            }
+            const auto max_inbound = options_.max_inbound_data_messages;
+            if (max_inbound != 0 && inbound_data_.size() >= max_inbound) {
+                (void)co_await connection_.async_close();
+                on_disconnected_(core::make_error_code(core::errc::buffer_overflow));
+                break;
             }
             inbound_data_.push_back(std::move(msg));
             inbound_event_.set();
@@ -710,8 +718,18 @@ asio::awaitable<std::error_code> Session::async_send(const Message &msg) {
 asio::awaitable<std::pair<std::error_code, Message>>
 Session::async_receive_data(std::optional<core::duration> timeout) {
     while (inbound_data_.empty()) {
+        if (!timeout.has_value() && state_ == SessionState::disconnected &&
+            disconnected_reason_.has_value()) {
+            co_return std::pair{*disconnected_reason_, Message{}};
+        }
+
         auto ec = co_await inbound_event_.async_wait(timeout);
         if (ec) {
+            if (ec == core::make_error_code(core::errc::cancelled) &&
+                state_ == SessionState::disconnected &&
+                disconnected_reason_.has_value()) {
+                co_return std::pair{*disconnected_reason_, Message{}};
+            }
             co_return std::pair{ec, Message{}};
         }
     }

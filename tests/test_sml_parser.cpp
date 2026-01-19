@@ -543,6 +543,119 @@ void test_smlx_render_type_mismatch_is_error() {
     }
 }
 
+void test_smlx_render_more_numeric_types() {
+    auto result = parse_sml(R"(
+    m: S1F1 <L
+      <I1 -1 2>
+      <I4 -3 4>
+      <I8 -5 6>
+      <U4 7 8>
+      <U8 9 10>
+    >.
+  )");
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.messages.size(), 1u);
+
+    RenderContext ctx{};
+    Item rendered{List{}};
+    TEST_EXPECT_OK(render_item(result.document.messages[0].item, ctx, rendered));
+
+    auto *list = rendered.get_if<List>();
+    TEST_EXPECT(list != nullptr);
+    TEST_EXPECT_EQ(list->size(), 5u);
+
+    {
+        auto *v = (*list)[0].get_if<secs::ii::I1>();
+        TEST_EXPECT(v != nullptr);
+        TEST_EXPECT_EQ(v->values.size(), 2u);
+        TEST_EXPECT_EQ(v->values[0], static_cast<std::int8_t>(-1));
+        TEST_EXPECT_EQ(v->values[1], static_cast<std::int8_t>(2));
+    }
+    {
+        auto *v = (*list)[1].get_if<secs::ii::I4>();
+        TEST_EXPECT(v != nullptr);
+        TEST_EXPECT_EQ(v->values.size(), 2u);
+        TEST_EXPECT_EQ(v->values[0], static_cast<std::int32_t>(-3));
+        TEST_EXPECT_EQ(v->values[1], static_cast<std::int32_t>(4));
+    }
+    {
+        auto *v = (*list)[2].get_if<secs::ii::I8>();
+        TEST_EXPECT(v != nullptr);
+        TEST_EXPECT_EQ(v->values.size(), 2u);
+        TEST_EXPECT_EQ(v->values[0], static_cast<std::int64_t>(-5));
+        TEST_EXPECT_EQ(v->values[1], static_cast<std::int64_t>(6));
+    }
+    {
+        auto *v = (*list)[3].get_if<secs::ii::U4>();
+        TEST_EXPECT(v != nullptr);
+        TEST_EXPECT_EQ(v->values.size(), 2u);
+        TEST_EXPECT_EQ(v->values[0], 7u);
+        TEST_EXPECT_EQ(v->values[1], 8u);
+    }
+    {
+        auto *v = (*list)[4].get_if<secs::ii::U8>();
+        TEST_EXPECT(v != nullptr);
+        TEST_EXPECT_EQ(v->values.size(), 2u);
+        TEST_EXPECT_EQ(v->values[0], static_cast<std::uint64_t>(9));
+        TEST_EXPECT_EQ(v->values[1], static_cast<std::uint64_t>(10));
+    }
+}
+
+void test_smlx_render_binary_and_boolean_placeholders_errors() {
+    // Binary：missing_variable / type_mismatch
+    {
+        auto result = parse_sml("m: S1F1 <B BIN>.");
+        TEST_EXPECT_OK(result.ec);
+
+        RenderContext ctx{};
+        Item rendered{List{}};
+        const auto ec = render_item(result.document.messages[0].item, ctx, rendered);
+        TEST_EXPECT_EQ(ec, make_error_code(render_errc::missing_variable));
+    }
+    {
+        auto result = parse_sml("m: S1F1 <B BIN>.");
+        TEST_EXPECT_OK(result.ec);
+
+        RenderContext ctx{};
+        ctx.set("BIN", Item::ascii("not binary"));
+        Item rendered{List{}};
+        const auto ec = render_item(result.document.messages[0].item, ctx, rendered);
+        TEST_EXPECT_EQ(ec, make_error_code(render_errc::type_mismatch));
+    }
+
+    // Boolean：missing_variable / type_mismatch
+    {
+        auto result = parse_sml("m: S1F1 <Boolean BOOLS>.");
+        TEST_EXPECT_OK(result.ec);
+
+        RenderContext ctx{};
+        Item rendered{List{}};
+        const auto ec = render_item(result.document.messages[0].item, ctx, rendered);
+        TEST_EXPECT_EQ(ec, make_error_code(render_errc::missing_variable));
+    }
+    {
+        auto result = parse_sml("m: S1F1 <Boolean BOOLS>.");
+        TEST_EXPECT_OK(result.ec);
+
+        RenderContext ctx{};
+        ctx.set("BOOLS", Item::ascii("not bool"));
+        Item rendered{List{}};
+        const auto ec = render_item(result.document.messages[0].item, ctx, rendered);
+        TEST_EXPECT_EQ(ec, make_error_code(render_errc::type_mismatch));
+    }
+}
+
+void test_render_error_category_messages_more_cases() {
+    const auto &cat = render_error_category();
+    TEST_EXPECT_EQ(std::string(cat.message(static_cast<int>(render_errc::ok))),
+                   std::string("success"));
+    TEST_EXPECT_EQ(
+        std::string(cat.message(static_cast<int>(render_errc::type_mismatch))),
+        std::string("type mismatch"));
+    TEST_EXPECT_EQ(std::string(cat.message(12345)),
+                   std::string("unknown render error"));
+}
+
 void test_smlx_render_nested_list_with_placeholders() {
     auto result = parse_sml(R"(
     m: S1F1 <L <A MDLN> <L <U2 SVIDS>>>.
@@ -1570,6 +1683,9 @@ int main() {
     test_smlx_render_float_placeholder_expands_values();
     test_smlx_render_missing_variable_is_error();
     test_smlx_render_type_mismatch_is_error();
+    test_smlx_render_more_numeric_types();
+    test_smlx_render_binary_and_boolean_placeholders_errors();
+    test_render_error_category_messages_more_cases();
     test_smlx_render_nested_list_with_placeholders();
     test_smlx_render_deep_nesting();
     test_parser_condition_expected_allows_placeholder();

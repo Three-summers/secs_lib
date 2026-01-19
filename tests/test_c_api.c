@@ -7,6 +7,13 @@
  * - 但链接阶段必须使用 C++ 链接器（底层实现为 C++20）。
  */
 
+#if defined(__unix__) || defined(__APPLE__)
+/* 需要暴露 posix_openpt/grantpt/unlockpt/ptsname 等声明。 */
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 600
+#endif
+#endif
+
 #include "secs/c_api.h"
 
 #include <pthread.h>
@@ -17,8 +24,11 @@
 #include <time.h>
 
 #if defined(__unix__) || defined(__APPLE__)
+#include <errno.h>
+#include <fcntl.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <stdlib.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -141,6 +151,50 @@ static void best_effort_tcp_connect(uint16_t port) {
     (void)connect(fd, (struct sockaddr *)&addr, (socklen_t)sizeof(addr));
     (void)close(fd);
 }
+
+struct pty_pair {
+    int master_fd;
+    char slave_path[256];
+};
+
+static int create_pty_pair(struct pty_pair *out) {
+    if (!out) {
+        return 0;
+    }
+    out->master_fd = -1;
+    out->slave_path[0] = '\0';
+
+    const int fd = posix_openpt(O_RDWR | O_NOCTTY);
+    if (fd < 0) {
+        return 0;
+    }
+    if (grantpt(fd) != 0 || unlockpt(fd) != 0) {
+        (void)close(fd);
+        return 0;
+    }
+
+    char *name = ptsname(fd);
+    if (!name || name[0] == '\0') {
+        (void)close(fd);
+        return 0;
+    }
+
+    strncpy(out->slave_path, name, sizeof(out->slave_path) - 1);
+    out->slave_path[sizeof(out->slave_path) - 1] = '\0';
+    out->master_fd = fd;
+    return 1;
+}
+
+static void destroy_pty_pair(struct pty_pair *p) {
+    if (!p) {
+        return;
+    }
+    if (p->master_fd >= 0) {
+        (void)close(p->master_fd);
+    }
+    p->master_fd = -1;
+    p->slave_path[0] = '\0';
+}
 #endif
 
 static void proto_dump_sink(void *user_data, const char *data, size_t size) {
@@ -210,6 +264,7 @@ static void test_error_message_category_mapping(void) {
         "secs.ii",
         "sml.lexer",
         "sml.parser",
+        "sml.render",
         "system",
         "generic",
         "unknown.category",
@@ -1030,6 +1085,13 @@ static void test_invalid_argument_fast_fail(void) {
             expect_ok("secs_protocol_session_create_from_hsms(options NULL)",
                       secs_protocol_session_create_from_hsms(
                           ctx, hsms_for_proto, opt.session_id, NULL, &ps));
+            {
+                int handled = 0;
+                expect_err("secs_protocol_session_poll_once(NULL out_handled)",
+                           secs_protocol_session_poll_once(ps, 1, NULL));
+                expect_err("secs_protocol_session_poll_once(NULL sess)",
+                           secs_protocol_session_poll_once(NULL, 1, &handled));
+            }
             secs_protocol_session_destroy(ps);
             secs_hsms_session_destroy(hsms_for_proto);
         }
@@ -1084,6 +1146,100 @@ static void test_invalid_argument_fast_fail(void) {
                    secs_ceid_dispatcher_clear_default_handler(NULL));
         expect_err("secs_ceid_dispatcher_erase_handler(NULL)",
                    secs_ceid_dispatcher_erase_handler(NULL, 1));
+
+        /* create_list_path：out_disp/indices 参数校验 */
+        {
+            const size_t path[1] = {0};
+            expect_err("secs_ceid_dispatcher_create_list_path(NULL out_disp)",
+                       secs_ceid_dispatcher_create_list_path(
+                           path, 1, NULL, 0, NULL));
+
+            secs_ceid_dispatcher_t *tmp = NULL;
+            expect_err("secs_ceid_dispatcher_create_list_path(NULL indices,n>0)",
+                       secs_ceid_dispatcher_create_list_path(
+                           NULL, 1, NULL, 0, &tmp));
+            secs_ceid_dispatcher_destroy(tmp);
+        }
+
+        /* handler 注册：cb 为 NULL 必须拒绝 */
+        expect_err("secs_ceid_dispatcher_set_handler(NULL cb)",
+                   secs_ceid_dispatcher_set_handler(NULL, 1, NULL, NULL));
+        expect_err("secs_ceid_dispatcher_set_default_handler(NULL cb)",
+                   secs_ceid_dispatcher_set_default_handler(NULL, NULL, NULL));
+    }
+
+    /* request_with_ceid_list_path：需要有效 session 才能覆盖更深的参数校验 */
+    {
+        secs_protocol_session_options_t opt;
+        memset(&opt, 0, sizeof(opt));
+        opt.t3_ms = 200;
+        opt.poll_interval_ms = 1;
+
+        secs_protocol_session_t *host = NULL;
+        secs_protocol_session_t *eq = NULL;
+        expect_ok("secs_protocol_session_create_from_secs1_memory_duplex(for invalid args)",
+                  secs_protocol_session_create_from_secs1_memory_duplex(
+                      ctx, 0x0101, &opt, &host, &eq));
+
+        /* cb==NULL：覆盖 router 注册的校验分支 */
+        expect_err("secs_protocol_session_set_stream_default_handler(NULL cb)",
+                   secs_protocol_session_set_stream_default_handler(
+                       host, 1, NULL, NULL));
+        expect_err("secs_protocol_session_set_default_handler(NULL cb)",
+                   secs_protocol_session_set_default_handler(host, NULL, NULL));
+        expect_err("secs_protocol_session_set_decoded_default_handler(NULL cb)",
+                   secs_protocol_session_set_decoded_default_handler(
+                       host, NULL, 0, NULL, NULL));
+
+        /* request_with_ceid_list_path：body/ceid_indices 的指针/长度一致性检查 */
+        {
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            const size_t ceid_path[1] = {1};
+
+            expect_err(
+                "secs_protocol_session_request_with_ceid_list_path(NULL body,n>0)",
+                secs_protocol_session_request_with_ceid_list_path(
+                    host,
+                    1,
+                    1,
+                    NULL,
+                    1,
+                    1,
+                    ceid_path,
+                    1,
+                    NULL,
+                    0,
+                    &reply,
+                    NULL,
+                    NULL,
+                    NULL,
+                    NULL));
+
+            expect_err(
+                "secs_protocol_session_request_with_ceid_list_path(NULL ceid_indices,n>0)",
+                secs_protocol_session_request_with_ceid_list_path(
+                    host,
+                    1,
+                    1,
+                    NULL,
+                    0,
+                    1,
+                    NULL,
+                    1,
+                    NULL,
+                    0,
+                    &reply,
+                    NULL,
+                    NULL,
+                    NULL,
+                    NULL));
+
+            secs_data_message_free(&reply);
+        }
+
+        secs_protocol_session_destroy(host);
+        secs_protocol_session_destroy(eq);
     }
 
     /* Protocol：ctx 与 hsms_session 所属 ctx 不一致必须拒绝（避免跨 io_context
@@ -2245,6 +2401,310 @@ static void test_ii_extraction_helpers(void) {
                    secs_ii_item_u2_view_at_path(u2, NULL, &n, 0));
         secs_ii_item_destroy(u2);
     }
+}
+
+static void test_ii_builder_add_helpers(void) {
+    /* 覆盖：此前未触达的 secs_ii_builder_add_* 便捷 API */
+    secs_ii_builder_t *b = NULL;
+    expect_ok("secs_ii_builder_create(add helpers)", secs_ii_builder_create(&b));
+
+    expect_ok("secs_ii_builder_list_begin(add helpers)",
+              secs_ii_builder_list_begin(b));
+
+    {
+        const char bytes3[3] = {'A', '\0', 'B'};
+        expect_ok("secs_ii_builder_add_ascii_n",
+                  secs_ii_builder_add_ascii_n(b, bytes3, 3));
+    }
+    {
+        const uint8_t bin[2] = {1u, 2u};
+        expect_ok("secs_ii_builder_add_binary",
+                  secs_ii_builder_add_binary(b, bin, 2));
+    }
+    expect_ok("secs_ii_builder_add_boolean(1)",
+              secs_ii_builder_add_boolean(b, 1));
+    {
+        const uint8_t b01[2] = {0u, 1u};
+        expect_ok("secs_ii_builder_add_boolean_values",
+                  secs_ii_builder_add_boolean_values(b, b01, 2));
+    }
+
+    expect_ok("secs_ii_builder_add_i1", secs_ii_builder_add_i1(b, (int8_t)-1));
+    expect_ok("secs_ii_builder_add_i2", secs_ii_builder_add_i2(b, (int16_t)-2));
+    expect_ok("secs_ii_builder_add_i4", secs_ii_builder_add_i4(b, (int32_t)-3));
+    expect_ok("secs_ii_builder_add_i8", secs_ii_builder_add_i8(b, (int64_t)-4));
+    expect_ok("secs_ii_builder_add_u1", secs_ii_builder_add_u1(b, (uint8_t)5));
+    expect_ok("secs_ii_builder_add_u8", secs_ii_builder_add_u8(b, (uint64_t)8));
+    expect_ok("secs_ii_builder_add_f4", secs_ii_builder_add_f4(b, 1.25f));
+    expect_ok("secs_ii_builder_add_f8", secs_ii_builder_add_f8(b, -2.5));
+
+    /* add_item：append 会拷贝 */
+    {
+        secs_ii_item_t *u2 = NULL;
+        const uint16_t v = 123;
+        expect_ok("secs_ii_item_create_u2(add_item)",
+                  secs_ii_item_create_u2(&v, 1, &u2));
+        expect_ok("secs_ii_builder_add_item", secs_ii_builder_add_item(b, u2));
+        secs_ii_item_destroy(u2);
+    }
+
+    expect_ok("secs_ii_builder_list_end(add helpers)",
+              secs_ii_builder_list_end(b));
+
+    secs_ii_item_t *out = NULL;
+    expect_ok("secs_ii_builder_finalize(add helpers)",
+              secs_ii_builder_finalize(b, &out));
+    secs_ii_builder_destroy(b);
+
+    secs_ii_item_type_t ty;
+    expect_ok("secs_ii_item_get_type(add helpers)",
+              secs_ii_item_get_type(out, &ty));
+    if (ty != SECS_II_ITEM_LIST) {
+        fprintf(stderr, "FAIL: builder(add helpers) output should be LIST\n");
+        ++g_failures;
+    }
+    secs_ii_item_destroy(out);
+}
+
+static void test_ii_more_view_get_at_path_and_list_path(void) {
+    /* 覆盖：此前未触达的 *_view_at_list_path / *_get_*_at_list_path / 部分 *_at_path */
+    secs_ii_item_t *root = NULL;
+    expect_ok("secs_ii_item_create_list(more views)",
+              secs_ii_item_create_list(&root));
+
+    /* root = [ I1(-1), I2(-2), I4(-3), I8(-4), U1(5), U4(7), U8(8), F4(1.25), F8(-2.5) ] */
+    {
+        secs_ii_item_t *v = NULL;
+        const int8_t x = -1;
+        expect_ok("secs_ii_item_create_i1",
+                  secs_ii_item_create_i1(&x, 1, &v));
+        expect_ok("secs_ii_item_list_append_take(i1)",
+                  secs_ii_item_list_append_take(root, &v));
+    }
+    {
+        secs_ii_item_t *v = NULL;
+        const int16_t x = -2;
+        expect_ok("secs_ii_item_create_i2",
+                  secs_ii_item_create_i2(&x, 1, &v));
+        expect_ok("secs_ii_item_list_append_take(i2)",
+                  secs_ii_item_list_append_take(root, &v));
+    }
+    {
+        secs_ii_item_t *v = NULL;
+        const int32_t x = -3;
+        expect_ok("secs_ii_item_create_i4",
+                  secs_ii_item_create_i4(&x, 1, &v));
+        expect_ok("secs_ii_item_list_append_take(i4)",
+                  secs_ii_item_list_append_take(root, &v));
+    }
+    {
+        secs_ii_item_t *v = NULL;
+        const int64_t x = -4;
+        expect_ok("secs_ii_item_create_i8",
+                  secs_ii_item_create_i8(&x, 1, &v));
+        expect_ok("secs_ii_item_list_append_take(i8)",
+                  secs_ii_item_list_append_take(root, &v));
+    }
+    {
+        secs_ii_item_t *v = NULL;
+        const uint8_t x = 5u;
+        expect_ok("secs_ii_item_create_u1",
+                  secs_ii_item_create_u1(&x, 1, &v));
+        expect_ok("secs_ii_item_list_append_take(u1)",
+                  secs_ii_item_list_append_take(root, &v));
+    }
+    {
+        secs_ii_item_t *v = NULL;
+        const uint32_t x = 7u;
+        expect_ok("secs_ii_item_create_u4",
+                  secs_ii_item_create_u4(&x, 1, &v));
+        expect_ok("secs_ii_item_list_append_take(u4)",
+                  secs_ii_item_list_append_take(root, &v));
+    }
+    {
+        secs_ii_item_t *v = NULL;
+        const uint64_t x = 8u;
+        expect_ok("secs_ii_item_create_u8",
+                  secs_ii_item_create_u8(&x, 1, &v));
+        expect_ok("secs_ii_item_list_append_take(u8)",
+                  secs_ii_item_list_append_take(root, &v));
+    }
+    {
+        secs_ii_item_t *v = NULL;
+        const float x = 1.25f;
+        expect_ok("secs_ii_item_create_f4",
+                  secs_ii_item_create_f4(&x, 1, &v));
+        expect_ok("secs_ii_item_list_append_take(f4)",
+                  secs_ii_item_list_append_take(root, &v));
+    }
+    {
+        secs_ii_item_t *v = NULL;
+        const double x = -2.5;
+        expect_ok("secs_ii_item_create_f8",
+                  secs_ii_item_create_f8(&x, 1, &v));
+        expect_ok("secs_ii_item_list_append_take(f8)",
+                  secs_ii_item_list_append_take(root, &v));
+    }
+
+    {
+        size_t idx[1];
+        size_t n = 0;
+
+        idx[0] = 0;
+        const int8_t *p_i1 = NULL;
+        expect_ok("secs_ii_item_i1_view_at_list_path",
+                  secs_ii_item_i1_view_at_list_path(root, &p_i1, &n, idx, 1));
+        int8_t v_i1 = 0;
+        expect_ok("secs_ii_item_get_i1_at_list_path",
+                  secs_ii_item_get_i1_at_list_path(root, &v_i1, idx, 1));
+        {
+            const int8_t *p2 = NULL;
+            size_t n2 = 0;
+            expect_ok("secs_ii_item_i1_view_at_path",
+                      secs_ii_item_i1_view_at_path(root, &p2, &n2, 1, (size_t)0));
+            int8_t v2 = 0;
+            expect_ok("secs_ii_item_get_i1_at_path",
+                      secs_ii_item_get_i1_at_path(root, &v2, 1, (size_t)0));
+        }
+
+        idx[0] = 1;
+        const int16_t *p_i2 = NULL;
+        expect_ok("secs_ii_item_i2_view_at_list_path",
+                  secs_ii_item_i2_view_at_list_path(root, &p_i2, &n, idx, 1));
+        int16_t v_i2 = 0;
+        expect_ok("secs_ii_item_get_i2_at_list_path",
+                  secs_ii_item_get_i2_at_list_path(root, &v_i2, idx, 1));
+        {
+            const int16_t *p2 = NULL;
+            size_t n2 = 0;
+            expect_ok("secs_ii_item_i2_view_at_path",
+                      secs_ii_item_i2_view_at_path(root, &p2, &n2, 1, (size_t)1));
+            int16_t v2 = 0;
+            expect_ok("secs_ii_item_get_i2_at_path",
+                      secs_ii_item_get_i2_at_path(root, &v2, 1, (size_t)1));
+        }
+
+        idx[0] = 2;
+        const int32_t *p_i4 = NULL;
+        expect_ok("secs_ii_item_i4_view_at_list_path",
+                  secs_ii_item_i4_view_at_list_path(root, &p_i4, &n, idx, 1));
+        int32_t v_i4 = 0;
+        expect_ok("secs_ii_item_get_i4_at_list_path",
+                  secs_ii_item_get_i4_at_list_path(root, &v_i4, idx, 1));
+        {
+            const int32_t *p2 = NULL;
+            size_t n2 = 0;
+            expect_ok("secs_ii_item_i4_view_at_path",
+                      secs_ii_item_i4_view_at_path(root, &p2, &n2, 1, (size_t)2));
+            int32_t v2 = 0;
+            expect_ok("secs_ii_item_get_i4_at_path",
+                      secs_ii_item_get_i4_at_path(root, &v2, 1, (size_t)2));
+        }
+
+        idx[0] = 3;
+        const int64_t *p_i8 = NULL;
+        expect_ok("secs_ii_item_i8_view_at_list_path",
+                  secs_ii_item_i8_view_at_list_path(root, &p_i8, &n, idx, 1));
+        int64_t v_i8 = 0;
+        expect_ok("secs_ii_item_get_i8_at_list_path",
+                  secs_ii_item_get_i8_at_list_path(root, &v_i8, idx, 1));
+        {
+            const int64_t *p2 = NULL;
+            size_t n2 = 0;
+            expect_ok("secs_ii_item_i8_view_at_path",
+                      secs_ii_item_i8_view_at_path(root, &p2, &n2, 1, (size_t)3));
+            int64_t v2 = 0;
+            expect_ok("secs_ii_item_get_i8_at_path",
+                      secs_ii_item_get_i8_at_path(root, &v2, 1, (size_t)3));
+        }
+
+        idx[0] = 4;
+        const uint8_t *p_u1 = NULL;
+        expect_ok("secs_ii_item_u1_view_at_list_path",
+                  secs_ii_item_u1_view_at_list_path(root, &p_u1, &n, idx, 1));
+        uint8_t v_u1 = 0;
+        expect_ok("secs_ii_item_get_u1_at_list_path",
+                  secs_ii_item_get_u1_at_list_path(root, &v_u1, idx, 1));
+        {
+            const uint8_t *p2 = NULL;
+            size_t n2 = 0;
+            expect_ok("secs_ii_item_u1_view_at_path",
+                      secs_ii_item_u1_view_at_path(root, &p2, &n2, 1, (size_t)4));
+            uint8_t v2 = 0;
+            expect_ok("secs_ii_item_get_u1_at_path",
+                      secs_ii_item_get_u1_at_path(root, &v2, 1, (size_t)4));
+        }
+
+        idx[0] = 5;
+        const uint32_t *p_u4 = NULL;
+        expect_ok("secs_ii_item_u4_view_at_list_path",
+                  secs_ii_item_u4_view_at_list_path(root, &p_u4, &n, idx, 1));
+        uint32_t v_u4 = 0;
+        expect_ok("secs_ii_item_get_u4_at_list_path",
+                  secs_ii_item_get_u4_at_list_path(root, &v_u4, idx, 1));
+        {
+            const uint32_t *p2 = NULL;
+            size_t n2 = 0;
+            expect_ok("secs_ii_item_u4_view_at_path",
+                      secs_ii_item_u4_view_at_path(root, &p2, &n2, 1, (size_t)5));
+            uint32_t v2 = 0;
+            expect_ok("secs_ii_item_get_u4_at_path",
+                      secs_ii_item_get_u4_at_path(root, &v2, 1, (size_t)5));
+        }
+
+        idx[0] = 6;
+        const uint64_t *p_u8 = NULL;
+        expect_ok("secs_ii_item_u8_view_at_list_path",
+                  secs_ii_item_u8_view_at_list_path(root, &p_u8, &n, idx, 1));
+        uint64_t v_u8 = 0;
+        expect_ok("secs_ii_item_get_u8_at_list_path",
+                  secs_ii_item_get_u8_at_list_path(root, &v_u8, idx, 1));
+        {
+            const uint64_t *p2 = NULL;
+            size_t n2 = 0;
+            expect_ok("secs_ii_item_u8_view_at_path",
+                      secs_ii_item_u8_view_at_path(root, &p2, &n2, 1, (size_t)6));
+            uint64_t v2 = 0;
+            expect_ok("secs_ii_item_get_u8_at_path",
+                      secs_ii_item_get_u8_at_path(root, &v2, 1, (size_t)6));
+        }
+
+        idx[0] = 7;
+        const float *p_f4 = NULL;
+        expect_ok("secs_ii_item_f4_view_at_list_path",
+                  secs_ii_item_f4_view_at_list_path(root, &p_f4, &n, idx, 1));
+        float v_f4 = 0.0f;
+        expect_ok("secs_ii_item_get_f4_at_list_path",
+                  secs_ii_item_get_f4_at_list_path(root, &v_f4, idx, 1));
+        {
+            const float *p2 = NULL;
+            size_t n2 = 0;
+            expect_ok("secs_ii_item_f4_view_at_path",
+                      secs_ii_item_f4_view_at_path(root, &p2, &n2, 1, (size_t)7));
+            float v2 = 0.0f;
+            expect_ok("secs_ii_item_get_f4_at_path",
+                      secs_ii_item_get_f4_at_path(root, &v2, 1, (size_t)7));
+        }
+
+        idx[0] = 8;
+        const double *p_f8 = NULL;
+        expect_ok("secs_ii_item_f8_view_at_list_path",
+                  secs_ii_item_f8_view_at_list_path(root, &p_f8, &n, idx, 1));
+        double v_f8 = 0.0;
+        expect_ok("secs_ii_item_get_f8_at_list_path",
+                  secs_ii_item_get_f8_at_list_path(root, &v_f8, idx, 1));
+        {
+            const double *p2 = NULL;
+            size_t n2 = 0;
+            expect_ok("secs_ii_item_f8_view_at_path",
+                      secs_ii_item_f8_view_at_path(root, &p2, &n2, 1, (size_t)8));
+            double v2 = 0.0;
+            expect_ok("secs_ii_item_get_f8_at_path",
+                      secs_ii_item_get_f8_at_path(root, &v2, 1, (size_t)8));
+        }
+    }
+
+    secs_ii_item_destroy(root);
 }
 
 static void test_ii_clone_and_list_path_array_helpers(void) {
@@ -3870,6 +4330,37 @@ protocol_control_stop_handler(void *user_data,
     return ok;
 }
 
+struct poll_once_wrong_thread_ud {
+    secs_protocol_session_t *server_proto;
+    atomic_int *called;
+};
+
+static secs_error_t
+protocol_poll_once_wrong_thread_handler(void *user_data,
+                                        const secs_data_message_view_t *request,
+                                        uint8_t **out_body,
+                                        size_t *out_body_n) {
+    (void)request;
+    struct poll_once_wrong_thread_ud *ud =
+        (struct poll_once_wrong_thread_ud *)user_data;
+
+    int handled = 0;
+    secs_error_t err = secs_protocol_session_poll_once(ud->server_proto, 1, &handled);
+    if (err.value == (int)SECS_C_API_WRONG_THREAD) {
+        atomic_store(ud->called, 1);
+    } else {
+        atomic_store(ud->called, 2);
+    }
+
+    *out_body = NULL;
+    *out_body_n = 0;
+
+    secs_error_t ok;
+    ok.value = 0;
+    ok.category = "secs.c_api";
+    return ok;
+}
+
 static void test_hsms_protocol_loopback(void) {
     secs_context_t *ctx = NULL;
     expect_ok("secs_context_create", secs_context_create(&ctx));
@@ -4223,6 +4714,34 @@ static void test_hsms_protocol_loopback(void) {
     expect_ok("secs_protocol_session_set_handler",
               secs_protocol_session_set_handler(
                   server_proto, 1, 1, server_handler, &ud));
+
+    /* 在 io 线程内调用 poll_once（阻塞 API）必须返回 WRONG_THREAD */
+    {
+        atomic_int called;
+        atomic_init(&called, 0);
+
+        struct poll_once_wrong_thread_ud pud;
+        pud.server_proto = server_proto;
+        pud.called = &called;
+
+        expect_ok("secs_protocol_session_set_handler(poll_once wrong_thread)",
+                  secs_protocol_session_set_handler(server_proto,
+                                                    8,
+                                                    7,
+                                                    protocol_poll_once_wrong_thread_handler,
+                                                    &pud));
+        expect_ok("secs_protocol_session_send(poll_once wrong_thread)",
+                  secs_protocol_session_send(client_proto, 8, 7, NULL, 0));
+
+        if (!wait_until_atomic_eq(&called, 1, 200, 5 * 1000 * 1000)) {
+            fprintf(stderr,
+                    "FAIL: poll_once wrong_thread handler not called/validated\n");
+            ++g_failures;
+        }
+
+        expect_ok("secs_protocol_session_erase_handler(poll_once wrong_thread)",
+                  secs_protocol_session_erase_handler(server_proto, 8, 7));
+    }
 
     /* send：W=0 不需要回应（覆盖 send 路径） */
     {
@@ -5444,6 +5963,372 @@ static void test_hsms_protocol_loopback(void) {
     secs_context_destroy(ctx);
 }
 
+static secs_error_t
+secs1_simple_reply_handler(void *user_data,
+                           const secs_data_message_view_t *request,
+                           uint8_t **out_body,
+                           size_t *out_body_n) {
+    (void)user_data;
+    (void)request;
+
+    if (!out_body || !out_body_n) {
+        secs_error_t err;
+        err.value = (int)SECS_C_API_INVALID_ARGUMENT;
+        err.category = "secs.c_api";
+        return err;
+    }
+
+    *out_body_n = 2;
+    *out_body = (uint8_t *)secs_malloc(*out_body_n);
+    if (!*out_body) {
+        secs_error_t err;
+        err.value = (int)SECS_C_API_OUT_OF_MEMORY;
+        err.category = "secs.c_api";
+        return err;
+    }
+
+    (*out_body)[0] = 0xABu;
+    (*out_body)[1] = 0xCDu;
+
+    secs_error_t ok;
+    ok.value = 0;
+    ok.category = "secs.c_api";
+    return ok;
+}
+
+struct secs1_poll_args {
+    secs_protocol_session_t *sess;
+    atomic_int *stop;
+    atomic_int *handled_cnt;
+    atomic_int *poll_errors;
+};
+
+static void *secs1_poll_loop_thread(void *p) {
+    struct secs1_poll_args *args = (struct secs1_poll_args *)p;
+    if (!args || !args->sess || !args->stop || !args->handled_cnt ||
+        !args->poll_errors) {
+        return NULL;
+    }
+
+    while (atomic_load(args->stop) == 0) {
+        int handled = 0;
+        secs_error_t err = secs_protocol_session_poll_once(args->sess, 10, &handled);
+        if (err.value != 0) {
+            (void)atomic_fetch_add(args->poll_errors, 1);
+            break;
+        }
+        if (handled) {
+            (void)atomic_fetch_add(args->handled_cnt, 1);
+        }
+    }
+    return NULL;
+}
+
+static void test_protocol_session_secs1_memory_duplex(void) {
+    secs_context_t *ctx = NULL;
+    expect_ok("secs_context_create(secs1 duplex)", secs_context_create(&ctx));
+
+    secs_protocol_session_options_t opt;
+    memset(&opt, 0, sizeof(opt));
+    opt.t3_ms = 200;
+    opt.poll_interval_ms = 1;
+
+    secs_protocol_session_t *host = NULL;
+    secs_protocol_session_t *equip = NULL;
+    expect_ok("secs_protocol_session_create_from_secs1_memory_duplex",
+              secs_protocol_session_create_from_secs1_memory_duplex(
+                  ctx, 0x0101, &opt, &host, &equip));
+
+    /* poll_once：无消息时应按 timeout 返回 handled=0 且 err=OK */
+    {
+        int handled = 1;
+        expect_ok("secs_protocol_session_poll_once(timeout, no msg)",
+                  secs_protocol_session_poll_once(equip, 5, &handled));
+        if (handled != 0) {
+            fprintf(stderr, "FAIL: secs1 poll_once(no msg) should handled=0\n");
+            ++g_failures;
+        }
+    }
+
+    expect_ok("secs_protocol_session_set_handler(secs1 equip)",
+              secs_protocol_session_set_handler(
+                  equip, 1, 1, secs1_simple_reply_handler, NULL));
+
+    atomic_int stop;
+    atomic_int handled_cnt;
+    atomic_int poll_errors;
+    atomic_init(&stop, 0);
+    atomic_init(&handled_cnt, 0);
+    atomic_init(&poll_errors, 0);
+
+    struct secs1_poll_args args;
+    memset(&args, 0, sizeof(args));
+    args.sess = equip;
+    args.stop = &stop;
+    args.handled_cnt = &handled_cnt;
+    args.poll_errors = &poll_errors;
+
+    pthread_t th;
+    if (pthread_create(&th, NULL, secs1_poll_loop_thread, &args) != 0) {
+        fprintf(stderr, "FAIL: pthread_create(secs1 poll loop)\n");
+        ++g_failures;
+    }
+
+    {
+        const uint8_t body[1] = {0x01u};
+        secs_data_message_t reply;
+        memset(&reply, 0, sizeof(reply));
+
+        expect_ok("secs_protocol_session_request(secs1 host->equip)",
+                  secs_protocol_session_request(
+                      host, 1, 1, body, sizeof(body), 1000, &reply));
+
+        if (reply.stream != 1u || reply.function != 2u || reply.w_bit != 0) {
+            fprintf(stderr, "FAIL: secs1 reply meta mismatch\n");
+            ++g_failures;
+        }
+        if (reply.body_n != 2u || !reply.body || reply.body[0] != 0xABu ||
+            reply.body[1] != 0xCDu) {
+            fprintf(stderr, "FAIL: secs1 reply body mismatch\n");
+            ++g_failures;
+        }
+        secs_data_message_free(&reply);
+    }
+
+    atomic_store(&stop, 1);
+    (void)pthread_join(th, NULL);
+
+    if (atomic_load(&poll_errors) != 0) {
+        fprintf(stderr, "FAIL: secs1 poll loop got error\n");
+        ++g_failures;
+    }
+    if (atomic_load(&handled_cnt) <= 0) {
+        fprintf(stderr, "FAIL: secs1 poll loop handled_cnt should > 0\n");
+        ++g_failures;
+    }
+
+    (void)secs_protocol_session_stop(host);
+    (void)secs_protocol_session_stop(equip);
+    secs_protocol_session_destroy(host);
+    secs_protocol_session_destroy(equip);
+    secs_context_destroy(ctx);
+}
+
+static void test_protocol_session_secs1_memory_duplex_v2(void) {
+    secs_context_t *ctx = NULL;
+    expect_ok("secs_context_create(secs1 duplex v2)", secs_context_create(&ctx));
+
+    secs_protocol_session_options_v2_t opt;
+    memset(&opt, 0, sizeof(opt));
+    opt.t3_ms = 200;
+    opt.poll_interval_ms = 1;
+    opt.max_pending_requests = 8;
+
+    secs_protocol_session_t *host = NULL;
+    secs_protocol_session_t *equip = NULL;
+    expect_ok("secs_protocol_session_create_from_secs1_memory_duplex_v2",
+              secs_protocol_session_create_from_secs1_memory_duplex_v2(
+                  ctx, 0x0101, &opt, &host, &equip));
+
+    expect_ok("secs_protocol_session_set_handler(secs1 equip v2)",
+              secs_protocol_session_set_handler(
+                  equip, 1, 1, secs1_simple_reply_handler, NULL));
+
+    atomic_int stop;
+    atomic_int handled_cnt;
+    atomic_int poll_errors;
+    atomic_init(&stop, 0);
+    atomic_init(&handled_cnt, 0);
+    atomic_init(&poll_errors, 0);
+
+    struct secs1_poll_args args;
+    memset(&args, 0, sizeof(args));
+    args.sess = equip;
+    args.stop = &stop;
+    args.handled_cnt = &handled_cnt;
+    args.poll_errors = &poll_errors;
+
+    pthread_t th;
+    if (pthread_create(&th, NULL, secs1_poll_loop_thread, &args) != 0) {
+        fprintf(stderr, "FAIL: pthread_create(secs1 poll loop v2)\n");
+        ++g_failures;
+    }
+
+    {
+        const uint8_t body[1] = {0x02u};
+        secs_data_message_t reply;
+        memset(&reply, 0, sizeof(reply));
+        expect_ok("secs_protocol_session_request(secs1 v2 host->equip)",
+                  secs_protocol_session_request(
+                      host, 1, 1, body, sizeof(body), 1000, &reply));
+        secs_data_message_free(&reply);
+    }
+
+    atomic_store(&stop, 1);
+    (void)pthread_join(th, NULL);
+
+    if (atomic_load(&poll_errors) != 0) {
+        fprintf(stderr, "FAIL: secs1 v2 poll loop got error\n");
+        ++g_failures;
+    }
+    if (atomic_load(&handled_cnt) <= 0) {
+        fprintf(stderr, "FAIL: secs1 v2 poll loop handled_cnt should > 0\n");
+        ++g_failures;
+    }
+
+    (void)secs_protocol_session_stop(host);
+    (void)secs_protocol_session_stop(equip);
+    secs_protocol_session_destroy(host);
+    secs_protocol_session_destroy(equip);
+    secs_context_destroy(ctx);
+}
+
+static void test_protocol_session_secs1_serial_pty_smoke(void) {
+#if !defined(__unix__) && !defined(__APPLE__)
+    return;
+#else
+    secs_context_t *ctx = NULL;
+    expect_ok("secs_context_create(secs1 serial)", secs_context_create(&ctx));
+
+    /* 即便 PTY 不可用，也至少覆盖 SerialPortLink::open 的失败分支（bad path）。 */
+    {
+        const char *bad_path = "/dev/secs_lib_no_such_tty";
+
+        secs_protocol_session_options_t opt;
+        memset(&opt, 0, sizeof(opt));
+        opt.t3_ms = 200;
+        opt.poll_interval_ms = 1;
+
+        secs_protocol_session_t *sess = NULL;
+        expect_err("secs_protocol_session_create_from_secs1_serial(bad path)",
+                   secs_protocol_session_create_from_secs1_serial(
+                       ctx, bad_path, 0, 0x0101, 0, &opt, &sess));
+        secs_protocol_session_destroy(sess);
+    }
+    {
+        const char *bad_path = "/dev/secs_lib_no_such_tty";
+
+        secs_protocol_session_options_v2_t opt;
+        memset(&opt, 0, sizeof(opt));
+        opt.t3_ms = 200;
+        opt.poll_interval_ms = 1;
+        opt.max_pending_requests = 8;
+
+        secs_protocol_session_t *sess = NULL;
+        expect_err("secs_protocol_session_create_from_secs1_serial_v2(bad path)",
+                   secs_protocol_session_create_from_secs1_serial_v2(
+                       ctx, bad_path, 0, 0x0101, 0, &opt, &sess));
+        secs_protocol_session_destroy(sess);
+    }
+
+    /* 使用普通文件触发 set_option 失败：覆盖 SerialPortLink::open 的 close_on_error 分支 */
+    {
+        char path[] = "/tmp/secs_lib_serialXXXXXX";
+        const int fd = mkstemp(path);
+        if (fd >= 0) {
+            (void)close(fd);
+
+            secs_protocol_session_options_t opt;
+            memset(&opt, 0, sizeof(opt));
+            opt.t3_ms = 200;
+            opt.poll_interval_ms = 1;
+
+            secs_protocol_session_t *sess = NULL;
+            expect_err("secs_protocol_session_create_from_secs1_serial(tmpfile)",
+                       secs_protocol_session_create_from_secs1_serial(
+                           ctx, path, 0, 0x0101, 0, &opt, &sess));
+            secs_protocol_session_destroy(sess);
+
+            (void)unlink(path);
+        }
+    }
+    {
+        char path[] = "/tmp/secs_lib_serialXXXXXX";
+        const int fd = mkstemp(path);
+        if (fd >= 0) {
+            (void)close(fd);
+
+            secs_protocol_session_options_v2_t opt;
+            memset(&opt, 0, sizeof(opt));
+            opt.t3_ms = 200;
+            opt.poll_interval_ms = 1;
+            opt.max_pending_requests = 8;
+
+            secs_protocol_session_t *sess = NULL;
+            expect_err("secs_protocol_session_create_from_secs1_serial_v2(tmpfile)",
+                       secs_protocol_session_create_from_secs1_serial_v2(
+                           ctx, path, 0, 0x0101, 0, &opt, &sess));
+            secs_protocol_session_destroy(sess);
+
+            (void)unlink(path);
+        }
+    }
+
+    struct pty_pair p;
+    const int has_pty = create_pty_pair(&p);
+
+    /* v1：覆盖 make_proto_options(non-null) + SerialPortLink::open */
+    {
+        secs_protocol_session_options_t opt;
+        memset(&opt, 0, sizeof(opt));
+        opt.t3_ms = 200;
+        opt.poll_interval_ms = 1;
+
+        secs_protocol_session_t *sess = NULL;
+        if (has_pty) {
+            expect_ok("secs_protocol_session_create_from_secs1_serial(pty)",
+                      secs_protocol_session_create_from_secs1_serial(
+                          ctx, p.slave_path, 0, 0x0101, 0, &opt, &sess));
+
+            int handled = 1;
+            expect_ok("secs_protocol_session_poll_once(secs1 serial timeout)",
+                      secs_protocol_session_poll_once(sess, 5, &handled));
+            if (handled != 0) {
+                fprintf(stderr,
+                        "FAIL: secs1 serial poll_once(timeout) should handled=0\n");
+                ++g_failures;
+            }
+
+            (void)secs_protocol_session_stop(sess);
+            secs_protocol_session_destroy(sess);
+        }
+    }
+
+    /* v2：覆盖 create_from_secs1_serial_v2 分支（含 max_pending_requests 赋值） */
+    {
+        secs_protocol_session_options_v2_t opt;
+        memset(&opt, 0, sizeof(opt));
+        opt.t3_ms = 200;
+        opt.poll_interval_ms = 1;
+        opt.max_pending_requests = 8;
+
+        secs_protocol_session_t *sess = NULL;
+        if (has_pty) {
+            expect_ok("secs_protocol_session_create_from_secs1_serial_v2(pty)",
+                      secs_protocol_session_create_from_secs1_serial_v2(
+                          ctx, p.slave_path, 0, 0x0101, 0, &opt, &sess));
+
+            int handled = 1;
+            expect_ok("secs_protocol_session_poll_once(secs1 serial v2 timeout)",
+                      secs_protocol_session_poll_once(sess, 5, &handled));
+            if (handled != 0) {
+                fprintf(stderr,
+                        "FAIL: secs1 serial v2 poll_once(timeout) should handled=0\n");
+                ++g_failures;
+            }
+
+            (void)secs_protocol_session_stop(sess);
+            secs_protocol_session_destroy(sess);
+        }
+    }
+
+    secs_context_destroy(ctx);
+    if (has_pty) {
+        destroy_pty_pair(&p);
+    }
+#endif
+}
+
 int main(void) {
     test_version_and_error_message();
     test_error_message_category_mapping();
@@ -5456,6 +6341,8 @@ int main(void) {
     test_ii_list_builder_helpers();
     test_ii_builder();
     test_ii_extraction_helpers();
+    test_ii_builder_add_helpers();
+    test_ii_more_view_get_at_path_and_list_path();
     test_ii_clone_and_list_path_array_helpers();
     test_sml_runtime_basic();
     test_sml_runtime_placeholders();
@@ -5467,6 +6354,9 @@ int main(void) {
     test_sml_runtime_match_response_with_trace_empty_rules();
     test_hsms_open_passive_ip_invalid_cases();
     test_hsms_open_ip_smoke();
+    test_protocol_session_secs1_memory_duplex();
+    test_protocol_session_secs1_memory_duplex_v2();
+    test_protocol_session_secs1_serial_pty_smoke();
     test_hsms_protocol_loopback();
 
     if (g_failures == 0) {

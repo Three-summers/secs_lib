@@ -25,6 +25,7 @@
 #include <deque>
 #include <memory>
 #include <set>
+#include <stdexcept>
 #include <system_error>
 #include <vector>
 
@@ -143,6 +144,55 @@ private:
     std::shared_ptr<MemoryChannel> inbox_;
     std::shared_ptr<MemoryChannel> outbox_;
     secs::core::duration write_delay_{};
+    bool open_{true};
+};
+
+class ThrowingStream final : public Stream {
+public:
+    ThrowingStream(asio::any_io_executor ex,
+                   bool throw_on_read,
+                   bool throw_on_write,
+                   bool throw_on_connect)
+        : ex_(ex), throw_on_read_(throw_on_read), throw_on_write_(throw_on_write),
+          throw_on_connect_(throw_on_connect) {}
+
+    [[nodiscard]] asio::any_io_executor executor() const noexcept override {
+        return ex_;
+    }
+    [[nodiscard]] bool is_open() const noexcept override { return open_; }
+
+    void cancel() noexcept override {}
+    void close() noexcept override { open_ = false; }
+
+    asio::awaitable<std::pair<std::error_code, std::size_t>>
+    async_read_some(secs::core::mutable_bytes_view) override {
+        if (throw_on_read_) {
+            throw std::runtime_error("ThrowingStream: read");
+        }
+        co_return std::pair{make_error_code(errc::invalid_argument),
+                            std::size_t{0}};
+    }
+
+    asio::awaitable<std::error_code> async_write_all(bytes_view) override {
+        if (throw_on_write_) {
+            throw std::runtime_error("ThrowingStream: write");
+        }
+        co_return make_error_code(errc::invalid_argument);
+    }
+
+    asio::awaitable<std::error_code>
+    async_connect(const asio::ip::tcp::endpoint &) override {
+        if (throw_on_connect_) {
+            throw std::runtime_error("ThrowingStream: connect");
+        }
+        co_return make_error_code(errc::invalid_argument);
+    }
+
+private:
+    asio::any_io_executor ex_;
+    bool throw_on_read_{false};
+    bool throw_on_write_{false};
+    bool throw_on_connect_{false};
     bool open_{true};
 };
 
@@ -665,6 +715,53 @@ void test_connection_null_stream_and_tcpstream_error_paths() {
             TEST_EXPECT(rec.value() != 0);
 
             tcp_conn.cancel_and_close();
+            done = true;
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(done.load());
+}
+
+void test_connection_stream_throws_are_converted_to_error_codes() {
+    asio::io_context ioc;
+
+    Connection read_conn(
+        std::make_unique<ThrowingStream>(ioc.get_executor(),
+                                         /*throw_on_read=*/true,
+                                         /*throw_on_write=*/false,
+                                         /*throw_on_connect=*/false),
+        ConnectionOptions{.t8 = secs::core::duration{}});
+
+    Connection write_conn(
+        std::make_unique<ThrowingStream>(ioc.get_executor(),
+                                         /*throw_on_read=*/false,
+                                         /*throw_on_write=*/true,
+                                         /*throw_on_connect=*/false),
+        ConnectionOptions{.t8 = secs::core::duration{}});
+
+    std::atomic<bool> done{false};
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            try {
+                auto [rec, _] = co_await read_conn.async_read_message();
+                TEST_EXPECT_EQ(rec, make_error_code(errc::invalid_argument));
+            } catch (...) {
+                TEST_FAIL("async_read_message threw");
+            }
+
+            try {
+                auto ec = co_await write_conn.async_write_message(
+                    secs::hsms::make_select_req(0xFFFF, 0x01020304));
+                TEST_EXPECT_EQ(ec, make_error_code(errc::invalid_argument));
+            } catch (...) {
+                TEST_FAIL("async_write_message threw");
+            }
+
+            read_conn.cancel_and_close();
+            write_conn.cancel_and_close();
             done = true;
             co_return;
         },
@@ -1779,6 +1876,160 @@ void test_session_deselect_drops_inbound_data_when_not_selected() {
     TEST_EXPECT(done.load());
 }
 
+void test_session_max_inbound_data_zero_is_unlimited() {
+    asio::io_context ioc;
+
+    SessionOptions opt;
+    opt.session_id = 0x0001;
+    opt.t6 = 50ms;
+    opt.t7 = 200ms;
+    opt.t8 = secs::core::duration{};
+    opt.max_inbound_data_messages = 0; // 0 表示不限制
+
+    Session server(ioc.get_executor(), opt);
+    Session client(ioc.get_executor(), opt);
+
+    auto duplex = make_memory_duplex(ioc.get_executor());
+    Connection client_conn(std::move(duplex.client_stream),
+                           ConnectionOptions{.t8 = opt.t8});
+    Connection server_conn(std::move(duplex.server_stream),
+                           ConnectionOptions{.t8 = opt.t8});
+
+    std::atomic<bool> done{false};
+
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            auto ec = co_await server.async_open_passive(std::move(server_conn));
+            TEST_EXPECT_OK(ec);
+            co_return;
+        },
+        asio::detached);
+
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            TEST_EXPECT_OK(co_await client.async_open_active(std::move(client_conn)));
+
+            const std::vector<byte> body = {0x01};
+            const auto m1 = secs::hsms::make_data_message(
+                opt.session_id,
+                1,
+                1,
+                false,
+                0x11111111,
+                bytes_view{body.data(), body.size()});
+            const auto m2 = secs::hsms::make_data_message(
+                opt.session_id,
+                1,
+                1,
+                false,
+                0x22222222,
+                bytes_view{body.data(), body.size()});
+
+            TEST_EXPECT_OK(co_await server.async_send(m1));
+            TEST_EXPECT_OK(co_await server.async_send(m2));
+
+            auto [ec1, r1] = co_await client.async_receive_data(200ms);
+            TEST_EXPECT_OK(ec1);
+            TEST_EXPECT_EQ(r1.header.system_bytes, m1.header.system_bytes);
+
+            auto [ec2, r2] = co_await client.async_receive_data(200ms);
+            TEST_EXPECT_OK(ec2);
+            TEST_EXPECT_EQ(r2.header.system_bytes, m2.header.system_bytes);
+
+            client.stop();
+            server.stop();
+            done = true;
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(done.load());
+}
+
+void test_session_max_inbound_data_disconnects_on_overflow_and_receive_returns_reason() {
+    asio::io_context ioc;
+
+    SessionOptions opt;
+    opt.session_id = 0x0001;
+    opt.t6 = 50ms;
+    opt.t7 = 200ms;
+    opt.t8 = secs::core::duration{};
+    opt.max_inbound_data_messages = 1;
+
+    Session server(ioc.get_executor(), opt);
+    Session client(ioc.get_executor(), opt);
+
+    auto duplex = make_memory_duplex(ioc.get_executor());
+    Connection client_conn(std::move(duplex.client_stream),
+                           ConnectionOptions{.t8 = opt.t8});
+    Connection server_conn(std::move(duplex.server_stream),
+                           ConnectionOptions{.t8 = opt.t8});
+
+    asio::steady_timer watchdog(ioc);
+    watchdog.expires_after(1s);
+    watchdog.async_wait([&](const std::error_code &) {
+        TEST_FAIL("watchdog fired (possible hang)");
+        ioc.stop();
+    });
+
+    std::atomic<bool> done{false};
+
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            auto ec = co_await server.async_open_passive(std::move(server_conn));
+            TEST_EXPECT_OK(ec);
+            co_return;
+        },
+        asio::detached);
+
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            TEST_EXPECT_OK(co_await client.async_open_active(std::move(client_conn)));
+
+            const std::vector<byte> body = {0x01};
+            const auto m1 = secs::hsms::make_data_message(
+                opt.session_id,
+                1,
+                1,
+                false,
+                0x11111111,
+                bytes_view{body.data(), body.size()});
+            const auto m2 = secs::hsms::make_data_message(
+                opt.session_id,
+                1,
+                1,
+                false,
+                0x22222222,
+                bytes_view{body.data(), body.size()});
+
+            // 不调用 client.async_receive_data()，让入站队列堆积触发 overflow。
+            TEST_EXPECT_OK(co_await server.async_send(m1));
+            (void)co_await server.async_send(m2);
+
+            TEST_EXPECT_OK(co_await client.async_wait_reader_stopped(200ms));
+            TEST_EXPECT_EQ(client.state(), secs::hsms::SessionState::disconnected);
+
+            // 断线后，默认 timeout==nullopt 的 receive 也应立即返回断线原因。
+            auto [rec, _] = co_await client.async_receive_data();
+            TEST_EXPECT_EQ(rec, make_error_code(errc::buffer_overflow));
+
+            client.stop();
+            server.stop();
+            done = true;
+            ioc.stop();
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(done.load());
+}
+
 void test_session_t3_reply_timeout() {
     asio::io_context ioc;
 
@@ -2373,6 +2624,7 @@ int main() {
     RUN_TEST(test_connection_t8_intercharacter_timeout);
     RUN_TEST(test_connection_t8_disabled);
     RUN_TEST(test_connection_null_stream_and_tcpstream_error_paths);
+    RUN_TEST(test_connection_stream_throws_are_converted_to_error_codes);
     RUN_TEST(test_connection_async_read_message_invalid_frames);
     RUN_TEST(test_connection_write_serialization_waiters);
     RUN_TEST(test_session_select_and_linktest);
@@ -2389,6 +2641,8 @@ int main() {
     RUN_TEST(test_session_pending_cancelled_on_disconnect);
     RUN_TEST(test_session_pending_limit_returns_buffer_overflow);
     RUN_TEST(test_session_deselect_drops_inbound_data_when_not_selected);
+    RUN_TEST(test_session_max_inbound_data_zero_is_unlimited);
+    RUN_TEST(test_session_max_inbound_data_disconnects_on_overflow_and_receive_returns_reason);
     RUN_TEST(test_session_t3_reply_timeout);
     RUN_TEST(test_session_linktest_interval_disconnect_on_failure);
     RUN_TEST(test_session_linktest_interval_disconnects_after_threshold);

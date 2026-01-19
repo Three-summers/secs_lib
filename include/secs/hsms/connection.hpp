@@ -112,7 +112,6 @@ private:
 
     static std::uint32_t read_u32_be_(const core::byte *p) noexcept;
 
-    void start_writer_();
     asio::awaitable<void> writer_loop_();
     void cancel_queued_writes_(std::error_code reason) noexcept;
     void cancel_queued_data_writes_(std::error_code reason) noexcept;
@@ -124,7 +123,6 @@ private:
     // - 统一由 writer_loop_ 串行写出，避免并发 async_write 未定义行为
     // - control_queue_ 优先于 data_queue_，避免 Deselect/Separate 等控制消息被 data
     //   抢占写入顺序
-    secs::core::Event write_ready_{};
     std::deque<std::shared_ptr<WriteRequest>> control_queue_{};
     std::deque<std::shared_ptr<WriteRequest>> data_queue_{};
     bool writer_running_{false};

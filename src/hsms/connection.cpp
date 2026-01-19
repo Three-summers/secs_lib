@@ -131,7 +131,13 @@ Connection::async_connect(const asio::ip::tcp::endpoint &endpoint) {
     if (!stream_) {
         co_return core::make_error_code(core::errc::invalid_argument);
     }
-    co_return co_await stream_->async_connect(endpoint);
+    try {
+        co_return co_await stream_->async_connect(endpoint);
+    } catch (const std::bad_alloc &) {
+        co_return core::make_error_code(core::errc::out_of_memory);
+    } catch (...) {
+        co_return core::make_error_code(core::errc::invalid_argument);
+    }
 }
 
 asio::awaitable<std::error_code> Connection::async_close() {
@@ -142,7 +148,6 @@ asio::awaitable<std::error_code> Connection::async_close() {
 
     disable_data_writes(core::make_error_code(core::errc::cancelled));
     cancel_queued_writes_(core::make_error_code(core::errc::cancelled));
-    write_ready_.cancel();
     co_return std::error_code{};
 }
 
@@ -153,7 +158,6 @@ void Connection::cancel_and_close() noexcept {
     }
     disable_data_writes(core::make_error_code(core::errc::cancelled));
     cancel_queued_writes_(core::make_error_code(core::errc::cancelled));
-    write_ready_.cancel();
 }
 
 void Connection::enable_data_writes() noexcept { data_writes_enabled_ = true; }
@@ -184,20 +188,6 @@ void Connection::cancel_queued_data_writes_(std::error_code reason) noexcept {
     data_queue_.clear();
 }
 
-void Connection::start_writer_() {
-    if (writer_running_) {
-        return;
-    }
-    if (!stream_) {
-        return;
-    }
-    writer_running_ = true;
-    asio::co_spawn(
-        stream_->executor(),
-        [this]() -> asio::awaitable<void> { co_await writer_loop_(); },
-        asio::detached);
-}
-
 asio::awaitable<void> Connection::writer_loop_() {
     struct Reset final {
         Connection *self;
@@ -214,16 +204,18 @@ asio::awaitable<void> Connection::writer_loop_() {
             req = std::move(data_queue_.front());
             data_queue_.pop_front();
         } else {
-            write_ready_.reset();
-            const auto ec = co_await write_ready_.async_wait();
-            if (ec) {
-                break;
-            }
-            continue;
+            break;
         }
 
-        const auto ec = co_await stream_->async_write_all(
-            core::bytes_view{req->frame.data(), req->frame.size()});
+        std::error_code ec{};
+        try {
+            ec = co_await stream_->async_write_all(
+                core::bytes_view{req->frame.data(), req->frame.size()});
+        } catch (const std::bad_alloc &) {
+            ec = core::make_error_code(core::errc::out_of_memory);
+        } catch (...) {
+            ec = core::make_error_code(core::errc::invalid_argument);
+        }
         req->ec = ec;
         req->done.set();
         if (ec) {
@@ -309,8 +301,14 @@ Connection::async_read_exactly(core::mutable_bytes_view dst,
         std::error_code ec{};
         std::size_t n = 0;
         if (options_.t8 == core::duration{} || !frame_started) {
-            std::tie(ec, n) = co_await stream_->async_read_some(
-                core::mutable_bytes_view{dst.data() + offset, remaining});
+            try {
+                std::tie(ec, n) = co_await stream_->async_read_some(
+                    core::mutable_bytes_view{dst.data() + offset, remaining});
+            } catch (const std::bad_alloc &) {
+                co_return core::make_error_code(core::errc::out_of_memory);
+            } catch (...) {
+                co_return core::make_error_code(core::errc::invalid_argument);
+            }
         } else {
             std::tie(ec, n) = co_await async_read_some_with_t8(dst.data() + offset,
                                                                remaining);
@@ -368,8 +366,10 @@ Connection::async_write_message(const Message &msg) {
     } else {
         control_queue_.push_back(req);
     }
-    start_writer_();
-    write_ready_.set();
+    if (!writer_running_) {
+        writer_running_ = true;
+        co_await writer_loop_();
+    }
 
     auto ec = co_await req->done.async_wait();
     if (ec) {

@@ -57,6 +57,33 @@ void test_ceid_extractors() {
     }
 }
 
+void test_ceid_helpers_extract_unsigned_scalar_u32_and_list_at() {
+    using secs::utils::extract_list_unsigned_u32_at;
+    using secs::utils::extract_unsigned_scalar_u32;
+
+    // extract_unsigned_scalar_u32：支持 U1/U2/U4/U8（单值），其他情况返回 nullopt。
+    TEST_EXPECT_EQ(extract_unsigned_scalar_u32(Item::u1({7})).value(), 7U);
+    TEST_EXPECT(!extract_unsigned_scalar_u32(Item::u1({1, 2})).has_value());
+
+    TEST_EXPECT_EQ(extract_unsigned_scalar_u32(Item::u2({300})).value(), 300U);
+    TEST_EXPECT(!extract_unsigned_scalar_u32(Item::u2({1, 2})).has_value());
+
+    TEST_EXPECT_EQ(extract_unsigned_scalar_u32(Item::u4({400})).value(), 400U);
+    TEST_EXPECT(!extract_unsigned_scalar_u32(Item::u4({1, 2})).has_value());
+
+    TEST_EXPECT_EQ(extract_unsigned_scalar_u32(Item::u8({500})).value(), 500U);
+    TEST_EXPECT(!extract_unsigned_scalar_u32(Item::u8({1, 2})).has_value());
+
+    TEST_EXPECT(!extract_unsigned_scalar_u32(Item::ascii("x")).has_value());
+
+    // extract_list_unsigned_u32_at：对非 List 或越界返回 nullopt。
+    const Item list = Item::list({Item::u1({1}), Item::u4({100})});
+    TEST_EXPECT_EQ(extract_list_unsigned_u32_at(list, 0).value(), 1U);
+    TEST_EXPECT_EQ(extract_list_unsigned_u32_at(list, 1).value(), 100U);
+    TEST_EXPECT(!extract_list_unsigned_u32_at(list, 2).has_value());
+    TEST_EXPECT(!extract_list_unsigned_u32_at(Item::ascii("x"), 0).has_value());
+}
+
 void test_ceid_dispatcher_routes_and_replies() {
     asio::io_context ioc;
     const auto ex = ioc.get_executor();
@@ -178,6 +205,54 @@ void test_ceid_dispatcher_routes_and_replies() {
     ioc.run();
 }
 
+void test_ceid_dispatcher_missing_handler_returns_invalid_argument() {
+    asio::io_context ioc;
+    const auto ex = ioc.get_executor();
+
+    auto extractor = [](const DataMessage &, const Item &body)
+        -> std::optional<CeidDispatcher::Ceid> {
+        const auto ceid = secs::utils::extract_ceid_s6f11_like(body);
+        if (!ceid.has_value()) {
+            return std::nullopt;
+        }
+        return static_cast<CeidDispatcher::Ceid>(ceid.value());
+    };
+
+    // 未注册任何 handler，也不设置 default：invoke() 应在 find_() 返回 nullopt 时失败。
+    auto dispatcher = std::make_shared<CeidDispatcher>(extractor);
+
+    const Item request =
+        Item::list({Item::u4({1}), Item::u4({100}), Item::list({})});
+    auto [enc_ec, bytes] = secs::utils::encode_item(request);
+    TEST_EXPECT_OK(enc_ec);
+
+    DataMessage msg{};
+    msg.stream = 6;
+    msg.function = 11;
+    msg.w_bit = true;
+    msg.system_bytes = 0;
+    msg.body = std::move(bytes);
+
+    std::optional<std::error_code> out_ec;
+    asio::co_spawn(
+        ex,
+        [&]() -> asio::awaitable<void> {
+            auto [ec, body] = co_await dispatcher->invoke(msg);
+            out_ec = ec;
+            TEST_EXPECT(body.empty());
+            ioc.stop();
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(out_ec.has_value());
+    if (out_ec.has_value()) {
+        TEST_EXPECT_EQ(*out_ec,
+                       secs::core::make_error_code(secs::core::errc::invalid_argument));
+    }
+}
+
 void test_async_request_decoded_with_ceid_mismatch() {
     asio::io_context ioc;
     const auto ex = ioc.get_executor();
@@ -247,8 +322,9 @@ void test_async_request_decoded_with_ceid_mismatch() {
 
 int main() {
     test_ceid_extractors();
+    test_ceid_helpers_extract_unsigned_scalar_u32_and_list_at();
     test_ceid_dispatcher_routes_and_replies();
+    test_ceid_dispatcher_missing_handler_returns_invalid_argument();
     test_async_request_decoded_with_ceid_mismatch();
     return secs::tests::run_and_report();
 }
-
