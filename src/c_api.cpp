@@ -87,6 +87,20 @@ struct secs_ii_item final {
     secs::ii::Item item;
 };
 
+struct secs_ii_builder final {
+    // 尚未闭合的 List 栈（每一层都是一个独立的 List Item）。
+    std::vector<secs::ii::Item> list_stack{};
+
+    // 已构建完成的 root（当 list_stack 为空时，add_* 或 list_end 会生成它）。
+    std::optional<secs::ii::Item> root{};
+
+    // 首个错误（记忆首错；后续调用直接返回该错误且不再修改状态）。
+    secs_error_t first_err{0, "secs.c_api"};
+
+    // finalize 成功后置为 true（防止误复用）。
+    bool finalized{false};
+};
+
 struct secs_sml_runtime final {
     secs::sml::Runtime rt{};
 };
@@ -1238,6 +1252,305 @@ SECS_II_LIST_APPEND_VALUES_IMPL(float, f4, secs::ii::Item::f4)
 SECS_II_LIST_APPEND_VALUES_IMPL(double, f8, secs::ii::Item::f8)
 
 #undef SECS_II_LIST_APPEND_VALUES_IMPL
+
+// ----------------------------- SECS-II：Item Builder（P1）
+// -----------------------------
+
+namespace {
+
+[[nodiscard]] secs_error_t ii_builder_fail(secs_ii_builder_t *b,
+                                          secs_error_t err) noexcept {
+    if (!b) {
+        return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+    }
+    if (secs_error_is_ok(b->first_err)) {
+        b->first_err = err;
+    }
+    return b->first_err;
+}
+
+[[nodiscard]] secs_error_t ii_builder_ok_or_err(secs_ii_builder_t *b) noexcept {
+    if (!b) {
+        return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+    }
+    if (b->finalized) {
+        return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+    }
+    if (!secs_error_is_ok(b->first_err)) {
+        return b->first_err;
+    }
+    return ok();
+}
+
+[[nodiscard]] secs_error_t ii_builder_append(secs_ii_builder_t *b,
+                                            secs::ii::Item elem) noexcept {
+    if (!b) {
+        return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+    }
+    if (b->finalized) {
+        return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+    }
+    if (!secs_error_is_ok(b->first_err)) {
+        return b->first_err;
+    }
+
+    if (!b->list_stack.empty()) {
+        auto *list = b->list_stack.back().get_if<secs::ii::List>();
+        if (!list) {
+            return ii_builder_fail(b, c_api_err(SECS_C_API_INVALID_ARGUMENT));
+        }
+        list->push_back(std::move(elem));
+        return ok();
+    }
+
+    if (b->root.has_value()) {
+        return ii_builder_fail(b, c_api_err(SECS_C_API_INVALID_ARGUMENT));
+    }
+    b->root = std::move(elem);
+    return ok();
+}
+
+} // namespace
+
+secs_error_t secs_ii_builder_create(secs_ii_builder_t **out_builder) {
+    return guard_error([&]() -> secs_error_t {
+        if (!out_builder) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_builder = nullptr;
+        auto *b = new (std::nothrow) secs_ii_builder();
+        if (!b) {
+            return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+        }
+        *out_builder = b;
+        return ok();
+    });
+}
+
+void secs_ii_builder_destroy(secs_ii_builder_t *builder) {
+    guard_void([&]() {
+        if (!builder) {
+            return;
+        }
+        delete builder;
+    });
+}
+
+secs_error_t secs_ii_builder_list_begin(secs_ii_builder_t *builder) {
+    return guard_error([&]() -> secs_error_t {
+        auto st = ii_builder_ok_or_err(builder);
+        if (!secs_error_is_ok(st)) {
+            return st;
+        }
+        builder->list_stack.push_back(secs::ii::Item::list({}));
+        return ok();
+    });
+}
+
+secs_error_t secs_ii_builder_list_end(secs_ii_builder_t *builder) {
+    return guard_error([&]() -> secs_error_t {
+        auto st = ii_builder_ok_or_err(builder);
+        if (!secs_error_is_ok(st)) {
+            return st;
+        }
+        if (builder->list_stack.empty()) {
+            return ii_builder_fail(builder, c_api_err(SECS_C_API_INVALID_ARGUMENT));
+        }
+        secs::ii::Item finished = std::move(builder->list_stack.back());
+        builder->list_stack.pop_back();
+        return ii_builder_append(builder, std::move(finished));
+    });
+}
+
+secs_error_t secs_ii_builder_add_item(secs_ii_builder_t *builder,
+                                      const secs_ii_item_t *item) {
+    return guard_error([&]() -> secs_error_t {
+        auto st = ii_builder_ok_or_err(builder);
+        if (!secs_error_is_ok(st)) {
+            return st;
+        }
+        if (!item) {
+            return ii_builder_fail(builder, c_api_err(SECS_C_API_INVALID_ARGUMENT));
+        }
+        return ii_builder_append(builder, item->item);
+    });
+}
+
+secs_error_t secs_ii_builder_add_item_take(secs_ii_builder_t *builder,
+                                           secs_ii_item_t **io_item) {
+    return guard_error([&]() -> secs_error_t {
+        if (!io_item || !*io_item) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+
+        // take 语义：确保无论成功/失败/抛异常都能销毁并置空。
+        std::unique_ptr<secs_ii_item_t, void (*)(secs_ii_item_t *)> owned(
+            *io_item, secs_ii_item_destroy);
+        *io_item = nullptr;
+
+        auto st = ii_builder_ok_or_err(builder);
+        if (!secs_error_is_ok(st)) {
+            return st;
+        }
+
+        return ii_builder_append(builder, std::move(owned->item));
+    });
+}
+
+secs_error_t secs_ii_builder_add_ascii(secs_ii_builder_t *builder,
+                                       const char *value) {
+    return guard_error([&]() -> secs_error_t {
+        auto st = ii_builder_ok_or_err(builder);
+        if (!secs_error_is_ok(st)) {
+            return st;
+        }
+        if (!value) {
+            return ii_builder_fail(builder, c_api_err(SECS_C_API_INVALID_ARGUMENT));
+        }
+        return ii_builder_append(builder, secs::ii::Item::ascii(std::string(value)));
+    });
+}
+
+secs_error_t secs_ii_builder_add_ascii_n(secs_ii_builder_t *builder,
+                                         const char *bytes,
+                                         size_t n) {
+    return guard_error([&]() -> secs_error_t {
+        auto st = ii_builder_ok_or_err(builder);
+        if (!secs_error_is_ok(st)) {
+            return st;
+        }
+        if (!bytes && n != 0) {
+            return ii_builder_fail(builder, c_api_err(SECS_C_API_INVALID_ARGUMENT));
+        }
+        std::string s;
+        if (n != 0) {
+            s.assign(bytes, bytes + n);
+        }
+        return ii_builder_append(builder, secs::ii::Item::ascii(std::move(s)));
+    });
+}
+
+secs_error_t secs_ii_builder_add_binary(secs_ii_builder_t *builder,
+                                        const uint8_t *bytes,
+                                        size_t n) {
+    return guard_error([&]() -> secs_error_t {
+        auto st = ii_builder_ok_or_err(builder);
+        if (!secs_error_is_ok(st)) {
+            return st;
+        }
+        if (!bytes && n != 0) {
+            return ii_builder_fail(builder, c_api_err(SECS_C_API_INVALID_ARGUMENT));
+        }
+        return ii_builder_append(builder,
+                                 secs::ii::Item::binary(bytes_to_vec(bytes, n)));
+    });
+}
+
+secs_error_t secs_ii_builder_add_boolean(secs_ii_builder_t *builder,
+                                         uint8_t value01) {
+    return guard_error([&]() -> secs_error_t {
+        auto st = ii_builder_ok_or_err(builder);
+        if (!secs_error_is_ok(st)) {
+            return st;
+        }
+        if (value01 != 0 && value01 != 1) {
+            return ii_builder_fail(builder, c_api_err(SECS_C_API_INVALID_ARGUMENT));
+        }
+        std::vector<bool> v;
+        v.push_back(value01 != 0);
+        return ii_builder_append(builder, secs::ii::Item::boolean(std::move(v)));
+    });
+}
+
+secs_error_t secs_ii_builder_add_boolean_values(secs_ii_builder_t *builder,
+                                                const uint8_t *values01,
+                                                size_t n) {
+    return guard_error([&]() -> secs_error_t {
+        auto st = ii_builder_ok_or_err(builder);
+        if (!secs_error_is_ok(st)) {
+            return st;
+        }
+        if (!values01 && n != 0) {
+            return ii_builder_fail(builder, c_api_err(SECS_C_API_INVALID_ARGUMENT));
+        }
+        std::vector<bool> v;
+        v.reserve(n);
+        for (size_t i = 0; i < n; ++i) {
+            if (values01[i] != 0 && values01[i] != 1) {
+                return ii_builder_fail(builder,
+                                       c_api_err(SECS_C_API_INVALID_ARGUMENT));
+            }
+            v.push_back(values01[i] != 0);
+        }
+        return ii_builder_append(builder, secs::ii::Item::boolean(std::move(v)));
+    });
+}
+
+#define SECS_II_BUILDER_ADD_SCALAR_IMPL(c_type, fn_suffix, make_item)            \
+    secs_error_t secs_ii_builder_add_##fn_suffix(secs_ii_builder_t *builder,     \
+                                                 c_type value) {                \
+        return guard_error([&]() -> secs_error_t {                               \
+            auto st = ii_builder_ok_or_err(builder);                             \
+            if (!secs_error_is_ok(st)) {                                        \
+                return st;                                                       \
+            }                                                                    \
+            return ii_builder_append(builder, make_item({value}));               \
+        });                                                                      \
+    }
+
+SECS_II_BUILDER_ADD_SCALAR_IMPL(int8_t, i1, secs::ii::Item::i1)
+SECS_II_BUILDER_ADD_SCALAR_IMPL(int16_t, i2, secs::ii::Item::i2)
+SECS_II_BUILDER_ADD_SCALAR_IMPL(int32_t, i4, secs::ii::Item::i4)
+SECS_II_BUILDER_ADD_SCALAR_IMPL(int64_t, i8, secs::ii::Item::i8)
+SECS_II_BUILDER_ADD_SCALAR_IMPL(uint8_t, u1, secs::ii::Item::u1)
+SECS_II_BUILDER_ADD_SCALAR_IMPL(uint16_t, u2, secs::ii::Item::u2)
+SECS_II_BUILDER_ADD_SCALAR_IMPL(uint32_t, u4, secs::ii::Item::u4)
+SECS_II_BUILDER_ADD_SCALAR_IMPL(uint64_t, u8, secs::ii::Item::u8)
+SECS_II_BUILDER_ADD_SCALAR_IMPL(float, f4, secs::ii::Item::f4)
+SECS_II_BUILDER_ADD_SCALAR_IMPL(double, f8, secs::ii::Item::f8)
+
+#undef SECS_II_BUILDER_ADD_SCALAR_IMPL
+
+secs_error_t secs_ii_builder_finalize(secs_ii_builder_t *builder,
+                                      secs_ii_item_t **out_item) {
+    return guard_error([&]() -> secs_error_t {
+        if (!out_item) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_item = nullptr;
+
+        if (!builder) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        if (builder->finalized) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        if (!secs_error_is_ok(builder->first_err)) {
+            return builder->first_err;
+        }
+
+        if (!builder->list_stack.empty()) {
+            return ii_builder_fail(builder, c_api_err(SECS_C_API_INVALID_ARGUMENT));
+        }
+        if (!builder->root.has_value()) {
+            return ii_builder_fail(builder, c_api_err(SECS_C_API_INVALID_ARGUMENT));
+        }
+
+        // 为了在 OOM 时不破坏 builder->root，这里先分配句柄，再 move root。
+        std::unique_ptr<secs_ii_item_t, void (*)(secs_ii_item_t *)> owned(
+            new (std::nothrow) secs_ii_item(secs::ii::Item::list({})),
+            secs_ii_item_destroy);
+        if (!owned) {
+            return ii_builder_fail(builder, c_api_err(SECS_C_API_OUT_OF_MEMORY));
+        }
+        owned->item = std::move(*builder->root);
+        builder->root.reset();
+        builder->finalized = true;
+
+        *out_item = owned.release();
+        return ok();
+    });
+}
 
 secs_error_t secs_ii_item_ascii_view(const secs_ii_item_t *item,
                                      const char **out_ptr,

@@ -42,6 +42,10 @@ add_executable(test_standard_messages test_standard_messages.cpp)
 target_link_libraries(test_standard_messages PRIVATE secs_ii secs_core)
 add_test(NAME standard_messages COMMAND test_standard_messages)
 
+add_executable(test_struct_codec test_struct_codec.cpp)
+target_link_libraries(test_struct_codec PRIVATE secs_protocol secs_ii secs_core)
+add_test(NAME struct_codec COMMAND test_struct_codec)
+
 add_executable(test_sml_parser test_sml_parser.cpp)
 target_link_libraries(test_sml_parser PRIVATE secs_sml secs_ii secs_core)
 add_test(NAME sml_parser COMMAND test_sml_parser)

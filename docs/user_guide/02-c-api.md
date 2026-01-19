@@ -1,6 +1,6 @@
 # C API 使用指南（面向库使用者 / 纯 C 工程）
 
-> 文档更新：2026-01-14（Codex）  
+> 文档更新：2026-01-19（Codex）  
 > 基于源码版本：当前工作区  
 > 目标读者：希望用纯 C 调用 `secs_lib`（或从其他语言走 C ABI/FFI）的工程师
 
@@ -245,6 +245,41 @@ decoded handler 回调语义要点：
   secs_ii_decode_one(bytes, n, &consumed, &out_item)
   out_item 用 secs_ii_item_destroy 释放
 ```
+
+### 3.1 用 secs_ii_builder 构建嵌套 List（推荐）
+
+当你要构造“多层嵌套的 List”，手写 `create_list + append + destroy` 很容易写成“像汇编一样”的风格。
+
+`secs_ii_builder_*` 提供一个栈式构建器：用 `list_begin/list_end` 维护层级，用 `add_*` 追加子项，最后 `finalize` 一次性拿到 root Item。
+
+示例：构造 `<L <U2 101> <A "A"> <L <U4 1>>>`：
+
+```c
+secs_ii_builder_t *b = NULL;
+secs_ii_builder_create(&b);
+
+secs_ii_builder_list_begin(b);          /* <L */
+  secs_ii_builder_add_u2(b, 101);       /*   <U2 101> */
+  secs_ii_builder_add_ascii(b, "A");    /*   <A "A"> */
+  secs_ii_builder_list_begin(b);        /*   <L */
+    secs_ii_builder_add_u4(b, 1);       /*     <U4 1> */
+  secs_ii_builder_list_end(b);          /*   > */
+secs_ii_builder_list_end(b);            /* > */
+
+secs_ii_item_t *root = NULL;
+secs_error_t err = secs_ii_builder_finalize(b, &root);
+secs_ii_builder_destroy(b);
+
+if (!secs_error_is_ok(err)) {
+  /* 处理错误 */
+}
+/* root 用完后：secs_ii_item_destroy(root); */
+```
+
+要点：
+
+- “首错记忆”：builder 一旦出错，后续调用会返回同一个错误且不再修改状态；你可以选择只在最后检查 `finalize` 的返回值。
+- `add_item_take`：如果你已有一个 `secs_ii_item_t*`（比如你想构造一个数值数组 Item），可以用 take 语义追加并自动释放，减少错误路径泄漏风险。
 
 解码资源限制（不可信输入建议开启）：
 

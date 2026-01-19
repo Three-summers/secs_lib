@@ -1,10 +1,11 @@
 #pragma once
 
-#include "secs/ii/item.hpp"
+#include "secs/ii/struct_codec.hpp"
 
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <tuple>
 
 namespace secs::messages {
 
@@ -14,15 +15,14 @@ namespace secs::messages {
  * 常见约定：消息体为空 List。
  */
 struct S1F1Request final {
+    static constexpr auto secs_members() { return std::make_tuple(); }
+
     static std::optional<S1F1Request> from_item(const secs::ii::Item &item) {
-        if (!item.get_if<secs::ii::List>()) {
-            return std::nullopt;
-        }
-        return S1F1Request{};
+        return secs::ii::from_item<S1F1Request>(item);
     }
 
     [[nodiscard]] secs::ii::Item to_item() const {
-        return secs::ii::Item::list({});
+        return secs::ii::to_item(*this);
     }
 };
 
@@ -35,26 +35,17 @@ struct S1F2Response final {
     std::string mdln;
     std::string softrev;
 
+    static constexpr auto secs_members() {
+        return std::make_tuple(&S1F2Response::mdln, &S1F2Response::softrev);
+    }
+
     static std::optional<S1F2Response> from_item(const secs::ii::Item &item) {
-        auto *list = item.get_if<secs::ii::List>();
-        if (!list || list->size() != 2) {
-            return std::nullopt;
-        }
-
-        auto *mdln = (*list)[0].get_if<secs::ii::ASCII>();
-        auto *softrev = (*list)[1].get_if<secs::ii::ASCII>();
-        if (!mdln || !softrev) {
-            return std::nullopt;
-        }
-
-        return S1F2Response{mdln->value, softrev->value};
+        return secs::ii::from_item<S1F2Response>(item);
     }
 
     [[nodiscard]] secs::ii::Item to_item() const {
-        return secs::ii::Item::list(
-            {secs::ii::Item::ascii(mdln), secs::ii::Item::ascii(softrev)});
+        return secs::ii::to_item(*this);
     }
 };
 
 } // namespace secs::messages
-

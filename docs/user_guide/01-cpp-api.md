@@ -1,6 +1,6 @@
 # C++ API 使用指南（面向库使用者）
 
-> 文档更新：2026-01-14（Codex）  
+> 文档更新：2026-01-19（Codex）  
 > 基于源码版本：当前工作区  
 > 目标读者：需要在自己的 C++ 项目中集成并使用 `secs_lib` 的工程师（Host / Equipment / 仿真器）
 
@@ -260,7 +260,9 @@ proto.router().set_default(
 
 ```
 你做：
-  - 定义 TRequest / TResponse，提供 from_item/to_item
+  - 定义 TRequest / TResponse：
+    - 传统：提供 from_item/to_item（完全自定义映射）
+    - 声明式：仅提供 secs_members()（由 `secs::ii::to_item/from_item<T>` 自动映射）
   - 继承 TypedHandler 并实现 handle()
 
 框架做：
@@ -281,6 +283,44 @@ proto.router().set_default(
 对应示例：
 
 - `examples/typed_handler_example.cpp`
+
+#### 4.3.1 声明式消息定义（自动生成 from_item/to_item）
+
+如果你使用 TypedHandler，最机械的部分通常是为每个消息类型手写 `from_item/to_item`。
+
+现在可以用 `secs::ii::to_item()` / `secs::ii::from_item<T>()` 把这部分“固化成模板”，你只需要声明字段与顺序（TypedHandler 内部也会走这条路径）：
+
+```cpp
+#include <secs/ii/struct_codec.hpp>
+
+// <L <A MDLN> <A SOFTREV>>
+struct S1F2Response final {
+  std::string mdln;
+  std::string softrev;
+
+  static constexpr auto secs_members() {
+    return std::make_tuple(&S1F2Response::mdln, &S1F2Response::softrev);
+  }
+};
+```
+
+如果你也想保留传统的 `from_item/to_item` 成员 API（方便直接调用），可以加两行薄包装：
+
+```cpp
+static std::optional<S1F2Response> from_item(const secs::ii::Item& item) {
+  return secs::ii::from_item<S1F2Response>(item);
+}
+secs::ii::Item to_item() const { return secs::ii::to_item(*this); }
+```
+
+默认映射规则（最常用的子集）：
+
+- `std::string` ↔ `ASCII`
+- `u1/u2/u4/u8/i1/i2/i4/i8/f4/f8/bool` ↔ 对应 SECS-II 类型（标量：数组长度必须为 1）
+- 若 `secs_members()` 只返回一个成员且类型为 `std::vector<T>`：表示“变长 List”，每个元素映射为一个子 Item
+- 若字段类型也提供 `secs_members()`（或传统 `from_item/to_item`）：允许嵌套（递归）映射
+
+不满足上述默认规则时，你仍然可以为该消息类型手写 `from_item/to_item`（模板只是帮你省掉能省的部分）。
 
 ---
 

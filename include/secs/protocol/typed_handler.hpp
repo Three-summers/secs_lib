@@ -4,6 +4,7 @@
 #include "secs/core/error.hpp"
 #include "secs/ii/codec.hpp"
 #include "secs/ii/item.hpp"
+#include "secs/ii/struct_codec.hpp"
 #include "secs/protocol/router.hpp"
 
 #include <asio/awaitable.hpp>
@@ -18,14 +19,21 @@
 namespace secs::protocol {
 
 /**
- * @brief Concept 约束：要求消息类型具备 from_item() 和 to_item() 方法。
+ * @brief Concept 约束：要求消息类型可在 ii::Item 与强类型之间互转。
  *
- * 任何满足此约束的类型都可以用作 TypedHandler 的请求/响应类型。
+ * 约定：
+ * - decode：`secs::ii::from_item<T>(item) -> std::optional<T>`
+ * - encode：`secs::ii::to_item(msg) -> secs::ii::Item`
+ *
+ * 说明：
+ * - 传统写法：类型自带 `static from_item()` + `to_item()` 成员函数；
+ * - 声明式写法：类型提供 `static secs_members()`（见 `secs/ii/struct_codec.hpp`），
+ *   由库内模板自动生成映射。
  */
 template <typename T>
 concept SecsMessage = requires(const ii::Item &item, const T &msg) {
-    { T::from_item(item) } -> std::same_as<std::optional<T>>;
-    { msg.to_item() } -> std::same_as<ii::Item>;
+    { ii::from_item<T>(item) } -> std::same_as<std::optional<T>>;
+    { ii::to_item(msg) } -> std::same_as<ii::Item>;
 };
 
 /**
@@ -135,7 +143,7 @@ public:
         }
 
         // 步骤 2：Item → TRequest
-        auto request_opt = TRequest::from_item(request_item);
+        auto request_opt = ii::from_item<TRequest>(request_item);
         if (!request_opt.has_value()) {
             co_return HandlerResult{
                 core::make_error_code(core::errc::invalid_argument), {}};
@@ -149,7 +157,7 @@ public:
         }
 
         // 步骤 4：TResponse → Item
-        ii::Item response_item = response.to_item();
+        ii::Item response_item = ii::to_item(response);
 
         // 步骤 5：Item → 字节序列
         std::vector<secs::core::byte> response_body;

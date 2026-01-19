@@ -1810,6 +1810,169 @@ static void test_ii_list_builder_helpers(void) {
     secs_ii_item_destroy(list);
 }
 
+static void test_ii_builder(void) {
+    /* Phase2.5：Item Builder（栈式 begin/end） */
+
+    /* 参数校验：out_builder==NULL */
+    expect_err("secs_ii_builder_create(NULL)",
+               secs_ii_builder_create(NULL));
+
+    /* 正常构建：<L <U2 101> <A \"A\"> <L <U4 1>>> */
+    {
+        secs_ii_builder_t *b = NULL;
+        expect_ok("secs_ii_builder_create",
+                  secs_ii_builder_create(&b));
+
+        expect_ok("secs_ii_builder_list_begin(root)",
+                  secs_ii_builder_list_begin(b));
+        expect_ok("secs_ii_builder_add_u2(101)",
+                  secs_ii_builder_add_u2(b, (uint16_t)101));
+        expect_ok("secs_ii_builder_add_ascii(A)",
+                  secs_ii_builder_add_ascii(b, "A"));
+        expect_ok("secs_ii_builder_list_begin(nested)",
+                  secs_ii_builder_list_begin(b));
+        expect_ok("secs_ii_builder_add_u4(1)",
+                  secs_ii_builder_add_u4(b, (uint32_t)1));
+        expect_ok("secs_ii_builder_list_end(nested)",
+                  secs_ii_builder_list_end(b));
+        expect_ok("secs_ii_builder_list_end(root)",
+                  secs_ii_builder_list_end(b));
+
+        secs_ii_item_t *out = NULL;
+        expect_ok("secs_ii_builder_finalize",
+                  secs_ii_builder_finalize(b, &out));
+
+        /* finalize 后不可复用 */
+        expect_err("secs_ii_builder_add_u2(after finalize)",
+                   secs_ii_builder_add_u2(b, (uint16_t)1));
+
+        secs_ii_builder_destroy(b);
+
+        /* 验证结构 */
+        secs_ii_item_type_t type = (secs_ii_item_type_t)99;
+        expect_ok("secs_ii_item_get_type(builder root)",
+                  secs_ii_item_get_type(out, &type));
+        if (type != SECS_II_ITEM_LIST) {
+            fprintf(stderr, "FAIL: builder root should be LIST\n");
+            ++g_failures;
+        }
+
+        size_t n = 0;
+        expect_ok("secs_ii_item_list_size(builder root)",
+                  secs_ii_item_list_size(out, &n));
+        if (n != 3u) {
+            fprintf(stderr, "FAIL: builder root size mismatch\n");
+            ++g_failures;
+        }
+
+        /* child[0] = U2 101 */
+        secs_ii_item_t *c0 = NULL;
+        expect_ok("secs_ii_item_list_get(builder[0])",
+                  secs_ii_item_list_get(out, 0, &c0));
+        const uint16_t *p_u2 = NULL;
+        size_t p_u2_n = 0;
+        expect_ok("secs_ii_item_u2_view(builder[0])",
+                  secs_ii_item_u2_view(c0, &p_u2, &p_u2_n));
+        if (!p_u2 || p_u2_n != 1u || p_u2[0] != 101u) {
+            fprintf(stderr, "FAIL: builder[0] u2 mismatch\n");
+            ++g_failures;
+        }
+        secs_ii_item_destroy(c0);
+
+        /* child[1] = ASCII \"A\" */
+        secs_ii_item_t *c1 = NULL;
+        expect_ok("secs_ii_item_list_get(builder[1])",
+                  secs_ii_item_list_get(out, 1, &c1));
+        const char *p_a = NULL;
+        size_t p_a_n = 0;
+        expect_ok("secs_ii_item_ascii_view(builder[1])",
+                  secs_ii_item_ascii_view(c1, &p_a, &p_a_n));
+        if (!p_a || p_a_n != 1u || memcmp(p_a, "A", 1) != 0) {
+            fprintf(stderr, "FAIL: builder[1] ascii mismatch\n");
+            ++g_failures;
+        }
+        secs_ii_item_destroy(c1);
+
+        /* child[2] = <L <U4 1>> */
+        secs_ii_item_t *c2 = NULL;
+        expect_ok("secs_ii_item_list_get(builder[2])",
+                  secs_ii_item_list_get(out, 2, &c2));
+        expect_ok("secs_ii_item_list_size(builder[2])",
+                  secs_ii_item_list_size(c2, &n));
+        if (n != 1u) {
+            fprintf(stderr, "FAIL: builder[2] nested size mismatch\n");
+            ++g_failures;
+        }
+        secs_ii_item_t *c20 = NULL;
+        expect_ok("secs_ii_item_list_get(builder[2][0])",
+                  secs_ii_item_list_get(c2, 0, &c20));
+        const uint32_t *p_u4 = NULL;
+        size_t p_u4_n = 0;
+        expect_ok("secs_ii_item_u4_view(builder[2][0])",
+                  secs_ii_item_u4_view(c20, &p_u4, &p_u4_n));
+        if (!p_u4 || p_u4_n != 1u || p_u4[0] != 1u) {
+            fprintf(stderr, "FAIL: builder[2][0] u4 mismatch\n");
+            ++g_failures;
+        }
+        secs_ii_item_destroy(c20);
+        secs_ii_item_destroy(c2);
+
+        secs_ii_item_destroy(out);
+    }
+
+    /* 首错记忆：list_end() 先错，后续调用应继续返回同一错误 */
+    {
+        secs_ii_builder_t *b = NULL;
+        expect_ok("secs_ii_builder_create(first_err)",
+                  secs_ii_builder_create(&b));
+
+        secs_error_t err0 = secs_ii_builder_list_end(b);
+        expect_err("secs_ii_builder_list_end(without begin)", err0);
+
+        secs_error_t err1 = secs_ii_builder_list_begin(b);
+        expect_err("secs_ii_builder_list_begin(after error)", err1);
+        if (err0.value != err1.value || strcmp(err0.category, err1.category) != 0) {
+            fprintf(stderr, "FAIL: builder should remember first error\n");
+            ++g_failures;
+        }
+
+        /* take 语义：即使 builder 已出错，也应 destroy 并置空 */
+        secs_ii_item_t *tmp = NULL;
+        expect_ok("secs_ii_item_create_ascii(tmp for take)",
+                  secs_ii_item_create_ascii("hi", 2, &tmp));
+        secs_error_t err2 = secs_ii_builder_add_item_take(b, &tmp);
+        expect_err("secs_ii_builder_add_item_take(after error)", err2);
+        if (tmp != NULL) {
+            fprintf(stderr, "FAIL: builder_add_item_take should NULL-out tmp\n");
+            ++g_failures;
+            secs_ii_item_destroy(tmp);
+        }
+
+        secs_ii_item_t *out = NULL;
+        expect_err("secs_ii_builder_finalize(after error)",
+                   secs_ii_builder_finalize(b, &out));
+
+        secs_ii_builder_destroy(b);
+    }
+
+    /* finalize 未闭合 list：应报错并记忆 */
+    {
+        secs_ii_builder_t *b = NULL;
+        expect_ok("secs_ii_builder_create(unclosed)",
+                  secs_ii_builder_create(&b));
+        expect_ok("secs_ii_builder_list_begin(unclosed)",
+                  secs_ii_builder_list_begin(b));
+
+        secs_ii_item_t *out = NULL;
+        expect_err("secs_ii_builder_finalize(unclosed)",
+                   secs_ii_builder_finalize(b, &out));
+        expect_err("secs_ii_builder_list_end(after finalize error)",
+                   secs_ii_builder_list_end(b));
+
+        secs_ii_builder_destroy(b);
+    }
+}
+
 static void test_ii_extraction_helpers(void) {
     /* Phase3：at_path / get_ascii_at helpers */
 
@@ -5291,6 +5454,7 @@ int main(void) {
     test_ii_encode_decode_and_malicious();
     test_ii_all_types_and_views();
     test_ii_list_builder_helpers();
+    test_ii_builder();
     test_ii_extraction_helpers();
     test_ii_clone_and_list_path_array_helpers();
     test_sml_runtime_basic();

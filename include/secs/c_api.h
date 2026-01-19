@@ -262,6 +262,81 @@ secs_error_t secs_ii_item_list_append_f8_values(secs_ii_item_t *list,
                                                 const double *values,
                                                 size_t n);
 
+/* ----------------------------- SECS-II：Item Builder（P1）
+ * ----------------------------- */
+
+/*
+ * Builder：用于更顺滑地构建嵌套 List。
+ *
+ * 设计目标：
+ * - 以 begin/end 维护层级，减少“创建子 Item / append / destroy”的手工噪音；
+ * - 记忆首个错误：一旦出错，后续调用都返回同一错误且不再修改内部状态；
+ * - finalize 统一检查状态并输出最终 root Item。
+ *
+ * 典型用法：
+ *   secs_ii_builder_t *b = NULL;
+ *   secs_ii_builder_create(&b);
+ *   secs_ii_builder_list_begin(b);        // <L
+ *     secs_ii_builder_add_u2(b, 101);     //   <U2 101>
+ *     secs_ii_builder_add_ascii(b, "A");  //   <A "A">
+ *   secs_ii_builder_list_end(b);          // >
+ *   secs_ii_item_t *out = NULL;
+ *   secs_error_t err = secs_ii_builder_finalize(b, &out);
+ *   secs_ii_builder_destroy(b);
+ */
+typedef struct secs_ii_builder secs_ii_builder_t;
+
+secs_error_t secs_ii_builder_create(secs_ii_builder_t **out_builder);
+void secs_ii_builder_destroy(secs_ii_builder_t *builder);
+
+secs_error_t secs_ii_builder_list_begin(secs_ii_builder_t *builder);
+secs_error_t secs_ii_builder_list_end(secs_ii_builder_t *builder);
+
+/* 追加一个已构造的 Item（append 会拷贝）。 */
+secs_error_t secs_ii_builder_add_item(secs_ii_builder_t *builder,
+                                      const secs_ii_item_t *item);
+
+/* take 语义：append 后自动 destroy 并将 *io_item 置空。 */
+secs_error_t secs_ii_builder_add_item_take(secs_ii_builder_t *builder,
+                                           secs_ii_item_t **io_item);
+
+/* 直接追加“字面量值/数组值”，内部负责创建临时 Item 并 append。 */
+secs_error_t secs_ii_builder_add_ascii(secs_ii_builder_t *builder,
+                                       const char *value);
+secs_error_t secs_ii_builder_add_ascii_n(secs_ii_builder_t *builder,
+                                         const char *bytes,
+                                         size_t n);
+secs_error_t secs_ii_builder_add_binary(secs_ii_builder_t *builder,
+                                        const uint8_t *bytes,
+                                        size_t n);
+secs_error_t secs_ii_builder_add_boolean(secs_ii_builder_t *builder,
+                                         uint8_t value01);
+secs_error_t secs_ii_builder_add_boolean_values(secs_ii_builder_t *builder,
+                                                const uint8_t *values01,
+                                                size_t n);
+
+secs_error_t secs_ii_builder_add_i1(secs_ii_builder_t *builder, int8_t value);
+secs_error_t secs_ii_builder_add_i2(secs_ii_builder_t *builder, int16_t value);
+secs_error_t secs_ii_builder_add_i4(secs_ii_builder_t *builder, int32_t value);
+secs_error_t secs_ii_builder_add_i8(secs_ii_builder_t *builder, int64_t value);
+secs_error_t secs_ii_builder_add_u1(secs_ii_builder_t *builder, uint8_t value);
+secs_error_t secs_ii_builder_add_u2(secs_ii_builder_t *builder, uint16_t value);
+secs_error_t secs_ii_builder_add_u4(secs_ii_builder_t *builder, uint32_t value);
+secs_error_t secs_ii_builder_add_u8(secs_ii_builder_t *builder, uint64_t value);
+secs_error_t secs_ii_builder_add_f4(secs_ii_builder_t *builder, float value);
+secs_error_t secs_ii_builder_add_f8(secs_ii_builder_t *builder, double value);
+
+/*
+ * finalize：输出构建结果（成功时 out_item 需用 secs_ii_item_destroy 释放）。
+ *
+ * 约定：
+ * - builder 内部仍有未闭合的 list（begin/end 不匹配）时返回 INVALID_ARGUMENT；
+ * - 尚未生成 root（既未 begin/end 生成 List，也未 add_* 生成叶子）时返回 INVALID_ARGUMENT；
+ * - finalize 成功后 builder 进入“已完成”状态，不可复用（需重新 create）。
+ */
+secs_error_t secs_ii_builder_finalize(secs_ii_builder_t *builder,
+                                      secs_ii_item_t **out_item);
+
 secs_error_t secs_ii_item_ascii_view(const secs_ii_item_t *item,
                                      const char **out_ptr,
                                      size_t *out_n);

@@ -1,10 +1,11 @@
 #pragma once
 
-#include "secs/ii/item.hpp"
+#include "secs/ii/struct_codec.hpp"
 
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace secs::messages {
@@ -17,31 +18,16 @@ namespace secs::messages {
 struct S2F13Request final {
     std::vector<std::uint32_t> ecids;
 
-    static std::optional<S2F13Request> from_item(const secs::ii::Item &item) {
-        auto *list = item.get_if<secs::ii::List>();
-        if (!list) {
-            return std::nullopt;
-        }
+    static constexpr auto secs_members() {
+        return std::make_tuple(&S2F13Request::ecids);
+    }
 
-        S2F13Request req;
-        req.ecids.reserve(list->size());
-        for (const auto &elem : *list) {
-            auto *u4 = elem.get_if<secs::ii::U4>();
-            if (!u4 || u4->values.size() != 1) {
-                return std::nullopt;
-            }
-            req.ecids.push_back(u4->values[0]);
-        }
-        return req;
+    static std::optional<S2F13Request> from_item(const secs::ii::Item &item) {
+        return secs::ii::from_item<S2F13Request>(item);
     }
 
     [[nodiscard]] secs::ii::Item to_item() const {
-        std::vector<secs::ii::Item> items;
-        items.reserve(ecids.size());
-        for (const auto id : ecids) {
-            items.push_back(secs::ii::Item::u4({id}));
-        }
-        return secs::ii::Item::list(std::move(items));
+        return secs::ii::to_item(*this);
     }
 };
 
@@ -53,33 +39,17 @@ struct S2F13Request final {
 struct S2F14Response final {
     std::vector<std::string> ecvs;
 
-    static std::optional<S2F14Response> from_item(const secs::ii::Item &item) {
-        auto *list = item.get_if<secs::ii::List>();
-        if (!list) {
-            return std::nullopt;
-        }
+    static constexpr auto secs_members() {
+        return std::make_tuple(&S2F14Response::ecvs);
+    }
 
-        S2F14Response resp;
-        resp.ecvs.reserve(list->size());
-        for (const auto &elem : *list) {
-            auto *ascii = elem.get_if<secs::ii::ASCII>();
-            if (!ascii) {
-                return std::nullopt;
-            }
-            resp.ecvs.push_back(ascii->value);
-        }
-        return resp;
+    static std::optional<S2F14Response> from_item(const secs::ii::Item &item) {
+        return secs::ii::from_item<S2F14Response>(item);
     }
 
     [[nodiscard]] secs::ii::Item to_item() const {
-        std::vector<secs::ii::Item> items;
-        items.reserve(ecvs.size());
-        for (const auto &val : ecvs) {
-            items.push_back(secs::ii::Item::ascii(val));
-        }
-        return secs::ii::Item::list(std::move(items));
+        return secs::ii::to_item(*this);
     }
 };
 
 } // namespace secs::messages
-
