@@ -1212,9 +1212,79 @@ secs_error_t secs_protocol_session_create_from_hsms_v2(
     const secs_protocol_session_options_v2_t *options,
     secs_protocol_session_t **out_sess);
 
+/*
+ * 从 SECS-I（串口）创建协议层会话。
+ *
+ * 说明：
+ * - 函数内部会打开串口并创建底层 `secs::secs1::StateMachine`；
+ * - 与 HSMS 不同：SECS-I 是半双工，库不会自动启动后台 async_run。
+ *   - Host 侧通常直接调用 secs_protocol_session_request（内部会驱动收发）。
+ *   - Equipment 侧通常在主循环里调用 secs_protocol_session_poll_once 处理入站消息。
+ *
+ * 参数：
+ * - serial_path：串口名（Windows: "COM5"；Linux: "/dev/ttyUSB0"）
+ * - baud：波特率（<=0 表示不设置，保留系统默认）
+ * - device_id：SECS-I DeviceID（双方一致）
+ * - reverse_bit：R-bit 方向位（Host->Equipment: 0；Equipment->Host: 1）
+ */
+secs_error_t secs_protocol_session_create_from_secs1_serial(
+    secs_context_t *ctx,
+    const char *serial_path,
+    int baud,
+    uint16_t device_id,
+    int reverse_bit,
+    const secs_protocol_session_options_t *options,
+    secs_protocol_session_t **out_sess);
+
+secs_error_t secs_protocol_session_create_from_secs1_serial_v2(
+    secs_context_t *ctx,
+    const char *serial_path,
+    int baud,
+    uint16_t device_id,
+    int reverse_bit,
+    const secs_protocol_session_options_v2_t *options,
+    secs_protocol_session_t **out_sess);
+
+/*
+ * 创建一对“内存互联”的 SECS-I protocol session（用于 loopback，无需真实串口）。
+ *
+ * 约定：
+ * - out_host：reverse_bit=0（Host -> Equipment）
+ * - out_equipment：reverse_bit=1（Equipment -> Host）
+ */
+secs_error_t secs_protocol_session_create_from_secs1_memory_duplex(
+    secs_context_t *ctx,
+    uint16_t device_id,
+    const secs_protocol_session_options_t *options,
+    secs_protocol_session_t **out_host,
+    secs_protocol_session_t **out_equipment);
+
+secs_error_t secs_protocol_session_create_from_secs1_memory_duplex_v2(
+    secs_context_t *ctx,
+    uint16_t device_id,
+    const secs_protocol_session_options_v2_t *options,
+    secs_protocol_session_t **out_host,
+    secs_protocol_session_t **out_equipment);
+
 secs_error_t secs_protocol_session_stop(
     secs_protocol_session_t *sess); /* 非阻塞：可在任意线程调用 */
 void secs_protocol_session_destroy(secs_protocol_session_t *sess);
+
+/*
+ * 单步轮询：接收并处理一条入站消息（阻塞式）。
+ *
+ * - out_handled=1：成功处理到一条消息；
+ * - out_handled=0：timeout_ms 内未收到消息（返回 OK）；
+ * - 其他：返回错误码（例如 cancelled/invalid_argument）。
+ *
+ * 注意：
+ * - 若 session 内部 run loop 已在运行（HSMS create_from_hsms 默认如此），该函数
+ *   可能返回 invalid_argument；
+ * - 对 SECS-I，建议使用较小的 timeout_ms 以便及时响应 stop。
+ */
+secs_error_t secs_protocol_session_poll_once(secs_protocol_session_t *sess,
+                                             uint32_t timeout_ms,
+                                             int *out_handled);
 
 secs_error_t secs_protocol_session_set_handler(secs_protocol_session_t *sess,
                                                uint8_t stream,

@@ -12,8 +12,15 @@
 #include "secs/protocol/router.hpp"
 #include "secs/protocol/session.hpp"
 #include "secs/secs1/block.hpp"
+#include "secs/secs1/link.hpp"
+#include "secs/secs1/state_machine.hpp"
 #include "secs/sml/render.hpp"
 #include "secs/sml/runtime.hpp"
+
+#include <asio/detail/config.hpp>
+#if defined(ASIO_HAS_SERIAL_PORT)
+#include "secs/secs1/serial_port_link.hpp"
+#endif
 
 #include <asio/as_tuple.hpp>
 #include <asio/co_spawn.hpp>
@@ -26,6 +33,7 @@
 #include <asio/use_awaitable.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdarg>
@@ -129,8 +137,12 @@ struct protocol_state final {
     // 保证底层 HSMS 会话在 protocol::Session 存活期间不会被提前释放（避免
     // UAF）。
     std::shared_ptr<secs::hsms::Session> hsms_keepalive{};
+    // SECS-I：底层 Link/StateMachine 需要在 protocol::Session 存活期间保持有效。
+    std::unique_ptr<secs::secs1::Link> secs1_link{};
+    std::unique_ptr<secs::secs1::StateMachine> secs1_sm{};
     std::unique_ptr<secs::protocol::Session> sess{};
     secs::core::Event run_done{};
+    std::atomic_bool run_spawned{false};
 
     // runtime dump sink（可选）：由 C 侧传入回调，用于接收 dump 字符串。
     secs_protocol_dump_sink_fn dump_sink{nullptr};
@@ -3690,6 +3702,7 @@ secs_error_t secs_protocol_session_create_from_hsms(
                 co_await state->sess->async_run();
             },
             [state](std::exception_ptr) { state->run_done.set(); });
+        state->run_spawned.store(true);
 
         handle->state = std::move(state);
         *out_sess = handle.release();
@@ -3737,9 +3750,234 @@ secs_error_t secs_protocol_session_create_from_hsms_v2(
                 co_await state->sess->async_run();
             },
             [state](std::exception_ptr) { state->run_done.set(); });
+        state->run_spawned.store(true);
 
         handle->state = std::move(state);
         *out_sess = handle.release();
+        return ok();
+    });
+}
+
+secs_error_t secs_protocol_session_create_from_secs1_serial(
+    secs_context_t *ctx,
+    const char *serial_path,
+    int baud,
+    uint16_t device_id,
+    int reverse_bit,
+    const secs_protocol_session_options_t *options,
+    secs_protocol_session_t **out_sess) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !serial_path || !out_sess) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_sess = nullptr;
+
+#if !defined(ASIO_HAS_SERIAL_PORT)
+        (void)baud;
+        (void)device_id;
+        (void)reverse_bit;
+        (void)options;
+        return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+#else
+        auto handle = std::unique_ptr<secs_protocol_session>(
+            new (std::nothrow) secs_protocol_session{});
+        if (!handle) {
+            return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+        }
+
+        auto state = std::make_shared<protocol_state>();
+        state->ctx = ctx;
+
+        auto [ec, link] = secs::secs1::SerialPortLink::open(
+            ctx->ioc.get_executor(), std::string(serial_path), baud);
+        if (ec) {
+            return from_error_code(ec);
+        }
+
+        state->secs1_link =
+            std::make_unique<secs::secs1::SerialPortLink>(std::move(link));
+        state->secs1_sm = std::make_unique<secs::secs1::StateMachine>(
+            *state->secs1_link, device_id);
+
+        auto proto_opt = make_proto_options(options);
+        proto_opt.secs1_reverse_bit = (reverse_bit != 0);
+        state->sess = std::make_unique<secs::protocol::Session>(
+            *state->secs1_sm, device_id, proto_opt);
+
+        handle->state = std::move(state);
+        *out_sess = handle.release();
+        return ok();
+#endif
+    });
+}
+
+secs_error_t secs_protocol_session_create_from_secs1_serial_v2(
+    secs_context_t *ctx,
+    const char *serial_path,
+    int baud,
+    uint16_t device_id,
+    int reverse_bit,
+    const secs_protocol_session_options_v2_t *options,
+    secs_protocol_session_t **out_sess) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !serial_path || !out_sess) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_sess = nullptr;
+
+#if !defined(ASIO_HAS_SERIAL_PORT)
+        (void)baud;
+        (void)device_id;
+        (void)reverse_bit;
+        (void)options;
+        return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+#else
+        auto handle = std::unique_ptr<secs_protocol_session>(
+            new (std::nothrow) secs_protocol_session{});
+        if (!handle) {
+            return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+        }
+
+        auto state = std::make_shared<protocol_state>();
+        state->ctx = ctx;
+
+        auto [ec, link] = secs::secs1::SerialPortLink::open(
+            ctx->ioc.get_executor(), std::string(serial_path), baud);
+        if (ec) {
+            return from_error_code(ec);
+        }
+
+        state->secs1_link =
+            std::make_unique<secs::secs1::SerialPortLink>(std::move(link));
+        state->secs1_sm = std::make_unique<secs::secs1::StateMachine>(
+            *state->secs1_link, device_id);
+
+        auto proto_opt = make_proto_options_v2(options, state.get());
+        proto_opt.secs1_reverse_bit = (reverse_bit != 0);
+        state->sess = std::make_unique<secs::protocol::Session>(
+            *state->secs1_sm, device_id, proto_opt);
+
+        handle->state = std::move(state);
+        *out_sess = handle.release();
+        return ok();
+#endif
+    });
+}
+
+secs_error_t secs_protocol_session_create_from_secs1_memory_duplex(
+    secs_context_t *ctx,
+    uint16_t device_id,
+    const secs_protocol_session_options_t *options,
+    secs_protocol_session_t **out_host,
+    secs_protocol_session_t **out_equipment) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !out_host || !out_equipment) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_host = nullptr;
+        *out_equipment = nullptr;
+
+        auto [host_ep, eq_ep] = secs::secs1::MemoryLink::create(
+            ctx->ioc.get_executor());
+
+        auto host = std::unique_ptr<secs_protocol_session>(
+            new (std::nothrow) secs_protocol_session{});
+        if (!host) {
+            return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+        }
+        auto equip = std::unique_ptr<secs_protocol_session>(
+            new (std::nothrow) secs_protocol_session{});
+        if (!equip) {
+            return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+        }
+
+        auto host_state = std::make_shared<protocol_state>();
+        host_state->ctx = ctx;
+        host_state->secs1_link =
+            std::make_unique<secs::secs1::MemoryLink::Endpoint>(
+                std::move(host_ep));
+        host_state->secs1_sm = std::make_unique<secs::secs1::StateMachine>(
+            *host_state->secs1_link, device_id);
+        auto host_opt = make_proto_options(options);
+        host_opt.secs1_reverse_bit = false;
+        host_state->sess = std::make_unique<secs::protocol::Session>(
+            *host_state->secs1_sm, device_id, host_opt);
+        host->state = std::move(host_state);
+
+        auto eq_state = std::make_shared<protocol_state>();
+        eq_state->ctx = ctx;
+        eq_state->secs1_link =
+            std::make_unique<secs::secs1::MemoryLink::Endpoint>(
+                std::move(eq_ep));
+        eq_state->secs1_sm = std::make_unique<secs::secs1::StateMachine>(
+            *eq_state->secs1_link, device_id);
+        auto eq_opt = make_proto_options(options);
+        eq_opt.secs1_reverse_bit = true;
+        eq_state->sess = std::make_unique<secs::protocol::Session>(
+            *eq_state->secs1_sm, device_id, eq_opt);
+        equip->state = std::move(eq_state);
+
+        *out_host = host.release();
+        *out_equipment = equip.release();
+        return ok();
+    });
+}
+
+secs_error_t secs_protocol_session_create_from_secs1_memory_duplex_v2(
+    secs_context_t *ctx,
+    uint16_t device_id,
+    const secs_protocol_session_options_v2_t *options,
+    secs_protocol_session_t **out_host,
+    secs_protocol_session_t **out_equipment) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !out_host || !out_equipment) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_host = nullptr;
+        *out_equipment = nullptr;
+
+        auto [host_ep, eq_ep] = secs::secs1::MemoryLink::create(
+            ctx->ioc.get_executor());
+
+        auto host = std::unique_ptr<secs_protocol_session>(
+            new (std::nothrow) secs_protocol_session{});
+        if (!host) {
+            return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+        }
+        auto equip = std::unique_ptr<secs_protocol_session>(
+            new (std::nothrow) secs_protocol_session{});
+        if (!equip) {
+            return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+        }
+
+        auto host_state = std::make_shared<protocol_state>();
+        host_state->ctx = ctx;
+        host_state->secs1_link =
+            std::make_unique<secs::secs1::MemoryLink::Endpoint>(
+                std::move(host_ep));
+        host_state->secs1_sm = std::make_unique<secs::secs1::StateMachine>(
+            *host_state->secs1_link, device_id);
+        auto host_opt = make_proto_options_v2(options, host_state.get());
+        host_opt.secs1_reverse_bit = false;
+        host_state->sess = std::make_unique<secs::protocol::Session>(
+            *host_state->secs1_sm, device_id, host_opt);
+        host->state = std::move(host_state);
+
+        auto eq_state = std::make_shared<protocol_state>();
+        eq_state->ctx = ctx;
+        eq_state->secs1_link =
+            std::make_unique<secs::secs1::MemoryLink::Endpoint>(
+                std::move(eq_ep));
+        eq_state->secs1_sm = std::make_unique<secs::secs1::StateMachine>(
+            *eq_state->secs1_link, device_id);
+        auto eq_opt = make_proto_options_v2(options, eq_state.get());
+        eq_opt.secs1_reverse_bit = true;
+        eq_state->sess = std::make_unique<secs::protocol::Session>(
+            *eq_state->secs1_sm, device_id, eq_opt);
+        equip->state = std::move(eq_state);
+
+        *out_host = host.release();
+        *out_equipment = equip.release();
         return ok();
     });
 }
@@ -3783,13 +4021,56 @@ void secs_protocol_session_destroy(secs_protocol_session_t *sess) {
             return;
         }
 
+        const bool need_wait = state->run_spawned.load();
+
         (void)proto_stop_on_io_thread(sess);
-        (void)run_blocking_ec(
-            state->ctx, [state]() -> asio::awaitable<std::error_code> {
-                co_return co_await state->run_done.async_wait(std::nullopt);
-            });
+        if (need_wait) {
+            (void)run_blocking_ec(
+                state->ctx, [state]() -> asio::awaitable<std::error_code> {
+                    co_return co_await state->run_done.async_wait(std::nullopt);
+                });
+        }
 
         delete sess;
+    });
+}
+
+secs_error_t secs_protocol_session_poll_once(secs_protocol_session_t *sess,
+                                             uint32_t timeout_ms,
+                                             int *out_handled) {
+    return guard_error([&]() -> secs_error_t {
+        if (!sess || !sess->state || !sess->state->ctx || !sess->state->sess ||
+            !out_handled) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+
+        *out_handled = 0;
+
+        std::error_code ec{};
+        const auto state = sess->state;
+        const auto bridge = run_blocking<std::error_code>(
+            state->ctx,
+            [state,
+             timeout = ms_to_optional_duration(timeout_ms)]()
+                -> asio::awaitable<std::error_code> {
+                co_return co_await state->sess->async_poll_once(timeout);
+            },
+            ec);
+
+        if (!secs_error_is_ok(bridge)) {
+            return bridge;
+        }
+
+        if (ec == make_error_code(errc::timeout)) {
+            *out_handled = 0;
+            return ok();
+        }
+        if (ec) {
+            return from_error_code(ec);
+        }
+
+        *out_handled = 1;
+        return ok();
     });
 }
 

@@ -2,146 +2,60 @@ cmake_minimum_required(VERSION 3.20)
 
 set(_secs_example_targets)
 
-# SECS-II 编解码简单示例
-add_executable(secs2_simple secs2_simple.cpp)
-target_link_libraries(secs2_simple PRIVATE secs::utils secs::ii secs::core)
-list(APPEND _secs_example_targets secs2_simple)
+# ----------------------------- 精简后的“主示例集合”
+# - HSMS：自定义请求-响应 / SMLX
+# - SECS-I：自定义请求-响应 / SMLX
+# - C API：与 C++ 示例功能对应
 
-# C API（C ABI）SECS-II 编解码示例（源文件为 C，但链接需使用 C++ 链接器）
-add_executable(c_api_secs2_simple c_api_secs2_simple.c)
-target_link_libraries(c_api_secs2_simple PRIVATE secs::c_api)
-set_target_properties(c_api_secs2_simple PROPERTIES LINKER_LANGUAGE CXX)
-list(APPEND _secs_example_targets c_api_secs2_simple)
+add_executable(hsms_custom hsms_custom.cpp)
+target_link_libraries(hsms_custom PRIVATE secs::protocol secs::hsms secs::ii secs::core)
+list(APPEND _secs_example_targets hsms_custom)
 
-# C API（C ABI）SML + CEID 完整示例（源文件为 C，但链接需使用 C++ 链接器）
-add_executable(c_api_sml_ceid_complete c_api_sml_ceid_complete.c)
-target_link_libraries(c_api_sml_ceid_complete PRIVATE secs::c_api)
-set_target_properties(c_api_sml_ceid_complete PROPERTIES LINKER_LANGUAGE CXX)
-target_compile_features(c_api_sml_ceid_complete PRIVATE c_std_11)
-list(APPEND _secs_example_targets c_api_sml_ceid_complete)
-# 复制 .sml 文件到构建目录（与 C++ 版本共用同一份模板）
-add_custom_command(TARGET c_api_sml_ceid_complete POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    ${CMAKE_CURRENT_SOURCE_DIR}/sml_ceid_complete.sml
-    $<TARGET_FILE_DIR:c_api_sml_ceid_complete>/sml_ceid_complete.sml
-  COMMENT "Copying sml_ceid_complete.sml to build directory"
-)
+add_executable(hsms_smlx hsms_smlx.cpp)
+target_link_libraries(hsms_smlx PRIVATE secs::protocol secs::hsms secs::sml secs::ii secs::core)
+list(APPEND _secs_example_targets hsms_smlx)
 
-# C API（C ABI）HSMS（TCP）示例（源文件为 C，但链接需使用 C++ 链接器）
-add_executable(c_api_hsms_server c_api_hsms_server.c)
-target_link_libraries(c_api_hsms_server PRIVATE secs::c_api)
-set_target_properties(c_api_hsms_server PROPERTIES LINKER_LANGUAGE CXX)
-target_compile_features(c_api_hsms_server PRIVATE c_std_11)
-list(APPEND _secs_example_targets c_api_hsms_server)
+add_executable(secs1_custom secs1_custom.cpp)
+target_link_libraries(secs1_custom PRIVATE secs::protocol secs::ii secs::core)
+list(APPEND _secs_example_targets secs1_custom)
 
-add_executable(c_api_hsms_client c_api_hsms_client.c)
-target_link_libraries(c_api_hsms_client PRIVATE secs::c_api)
-set_target_properties(c_api_hsms_client PROPERTIES LINKER_LANGUAGE CXX)
-target_compile_features(c_api_hsms_client PRIVATE c_std_11)
-list(APPEND _secs_example_targets c_api_hsms_client)
+add_executable(secs1_smlx secs1_smlx.cpp)
+target_link_libraries(secs1_smlx PRIVATE secs::protocol secs::sml secs::ii secs::core)
+list(APPEND _secs_example_targets secs1_smlx)
 
-# C API（C ABI）协议层示例：protocol session + HSMS（TCP）
-add_executable(c_api_protocol_server c_api_protocol_server.c)
-target_link_libraries(c_api_protocol_server PRIVATE secs::c_api)
-set_target_properties(c_api_protocol_server PROPERTIES LINKER_LANGUAGE CXX)
-target_compile_features(c_api_protocol_server PRIVATE c_std_11)
-list(APPEND _secs_example_targets c_api_protocol_server)
+add_executable(c_api_hsms_custom c_api_hsms_custom.c)
+target_link_libraries(c_api_hsms_custom PRIVATE secs::c_api)
+set_target_properties(c_api_hsms_custom PROPERTIES LINKER_LANGUAGE CXX)
+target_compile_features(c_api_hsms_custom PRIVATE c_std_11)
+list(APPEND _secs_example_targets c_api_hsms_custom)
 
-add_executable(c_api_protocol_client c_api_protocol_client.c)
-target_link_libraries(c_api_protocol_client PRIVATE secs::c_api)
-set_target_properties(c_api_protocol_client PROPERTIES LINKER_LANGUAGE CXX)
-target_compile_features(c_api_protocol_client PRIVATE c_std_11)
-list(APPEND _secs_example_targets c_api_protocol_client)
+add_executable(c_api_hsms_smlx c_api_hsms_smlx.c)
+target_link_libraries(c_api_hsms_smlx PRIVATE secs::c_api)
+set_target_properties(c_api_hsms_smlx PROPERTIES LINKER_LANGUAGE CXX)
+target_compile_features(c_api_hsms_smlx PRIVATE c_std_11)
+list(APPEND _secs_example_targets c_api_hsms_smlx)
 
-# C API（C ABI）协议层回环示例：memory duplex + pthread（仅 UNIX）
-if(UNIX)
-  add_executable(c_api_protocol_loopback c_api_protocol_loopback.c)
-  target_link_libraries(c_api_protocol_loopback PRIVATE secs::c_api)
-  set_target_properties(c_api_protocol_loopback PROPERTIES LINKER_LANGUAGE CXX)
-  target_compile_features(c_api_protocol_loopback PRIVATE c_std_11)
-  list(APPEND _secs_example_targets c_api_protocol_loopback)
+add_executable(c_api_secs1_custom c_api_secs1_custom.c)
+target_link_libraries(c_api_secs1_custom PRIVATE secs::c_api)
+set_target_properties(c_api_secs1_custom PROPERTIES LINKER_LANGUAGE CXX)
+target_compile_features(c_api_secs1_custom PRIVATE c_std_11)
+list(APPEND _secs_example_targets c_api_secs1_custom)
 
-  # C API（C ABI）CEID 示例：仿 TVOC_Secs_App（memory duplex + pthread）
-  add_executable(c_api_ceid_tvoc_style c_api_ceid_tvoc_style.c)
-  target_link_libraries(c_api_ceid_tvoc_style PRIVATE secs::c_api)
-  set_target_properties(c_api_ceid_tvoc_style PROPERTIES LINKER_LANGUAGE CXX)
-  target_compile_features(c_api_ceid_tvoc_style PRIVATE c_std_11)
-  list(APPEND _secs_example_targets c_api_ceid_tvoc_style)
-endif()
+add_executable(c_api_secs1_smlx c_api_secs1_smlx.c)
+target_link_libraries(c_api_secs1_smlx PRIVATE secs::c_api)
+set_target_properties(c_api_secs1_smlx PROPERTIES LINKER_LANGUAGE CXX)
+target_compile_features(c_api_secs1_smlx PRIVATE c_std_11)
+list(APPEND _secs_example_targets c_api_secs1_smlx)
 
-# HSMS 服务器示例
-add_executable(hsms_server hsms_server.cpp)
-target_link_libraries(hsms_server PRIVATE secs::protocol secs::hsms secs::ii secs::core)
-list(APPEND _secs_example_targets hsms_server)
-
-# HSMS 客户端示例
-add_executable(hsms_client hsms_client.cpp)
-target_link_libraries(hsms_client PRIVATE secs::protocol secs::hsms secs::ii secs::core)
-list(APPEND _secs_example_targets hsms_client)
-
-# HSMS 16进制报文示例
-add_executable(hsms_hex_dump hsms_hex_dump.cpp)
-target_link_libraries(hsms_hex_dump PRIVATE secs::utils secs::hsms secs::ii secs::core)
-list(APPEND _secs_example_targets hsms_hex_dump)
-
-# HSMS 帧构建可视化示例
-add_executable(hsms_frame_builder_visual hsms_frame_builder_visual.cpp)
-target_link_libraries(hsms_frame_builder_visual PRIVATE secs::utils secs::hsms secs::ii secs::core)
-list(APPEND _secs_example_targets hsms_frame_builder_visual)
-
-# 二进制报文 dump 工具示例（secs::utils）
-add_executable(utils_dump_example utils_dump_example.cpp)
-target_link_libraries(utils_dump_example PRIVATE secs::utils)
-list(APPEND _secs_example_targets utils_dump_example)
-
-# HSMS（TCP）SML 对端：主动/被动都加载同一份 SML，并按规则自动回包
-add_executable(hsms_sml_peer hsms_sml_peer.cpp)
-target_link_libraries(hsms_sml_peer PRIVATE secs::protocol secs::sml secs::hsms secs::ii secs::core)
-list(APPEND _secs_example_targets hsms_sml_peer)
-
-# SECS-I（串口）SML 对端：Windows 下可配合 com0com 进行联调
-if(WIN32 OR UNIX)
-  add_executable(secs1_sml_peer secs1_sml_peer.cpp)
-  target_link_libraries(secs1_sml_peer PRIVATE secs::protocol secs::sml secs::ii secs::core)
-  list(APPEND _secs_example_targets secs1_sml_peer)
-endif()
-
-# TypedHandler 示例
-add_executable(typed_handler_example typed_handler_example.cpp)
-target_link_libraries(typed_handler_example PRIVATE secs::protocol secs::ii secs::core)
-list(APPEND _secs_example_targets typed_handler_example)
-
-# 协议层自定义回包示例（default handler + SECS-II 编码）
-add_executable(protocol_custom_reply_example protocol_custom_reply_example.cpp)
-target_link_libraries(protocol_custom_reply_example PRIVATE secs::protocol secs::ii secs::core)
-list(APPEND _secs_example_targets protocol_custom_reply_example)
-
-# SECS-I（MemoryLink）回环示例
-add_executable(secs1_loopback secs1_loopback.cpp)
-target_link_libraries(secs1_loopback PRIVATE secs::protocol secs::core)
-list(APPEND _secs_example_targets secs1_loopback)
-
-# CEID 示例：仿 TVOC_Secs_App 的消息体结构（按 CEID 路由处理）
-add_executable(ceid_dispatcher_tvoc_style ceid_dispatcher_tvoc_style.cpp)
-target_link_libraries(ceid_dispatcher_tvoc_style PRIVATE secs::protocol secs::ii secs::utils secs::core)
-list(APPEND _secs_example_targets ceid_dispatcher_tvoc_style)
-
-# SMLX 主动发送示例（占位符渲染 + encode_message_body）
-add_executable(smlx_active_send_example smlx_active_send_example.cpp)
-target_link_libraries(smlx_active_send_example PRIVATE secs::protocol secs::sml secs::ii secs::core)
-list(APPEND _secs_example_targets smlx_active_send_example)
-
-# SML + CEID 完整示例：展示如何结合 SML 模板、CEID dispatcher 和变量注入
-add_executable(sml_ceid_complete sml_ceid_complete.cpp)
-target_link_libraries(sml_ceid_complete PRIVATE secs::protocol secs::sml secs::utils)
-list(APPEND _secs_example_targets sml_ceid_complete)
-# 复制 .sml 文件到构建目录
-add_custom_command(TARGET sml_ceid_complete POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    ${CMAKE_CURRENT_SOURCE_DIR}/sml_ceid_complete.sml
-    $<TARGET_FILE_DIR:sml_ceid_complete>/sml_ceid_complete.sml
-  COMMENT "Copying sml_ceid_complete.sml to build directory"
-)
+# SMLX 示例依赖同一份模板文件：复制到 build/examples 目录，便于直接运行
+foreach(_t IN ITEMS hsms_smlx secs1_smlx c_api_hsms_smlx c_api_secs1_smlx)
+  add_custom_command(TARGET ${_t} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      ${CMAKE_CURRENT_SOURCE_DIR}/ceid_demo.sml
+      $<TARGET_FILE_DIR:${_t}>/ceid_demo.sml
+    COMMENT "Copying ceid_demo.sml to build directory"
+  )
+endforeach()
 
 # HSMS（pipe）示例：通过 stdin/stdout 承载 HSMS 帧（仅在 UNIX 可用，依赖 asio::posix）
 if(UNIX)
@@ -152,17 +66,6 @@ if(UNIX)
   add_executable(hsms_pipe_client hsms_pipe_client.cpp)
   target_link_libraries(hsms_pipe_client PRIVATE secs::utils secs::hsms secs::ii secs::core)
   list(APPEND _secs_example_targets hsms_pipe_client)
-endif()
-
-# SECS-I（tty/pty）串口示例：仅在 UNIX 可用（依赖 termios / posix fd）
-if(UNIX)
-  add_executable(secs1_serial_server secs1_serial_server.cpp)
-  target_link_libraries(secs1_serial_server PRIVATE secs::protocol secs::core)
-  list(APPEND _secs_example_targets secs1_serial_server)
-
-  add_executable(secs1_serial_client secs1_serial_client.cpp)
-  target_link_libraries(secs1_serial_client PRIVATE secs::protocol secs::core)
-  list(APPEND _secs_example_targets secs1_serial_client)
 endif()
 
 # 如果启用了覆盖率，示例也需要链接 gcov

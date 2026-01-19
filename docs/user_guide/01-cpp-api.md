@@ -1,512 +1,396 @@
-# C++ API 使用指南（面向库使用者）
+# C++ API 使用指南
 
-> 文档更新：2026-01-19（Codex）  
-> 基于源码版本：当前工作区  
-> 目标读者：需要在自己的 C++ 项目中集成并使用 `secs_lib` 的工程师（Host / Equipment / 仿真器）
+> 文档更新：2026-01-19
+> 目标读者：需要集成 secs_lib 的 C++ 开发者
 
-本指南只讲“怎么用”，不讲实现细节。若你想看模块设计原理，请阅读 `docs/architecture/`。
+本库提供两种截然不同的开发模式，根据业务场景选择：
 
----
-
-## 0. 你应该选哪条使用路径？
-
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                                你写的业务代码                                 │
-└──────────────────────────────────────────────────────────────────────────────┘
-                 │
-                 │ ① 只想编解码 SECS-II（不做通信）
-                 ▼
-        ┌───────────────────┐
-        │ secs::ii           │  Item ↔ bytes（SEMI E5）
-        └───────────────────┘
-
-                 │
-                 │ ② 要通信，但希望“收发 + handler + 自动回包”都统一
-                 ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ secs::protocol::Session                                                       │
-│ - async_send / async_request / async_run / async_poll_once                    │
-│ - Router：按 (S,F) 分发 + default handler                                     │
-│ - 自动回 secondary：F+1 / W=0 / SB 回显（仅 W=1 且 handler 返回 OK 时）         │
-└──────────────────────────────────────────────────────────────────────────────┘
-     │                                               │
-     │ HSMS（TCP，全双工）                            │ SECS-I（串口，半双工）
-     ▼                                               ▼
-┌──────────────────────────┐                 ┌──────────────────────────────┐
-│ secs::hsms::Session       │                 │ secs::secs1::StateMachine     │
-│ async_open_* / async_run  │                 │ + SerialPortLink / MemoryLink │
-└──────────────────────────┘                 └──────────────────────────────┘
-
-                 │
-                 │ ③ 想用“规则/脚本”快速搭对端：按 SML 自动回复 + 定时发送
-                 ▼
-        ┌───────────────────┐
-        │ secs::sml::Runtime │  load / match_response / timers / (SMLX render)
-        └───────────────────┘
-```
-
-推荐：如果你不是在做底层协议研究，优先从 `secs::protocol::Session` 入手。
+| 路线 | 适用场景 | 核心特征 |
+| :--- | :--- | :--- |
+| **路线一：编程模式** | 复杂业务逻辑、数据库交互、设备控制 | **Code-First**，类型安全，逻辑在 C++ 代码中 |
+| **路线二：SMLX 模式** | 仿真器、快速原型、频繁变动的简单报文 | **Rule-Based**，逻辑在 SML 文件中，支持热加载 |
 
 ---
 
-## 0.1 集成与构建（CMake）
+## 路线一：编程模式 (Code-First)
 
-本库为每个模块导出了 CMake target（见顶层 `CMakeLists.txt`）：
+标准开发模式。你需要定义消息结构体并编写 Handler 处理逻辑。
 
-- `secs::ii`：只用 SECS-II 编解码
-- `secs::hsms`：只用 HSMS 传输
-- `secs::secs1`：只用 SECS-I 传输
-- `secs::protocol`：推荐入口（统一 HSMS/SECS-I 的收发 + handler + 自动回包）
-- `secs::sml`：SML/SMLX（规则引擎与模板渲染）
-- `secs::utils`：dump/编解码 helpers
+### 1. 定义消息结构
 
-作为子项目集成的最小示例：
+#### 方法 A：声明式定义（推荐）
 
-```cmake
-add_subdirectory(path/to/secs_lib)
-target_link_libraries(my_app PRIVATE secs::protocol secs::sml) # 按需选择模块
-```
+利用静态反射 (`secs_members`)，只需声明成员顺序，库自动处理编解码。
 
-本仓库示例构建（用于“先跑起来再改造”）：
-
-```bash
-cmake -S . -B build -DSECS_BUILD_EXAMPLES=ON
-cmake --build build --target examples -j
-```
-
----
-
-## 1. 基础概念速记（读懂后面所有示例）
-
-### 1.1 SxFy / Primary / Secondary / W-bit
-
-```
-Primary   : Function 为奇数（例如 S1F1、S2F13），可带 W-bit=1 表示“需要回应”
-Secondary : Function 为偶数（例如 S1F2、S2F14），W-bit 必须为 0
-
-一对请求/回应的关系（协议层固定规则）：
-  request : SxF(y)  (y 为奇数)  W=1
-  reply   : SxF(y+1)            W=0
-```
-
-### 1.2 System Bytes（SB）
-
-`SB` 是一条事务的标识：
-
-- 你发出去的 primary 会被库分配一个 `system_bytes`
-- 对端回 secondary 时必须“回显相同 SB”
-- `protocol::Session` 依靠 `SB` 匹配 `async_request()` 的等待者
-
----
-
-## 2. 快速开始：HSMS + protocol::Session（推荐入口）
-
-本节目标：跑起来“请求 → 自动回包 → 收到回应”。
-
-对应可运行示例（建议先跑一遍再读代码）：
-
-- `examples/hsms_server.cpp`、`examples/hsms_client.cpp`
-- `examples/protocol_custom_reply_example.cpp`（不依赖 socket，MemoryLink 回环）
-
-### 2.1 典型结构（时序图）
-
-```
-     你的线程 / io_context                         对端
-┌───────────────────────────┐            ┌───────────────────────────┐
-│ asio::io_context           │            │ asio::io_context           │
-│   co_spawn(proto.async_run)│            │   co_spawn(proto.async_run)│
-│             │              │            │              │            │
-│             │ async_request│            │              │            │
-│             ▼              │            │              ▼            │
-│    protocol::Session       │            │     protocol::Session      │
-│  (HSMS backend)            │            │   Router handler 命中       │
-│     │                      │            │      │                    │
-│     │  DataMessage primary  │───────────▶│      │  handler(req)      │
-│     │  (SxF odd, W=1, SB=*) │            │      ▼                    │
-│     │                      │            │  返回 {OK, rsp_body}       │
-│     │  等待 secondary       │            │      │                    │
-│     │                      │            │      │ 自动回 secondary：    │
-│     │  DataMessage secondary│◀───────────│      │ SxF(y+1), W=0, SB=* │
-│     ▼                      │            │      ▼                    │
-│ async_request 返回 reply    │            │  async_send(secondary)     │
-└───────────────────────────┘            └───────────────────────────┘
-```
-
-### 2.2 最小代码骨架（只展示关键 API 名称）
-
-你需要理解的“最小拼图”只有这些：
-
-- HSMS：`secs::hsms::Session` 负责连接 + SELECT + LINKTEST 等控制流
-- 协议层：`secs::protocol::Session` 负责消息收发 + Router + 自动回包
-
-```cpp
-#include "secs/hsms/session.hpp"
-#include "secs/protocol/session.hpp"
-
-#include <asio/co_spawn.hpp>
-#include <asio/detached.hpp>
-#include <asio/io_context.hpp>
-
-asio::awaitable<void> run() {
-  auto ex = co_await asio::this_coro::executor;
-
-  secs::hsms::SessionOptions hsms_opt{};
-  hsms_opt.session_id = 0x0001;
-  secs::hsms::Session hsms(ex, hsms_opt);
-
-  // 主动端：连接并进入 selected（也可以用 async_open_passive 做被动端）
-  (void)co_await hsms.async_open_active({asio::ip::make_address("127.0.0.1"), 5000});
-
-  secs::protocol::SessionOptions proto_opt{};
-  proto_opt.t3 = std::chrono::seconds{45};
-  secs::protocol::Session proto(hsms, hsms_opt.session_id, proto_opt);
-
-  // 注册 handler：只注册 primary（奇数 function）
-  proto.router().set(1, 1, /* handler */);
-
-  // 推荐：长跑接收循环（HSMS 全双工）
-  asio::co_spawn(ex, [&]() -> asio::awaitable<void> { co_await proto.async_run(); }, asio::detached);
-
-  // 发起 request（W=1），等待 secondary
-  auto [ec, reply] = co_await proto.async_request(1, 1, secs::core::bytes_view{});
-  (void)ec;
-  (void)reply;
-}
-
-int main() {
-  asio::io_context ioc;
-  asio::co_spawn(ioc, run(), asio::detached);
-  ioc.run();
-}
-```
-
-上面代码省略了错误处理与资源释放；完整且可运行的版本请直接参考示例文件。
-
----
-
-## 3. Router 与“自动回包”的规则（必须搞清楚，否则你会以为库没回包）
-
-### 3.1 Router 的匹配顺序（3 级）
-
-`Router` 会按下面顺序找 handler（见 `include/secs/protocol/router.hpp`）：
-
-```
-find(stream,function):
-  1) 精确匹配 (S,F)
-  2) stream default：SxF*（同一个 stream 的兜底）
-  3) default handler：全局兜底
-  4) 都没有：未处理（不回包）
-```
-
-### 3.2 自动回包发生的必要条件
-
-`protocol::Session` 在收到入站 primary 时：
-
-```
-if (未命中 pending 请求) 且 (是 primary) 且 (Router 找到 handler)：
-  [ec, rsp_body] = co_await handler(req)
-  if (ec==OK) 且 (req.w_bit==1) 且 (req.function!=0xFF)：
-      自动发送 secondary：S=req.stream, F=req.function+1, W=0, SB=req.system_bytes
-  else：
-      不回包
-```
-
-因此你遇到“没回包”时，按这个 checklist 排查：
-
-- 你是否只注册了 secondary（偶数 F）而不是 primary（奇数 F）？
-- 对端发来的 primary 是否 `W=1`？
-- handler 是否返回了 `error_code!=0`（任何非 OK 都会导致不回包）？
-- primary 的 `function` 是否为 `0xFF`（无法计算 `F+1`）？
-
----
-
-## 4. 写 handler 的 3 种方式（从轻到重）
-
-### 4.1 方式 A：lambda（最直接）
-
-`Router::set()` 的 handler 签名：
-
-```cpp
-using HandlerResult = std::pair<std::error_code, std::vector<secs::core::byte>>;
-using Handler = std::function<asio::awaitable<HandlerResult>(const DataMessage&)>;
-```
-
-常用写法：用 `secs::utils::decode_one_item()` 解码请求，用 `secs::utils::make_handler_result()` 编码响应。
-
-参考实现：
-
-- `examples/protocol_custom_reply_example.cpp`（default handler + switch(S,F)）
-
-### 4.2 方式 B：default handler（集中处理很多 SxFy）
-
-当你要处理的 SxFy 很多，但又不想注册几十个 handler：
-
-```cpp
-proto.router().set_default(
-  [](const secs::protocol::DataMessage& req) -> asio::awaitable<secs::protocol::HandlerResult> {
-    // switch(req.stream, req.function) 生成回应 body
-  });
-```
-
-适用：
-
-- 快速做一个“设备仿真器 / Host 仿真器”
-- legacy 风格（类似 C 里 switch(Stream/Function)）
-
-### 4.3 方式 C：TypedHandler（继承机制，适合长期维护）
-
-当你希望把“SECS-II Item ↔ 业务结构体”的样板代码固化，并获得更清晰的类型边界：
-
-```
-你做：
-  - 定义 TRequest / TResponse：
-    - 传统：提供 from_item/to_item（完全自定义映射）
-    - 声明式：仅提供 secs_members()（由 `secs::ii::to_item/from_item<T>` 自动映射）
-  - 继承 TypedHandler 并实现 handle()
-
-框架做：
-  - 入站 body 解码 → TRequest
-  - 调用你的 handle()
-  - TResponse 编码 → 出站 body
-```
-
-关键类型：
-
-- `secs::protocol::TypedHandler<TReq, TRsp>`：基类（见 `include/secs/protocol/typed_handler.hpp`）
-- `secs::protocol::register_typed_handler(router, stream, function, shared_ptr<handler>)`：注册到 Router
-
-可直接复用的标准消息类型：
-
-- `include/secs/messages/standard.hpp`（例如 `secs::messages::S1F1Request` / `S1F2Response`）
-
-对应示例：
-
-- `examples/typed_handler_example.cpp`
-
-#### 4.3.1 声明式消息定义（自动生成 from_item/to_item）
-
-如果你使用 TypedHandler，最机械的部分通常是为每个消息类型手写 `from_item/to_item`。
-
-现在可以用 `secs::ii::to_item()` / `secs::ii::from_item<T>()` 把这部分“固化成模板”，你只需要声明字段与顺序（TypedHandler 内部也会走这条路径）：
+**场景 1：固定结构**
+S1F2: `<L <A MDLN> <A SOFTREV>>`
 
 ```cpp
 #include <secs/ii/struct_codec.hpp>
 
-// <L <A MDLN> <A SOFTREV>>
-struct S1F2Response final {
-  std::string mdln;
-  std::string softrev;
+struct S1F2Response {
+    std::string mdln;
+    std::string softrev;
 
-  static constexpr auto secs_members() {
-    return std::make_tuple(&S1F2Response::mdln, &S1F2Response::softrev);
-  }
+    // 声明成员指针，顺序即为 SECS-II List 中的顺序
+    static constexpr auto secs_members() {
+        return std::make_tuple(&S1F2Response::mdln, &S1F2Response::softrev);
+    }
 };
 ```
 
-如果你也想保留传统的 `from_item/to_item` 成员 API（方便直接调用），可以加两行薄包装：
+**场景 2：变长列表**
+S2F13: `<L <U4 ECID1> <U4 ECID2> ...>`
 
 ```cpp
-static std::optional<S1F2Response> from_item(const secs::ii::Item& item) {
-  return secs::ii::from_item<S1F2Response>(item);
-}
-secs::ii::Item to_item() const { return secs::ii::to_item(*this); }
+struct S2F13Request {
+    std::vector<uint32_t> ecids;
+    static constexpr auto secs_members() {
+        return std::make_tuple(&S2F13Request::ecids);
+    }
+};
 ```
 
-默认映射规则（最常用的子集）：
+**场景 3：嵌套结构**
+S5F1: `<L <L ALID ALTX> <L ALID ALTX> ...>`
 
-- `std::string` ↔ `ASCII`
-- `u1/u2/u4/u8/i1/i2/i4/i8/f4/f8/bool` ↔ 对应 SECS-II 类型（标量：数组长度必须为 1）
-- 若 `secs_members()` 只返回一个成员且类型为 `std::vector<T>`：表示“变长 List”，每个元素映射为一个子 Item
-- 若字段类型也提供 `secs_members()`（或传统 `from_item/to_item`）：允许嵌套（递归）映射
+```cpp
+struct AlarmInfo {
+    uint32_t alid;
+    std::string altx;
+    static constexpr auto secs_members() {
+        return std::make_tuple(&AlarmInfo::alid, &AlarmInfo::altx);
+    }
+};
 
-不满足上述默认规则时，你仍然可以为该消息类型手写 `from_item/to_item`（模板只是帮你省掉能省的部分）。
+struct S5F1Request {
+    std::vector<AlarmInfo> alarms;
+    static constexpr auto secs_members() {
+        return std::make_tuple(&S5F1Request::alarms);
+    }
+};
+```
+
+#### 方法 B：手动定义（底层控制）
+
+当标准映射无法满足需求时（如非标准 List 结构、复杂位操作、特殊枚举转换），手动实现 `to_item` 和 `from_item`。
+
+```cpp
+#include <secs/ii/item.hpp>
+
+struct CustomMsg {
+    int id;
+    std::string val;
+
+    // 编码：C++ -> Item
+    secs::ii::Item to_item() const {
+        return secs::ii::Item::list({
+            secs::ii::Item::i4({id}),
+            secs::ii::Item::ascii(val)
+        });
+    }
+
+    // 解码：Item -> C++
+    static std::optional<CustomMsg> from_item(const secs::ii::Item& item) {
+        auto* list = item.get_if<secs::ii::List>();
+        if (!list || list->size() != 2) return std::nullopt;
+
+        auto* i4 = (*list)[0].get_if<secs::ii::I4>();
+        auto* ascii = (*list)[1].get_if<secs::ii::ASCII>();
+        if (!i4 || i4->values.size() != 1 || !ascii) return std::nullopt;
+
+        return CustomMsg{i4->values[0], ascii->value};
+    }
+};
+```
+
+### 2. 编写与注册 Handler
+
+使用 `TypedHandler` 实现类型安全的消息处理。
+
+```cpp
+#include "secs/protocol/typed_handler.hpp"
+
+// 定义 Handler：接收 Request，返回 Response
+class MyS1F1Handler : public secs::protocol::TypedHandler<S1F1Request, S1F2Response> {
+public:
+    // 构造函数可用于传入业务指针（如数据库连接）
+    MyS1F1Handler(DeviceController* dev) : dev_(dev) {}
+
+    asio::awaitable<std::pair<std::error_code, S1F2Response>>
+    handle(const S1F1Request& req, const secs::protocol::DataMessage& raw) override {
+        S1F2Response rsp;
+        rsp.mdln = dev_->get_model_name();
+        rsp.softrev = dev_->get_software_revision();
+
+        co_return std::pair{std::error_code{}, rsp};
+    }
+
+private:
+    DeviceController* dev_;
+};
+
+// 注册到 Router
+secs::protocol::Router router;
+auto handler = std::make_shared<MyS1F1Handler>(my_device);
+secs::protocol::register_typed_handler(router, 1, 1, handler);
+
+// 或直接注册到 Session
+proto.router().set(1, 1, handler);
+```
+
+### 3. 主动发送消息
+
+#### 发送不需要回复的消息（W=0）
+
+```cpp
+#include "secs/utils/protocol_helpers.hpp"
+
+S6F11Event event;
+event.dataid = 0;
+event.ceid = 1001;
+event.reports = {...};
+
+auto ec = co_await secs::utils::async_send_item(
+    proto, 6, 11, secs::ii::to_item(event));
+if (ec) {
+    // 处理发送错误
+}
+```
+
+#### 发送请求并等待回复（W=1）
+
+```cpp
+S2F13Request req;
+req.ecids = {100, 200, 300};
+
+auto [ec, out] = co_await secs::utils::async_request_decoded(
+    proto, 2, 13, secs::ii::to_item(req), 5s);
+
+if (ec) {
+    // 处理请求错误
+} else {
+    // 解析回复
+    auto rsp = secs::ii::from_item<S2F14Response>(out.decoded->item);
+    if (rsp) {
+        // 使用 rsp->ecvs
+    }
+}
+```
 
 ---
 
-## 5. SML：读取 + 自动回复（规则驱动，减少 glue 代码）
+## 路线二：SMLX 模式 (Rule-Based)
 
-你可以把 SML 当成“可配置的回包规则”：
+通过配置文件定义消息和行为，几乎不需要编写 C++ 逻辑代码。
 
-- 用 `if (...) rsp_name.` 描述“收到什么 -> 回什么”
-- 用 `name: SxFy [W] <Item>.` 描述模板
-- 用 `every N send name.` 描述定时发送（适合联调造流量）
+### 1. SML 语法速查
 
-示例 SML 文件：`docs/sml_sample/sample.sml`
+文件扩展名通常为 `.sml`。
 
-### 5.0 最小 SML 片段（理解语义用）
+| 语法 | 说明 |
+| :--- | :--- |
+| `name: SxFy [W] <Item>.` | 定义消息模板。`W` 表示 W-bit=1。 |
+| `<L>` / `<L <U4 1>>` | List 定义。 |
+| `<A "Text">` | ASCII 字符串。 |
+| `<U4 $VAR>` | **SMLX 变量占位符**。需在运行时注入。 |
+| `if (msg_name) rsp_name.` | **自动回复规则**。收到 msg_name 自动回 rsp_name。 |
+| `every 10 send msg_name.` | **定时任务**。每 10 秒发送一次。 |
+
+**示例 (equipment.sml):**
 
 ```sml
-// 定义两条模板
+// 定义模板
 s1f1: S1F1 W <L>.
-s1f2: S1F2 <L <A "OK">>.
+s1f2: S1F2 <L <A $MDLN> <A $SOFTREV>>.
 
-// 条件：收到 s1f1 -> 回 s1f2
+// 规则
 if (s1f1) s1f2.
-
-// 定时：每 10 秒主动发一次 s1f1（用于联调造流量）
-every 10 send s1f1.
 ```
 
-### 5.0.1 从文件读取并加载
-
-`Runtime::load()` 的输入是“文本内容”，因此你需要自己读文件（示例代码见 `examples/hsms_sml_peer.cpp`、`examples/secs1_sml_peer.cpp`）。
+### 2. 加载与集成
 
 ```cpp
-std::string text = read_all_text("docs/sml_sample/sample.sml"); // 自行实现
+#include "secs/sml/runtime.hpp"
+
 secs::sml::Runtime rt;
-auto ec = rt.load(text);
+
+// 1. 加载文件
+std::string sml_content = read_file("equipment.sml");
+if (auto ec = rt.load(sml_content); ec) {
+    // 处理加载错误
+    std::cerr << "SML load failed: " << ec.message() << "\n";
+    return;
+}
+
+// 2. 挂载为 Default Handler（自动回复）
+// 注意：这会创建一个自动回复 handler，收到 W=1 的消息时按 SML 规则匹配并回复
+proto.router().set_default(
+    [rt_copy = rt](const secs::protocol::DataMessage& req)
+        -> asio::awaitable<secs::protocol::HandlerResult> {
+        // 这里需要实现自动回复逻辑
+        // 参考 examples/hsms_sml_peer.cpp:323-413 的 make_sml_auto_reply()
+        co_return secs::protocol::HandlerResult{
+            secs::core::make_error_code(secs::core::errc::not_implemented), {}};
+    });
 ```
 
-### 5.1 SML 自动回复的最小链路（ASCII 流程图）
+**重要说明**：`make_sml_auto_reply()` 不是库 API，而是示例代码中的实现模式。你需要参考 `examples/hsms_sml_peer.cpp:323-413` 自己实现类似的逻辑。
 
-```
-                 inbound DataMessage(primary, W=1)
-                             │
-                             ▼
-                  解码 body -> secs::ii::Item
-                             │
-                             ▼
-     rt.match_response(stream,function,item) -> "rsp_name" ?
-                 │                         │
-                 │ no match                │ matched
-                 ▼                         ▼
-           返回 error（不回包）      rt.get_message("rsp_name")
-                                         │
-                                         ▼
-                           render_item(tpl, ctx) -> rendered Item
-                                         │
-                                         ▼
-                          encode Item -> rsp_body(bytes)
-                                         │
-                                         ▼
-                      handler 返回 {OK, rsp_body}
-                                         │
-                                         ▼
-               protocol::Session 自动回 secondary(F+1/W=0/SB 回显)
-```
+### 3. 变量注入（RenderContext）
 
-### 5.2 推荐做法：把 SML 挂到 Router 的 default handler
+SML 模板中的占位符（如 `$MDLN`）需要通过 `RenderContext` 注入值。
 
-仓库示例已经给出一套可复用写法：
-
-- `examples/hsms_sml_peer.cpp`：HSMS 主动/被动两种模式都可加载同一份 SML
-- `examples/secs1_sml_peer.cpp`：SECS-I 串口对端 + timers（半双工主循环）
-
-其中核心就是：
+#### 场景 A：主动发送消息时注入变量
 
 ```cpp
-proto.router().set_default(make_sml_auto_reply(rt));
+#include "secs/sml/render.hpp"
+
+secs::sml::RenderContext ctx;
+ctx.set("MDLN", secs::ii::Item::ascii("MyDevice"));
+ctx.set("SOFTREV", secs::ii::Item::ascii("1.0.0"));
+
+// 渲染并编码消息
+std::vector<secs::core::byte> body;
+std::uint8_t stream, function;
+bool w_bit;
+
+auto ec = rt.encode_message_body("s1f2", ctx, body, &stream, &function, &w_bit);
+if (ec) {
+    std::cerr << "Render failed: " << ec.message() << "\n";
+    return;
+}
+
+// 发送
+if (w_bit) {
+    co_await proto.async_request(stream, function,
+        secs::core::bytes_view{body.data(), body.size()}, 5s);
+} else {
+    co_await proto.async_send(stream, function,
+        secs::core::bytes_view{body.data(), body.size()});
+}
 ```
 
-你可以直接把示例里的 `make_sml_auto_reply()` 函数拷贝到你的工程里改造：
+#### 场景 B：在 Handler 中动态注入变量
 
-- 先把“入站 body 解码”为 `secs::ii::Item`
-- 用 `rt->match_response()` 找到响应模板名
-- 用 `rt->get_message()` 拿到模板，再 `secs::sml::render_item()` 渲染
-- 最后返回 `secs::utils::make_handler_result(rendered_item)`
+```cpp
+// 在自定义 Handler 中
+proto.router().set(1, 1,
+    [&rt](const secs::protocol::DataMessage& req)
+        -> asio::awaitable<secs::protocol::HandlerResult> {
 
-### 5.2.1 直接跑现成 SML 对端（不用你写代码）
+    // 准备变量
+    secs::sml::RenderContext ctx;
+    ctx.set("MDLN", secs::ii::Item::ascii(get_device_model()));
+    ctx.set("SOFTREV", secs::ii::Item::ascii(get_software_version()));
 
-HSMS：
+    // 渲染响应
+    std::vector<secs::core::byte> body;
+    auto ec = rt.encode_message_body("s1f2", ctx, body);
+    if (ec) {
+        co_return secs::protocol::HandlerResult{ec, {}};
+    }
 
-```bash
-./build/examples/hsms_sml_peer --help
-./build/examples/hsms_sml_peer --mode passive --listen 0.0.0.0 --port 5000 --sml docs/sml_sample/sample.sml --session-id 0x0001
+    co_return secs::protocol::HandlerResult{std::error_code{}, std::move(body)};
+});
 ```
 
-SECS-I（串口，Windows/POSIX）：
+### 4. 实现自动回复 Handler
 
-```bash
-./build/examples/secs1_sml_peer --help
-./build/examples/secs1_sml_peer --role equipment --serial COM5 --baud 9600 --device-id 0x0001 --sml docs/sml_sample/sample.sml
+参考 `examples/hsms_sml_peer.cpp:323-413` 的完整实现：
+
+```cpp
+secs::protocol::Handler make_sml_auto_reply(std::shared_ptr<secs::sml::Runtime> rt) {
+    return [rt](const secs::protocol::DataMessage& req)
+        -> asio::awaitable<secs::protocol::HandlerResult> {
+
+        // 只处理 W=1 的请求
+        if (!req.w_bit) {
+            co_return secs::protocol::HandlerResult{std::error_code{}, {}};
+        }
+
+        // 解码请求 body
+        secs::ii::Item decoded{secs::ii::List{}};
+        if (!req.body.empty()) {
+            auto [dec_ec, decoded_opt] = secs::utils::decode_one_item_if_any(
+                secs::core::bytes_view{req.body.data(), req.body.size()});
+            if (dec_ec) {
+                co_return secs::protocol::HandlerResult{dec_ec, {}};
+            }
+            if (decoded_opt.has_value()) {
+                decoded = std::move(decoded_opt->item);
+            }
+        }
+
+        // 匹配响应规则
+        auto matched = rt->match_response(req.stream, req.function, decoded);
+        if (!matched.has_value()) {
+            co_return secs::protocol::HandlerResult{
+                secs::core::make_error_code(secs::core::errc::invalid_argument), {}};
+        }
+
+        // 获取响应模板
+        const auto* rsp = rt->get_message(*matched);
+        if (!rsp) {
+            co_return secs::protocol::HandlerResult{
+                secs::core::make_error_code(secs::core::errc::invalid_argument), {}};
+        }
+
+        // 渲染响应（使用空上下文，或根据需要注入变量）
+        secs::sml::RenderContext ctx{};
+        secs::ii::Item rendered{secs::ii::List{}};
+        auto render_ec = secs::sml::render_item(rsp->item, ctx, rendered);
+        if (render_ec) {
+            co_return secs::protocol::HandlerResult{render_ec, {}};
+        }
+
+        // 编码响应
+        auto result = secs::utils::make_handler_result(rendered);
+        co_return result;
+    };
+}
 ```
-
-### 5.3 SMLX（占位符/渲染）与变量注入（可选）
-
-如果你希望“模板 body 里某些字段由运行时决定”（例如 MDLN/SOFTREV、列表参数等），可以用 SMLX v0：
-
-- 在模板值位置写变量名：`<A MDLN>`、`<U2 SVIDS>`、`<B BYTES>` …
-- 在代码中用 `secs::sml::RenderContext` 注入变量值（变量值类型仍用 `secs::ii::Item` 表达）
-
-参考示例：
-
-- `examples/smlx_active_send_example.cpp`（渲染 + 主动发送 + 回包都基于同一份 SMLX）
-
-注意当前实现限制（见 `docs/architecture/09-smlx-extension.md` 与测试）：
-
-- 条件期望值 `if (a(1)==<...>)` 里不允许占位符（解析会报 `sml.parser/invalid_condition`）
-- 如果模板里存在占位符而你又没有提供变量，会得到 `sml.render/missing_variable`
 
 ---
 
-## 6. SECS-I（串口）使用建议：用 `async_poll_once()` 驱动主循环
+## 错误处理
 
-SECS-I 是半双工字节流链路，最容易踩的坑是“并发读写导致状态机拒绝/报错”。
+所有 API 使用 `std::error_code` 返回错误。
 
-库已经给出推荐用法（示例：`examples/secs1_sml_peer.cpp`）：
-
-```
-主循环（单线程/单 strand）：
-  1) 处理 timers（到点就发）
-  2) proto.async_poll_once(wait) 等一条入站消息并处理
-  3) 重复
-
-不要：
-  - 一边跑 proto.async_run()，另一边并发 async_send/async_request
-  - 多线程同时对同一个 SECS-I Session 发起收发
+```cpp
+auto ec = co_await proto.async_send(1, 1, body);
+if (ec) {
+    std::cerr << "Send failed: " << ec.message()
+              << " (category: " << ec.category().name() << ")\n";
+}
 ```
 
-关键配置点：R-bit（方向位）
-
-- Host -> Equipment：`SessionOptions::secs1_reverse_bit = false`
-- Equipment -> Host：`SessionOptions::secs1_reverse_bit = true`
+常见错误类别：
+- `secs.core`：核心错误（如 `invalid_argument`, `out_of_memory`）
+- `secs.ii`：SECS-II 编解码错误
+- `sml.render`：SMLX 渲染错误（如 `missing_variable`, `type_mismatch`）
+- `sml.lexer` / `sml.parser`：SML 语法错误
 
 ---
 
-## 7. 调试与联调：dump / log / 解码
+## 调试与排查（Dump）
 
-### 7.1 开启 protocol 层运行时报文 dump（TX/RX）
+开启 Dump 可以打印收发的字节流和解码后的 SECS-II 树结构。
 
-见 `include/secs/protocol/session.hpp` 的 `SessionOptions::DumpOptions`：
-
-- `enable`：总开关
-- `dump_tx/dump_rx`：方向开关
-- `sink`：可选输出回调；为空则走库内 spdlog
-- HSMS/SECS-I 各自有细分选项：`hsms` / `secs1`
-
-适合场景：
-
-- 对接第三方 HSMS/SECS-I 工具时，快速确认对端到底发了什么
-- SECS-II payload 结构不确定时，先 dump 再决定怎么解码
-
-### 7.2 常用“快速定位”入口
-
-- HSMS/SECS-I 报文解析：`include/secs/utils/*_dump.hpp`、`examples/utils_dump_example.cpp`
-- SECS-II 编解码：`include/secs/ii/codec.hpp`、`examples/secs2_simple.cpp`
-- 端到端（不依赖 socket）：`examples/protocol_custom_reply_example.cpp`、`examples/secs1_loopback.cpp`
+```cpp
+secs::protocol::SessionOptions opt;
+opt.dump.enable = true;
+opt.dump.dump_tx = true;              // 打印发送的字节流
+opt.dump.dump_rx = true;              // 打印接收的字节流
+opt.dump.dump_secs2_decode = true;    // 打印解码后的 SML 树结构（推荐）
+```
 
 ---
 
-## 8. 进一步阅读（按“最像文档”的代码顺序）
+## 完整示例
 
-1) 示例（先跑起来）：
-
-- `examples/README.md`
-- `examples/hsms_server.cpp` / `examples/hsms_client.cpp`
-- `examples/protocol_custom_reply_example.cpp`
-- `examples/typed_handler_example.cpp`
-- `examples/hsms_sml_peer.cpp` / `examples/secs1_sml_peer.cpp`
-
-2) 公开 API：
-
-- `include/secs/protocol/session.hpp`
-- `include/secs/protocol/router.hpp`
-- `include/secs/protocol/typed_handler.hpp`
-- `include/secs/sml/runtime.hpp` / `include/secs/sml/render.hpp`
-
-3) 单元测试（最接近“可执行规范”）：
-
-- `tests/test_protocol_session.cpp`
-- `tests/test_typed_handler.cpp`
-- `tests/test_sml_parser.cpp`
+参考以下示例代码：
+- **TypedHandler 用法**：`examples/typed_handler_example.cpp`
+- **SMLX 主动发送**：`examples/smlx_active_send_example.cpp`
+- **SMLX 自动回复**：`examples/hsms_sml_peer.cpp`（特别是 `make_sml_auto_reply()` 函数）
+- **自定义回复逻辑**：`examples/protocol_custom_reply_example.cpp`
