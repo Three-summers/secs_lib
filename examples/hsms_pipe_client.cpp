@@ -30,6 +30,7 @@
 #include <asio/write.hpp>
 #
 #include <signal.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #
 #include <chrono>
@@ -46,6 +47,22 @@ using secs::core::bytes_view;
 using secs::core::mutable_bytes_view;
 #
 using namespace std::chrono_literals;
+#
+static bool fd_is_pipe_like(int fd) noexcept {
+    struct stat st {};
+    if (::fstat(fd, &st) != 0) {
+        return false;
+    }
+    if (S_ISFIFO(st.st_mode)) {
+        return true;
+    }
+#ifdef S_ISSOCK
+    if (S_ISSOCK(st.st_mode)) {
+        return true;
+    }
+#endif
+    return false;
+}
 #
 class PipeStream final : public secs::hsms::Stream {
 public:
@@ -206,6 +223,12 @@ asio::awaitable<int> run(std::uint16_t device_id) {
 } // namespace
 #
 int main(int argc, char **argv) {
+    if (!fd_is_pipe_like(STDIN_FILENO) || !fd_is_pipe_like(STDOUT_FILENO)) {
+        std::cerr << "[pipe_client] stdin/stdout 必须连接到管道（用于承载 HSMS 二进制帧）；"
+                     "请参考 examples/README.md 的 HSMS（pipe）示例说明。\n";
+        return 2;
+    }
+#
     // pipe 场景：避免写入断管触发 SIGPIPE 终止进程（示例与单测都需要）。
     ::signal(SIGPIPE, SIG_IGN);
 #

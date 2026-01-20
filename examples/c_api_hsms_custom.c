@@ -42,12 +42,18 @@ enum role {
     ROLE_LOOPBACK = 2,
 };
 
+enum item_style {
+    ITEM_STYLE_LEGACY = 0,
+    ITEM_STYLE_BUILDER = 1,
+};
+
 struct options {
     enum role role;
     const char *listen_ip;
     const char *connect_ip;
     uint16_t port;
     uint16_t session_id;
+    enum item_style item_style;
 };
 
 static void print_usage(const char *argv0) {
@@ -60,6 +66,8 @@ static void print_usage(const char *argv0) {
             "  --connect <ip>       client 连接地址（默认 127.0.0.1）\n"
             "  --port <u16>         端口（默认 5000）\n"
             "  --session-id <u16>   HSMS data SessionID（支持 0x 前缀，默认 0x0001）\n"
+            "  --item-style <legacy|builder>\n"
+            "                      SECS-II Item 构造写法（默认 builder；builder 更适合嵌套 List）\n"
             "  -h, --help           显示帮助\n",
             argv0);
 }
@@ -133,6 +141,21 @@ static int parse_role(const char *s, enum role *out) {
     return 0;
 }
 
+static int parse_item_style(const char *s, enum item_style *out) {
+    if (!s || !out) {
+        return 0;
+    }
+    if (strcmp(s, "legacy") == 0) {
+        *out = ITEM_STYLE_LEGACY;
+        return 1;
+    }
+    if (strcmp(s, "builder") == 0) {
+        *out = ITEM_STYLE_BUILDER;
+        return 1;
+    }
+    return 0;
+}
+
 static int parse_args(int argc, char **argv, struct options *out_opt) {
     struct options opt;
     opt.role = ROLE_LOOPBACK;
@@ -140,6 +163,7 @@ static int parse_args(int argc, char **argv, struct options *out_opt) {
     opt.connect_ip = "127.0.0.1";
     opt.port = 5000;
     opt.session_id = 0x0001;
+    opt.item_style = ITEM_STYLE_BUILDER;
 
     for (int i = 1; i < argc; ++i) {
         const char *a = argv[i];
@@ -150,7 +174,8 @@ static int parse_args(int argc, char **argv, struct options *out_opt) {
             strcmp(a, "--listen") == 0 ||
             strcmp(a, "--connect") == 0 ||
             strcmp(a, "--port") == 0 ||
-            strcmp(a, "--session-id") == 0) {
+            strcmp(a, "--session-id") == 0 ||
+            strcmp(a, "--item-style") == 0) {
             need_value = 1;
         }
 
@@ -191,6 +216,13 @@ static int parse_args(int argc, char **argv, struct options *out_opt) {
         if (strcmp(a, "--session-id") == 0) {
             if (!parse_u16(v, &opt.session_id)) {
                 fprintf(stderr, "非法 session-id: %s\n", v);
+                return 0;
+            }
+            continue;
+        }
+        if (strcmp(a, "--item-style") == 0) {
+            if (!parse_item_style(v, &opt.item_style)) {
+                fprintf(stderr, "非法 item-style: %s\n", v);
                 return 0;
             }
             continue;
@@ -272,7 +304,106 @@ static secs_error_t decode_s6f11_fields(const secs_data_message_view_t *req,
     return (secs_error_t){0, NULL};
 }
 
-static secs_error_t encode_s6f12_body_custom(uint16_t dataid,
+static secs_error_t encode_s6f11_body_legacy(uint16_t dataid,
+                                            uint16_t ceid,
+                                            uint8_t **out_body,
+                                            size_t *out_body_n) {
+    *out_body = NULL;
+    *out_body_n = 0;
+
+    secs_error_t err = (secs_error_t){0, NULL};
+    secs_ii_item_t *root = NULL;
+    secs_ii_item_t *params = NULL;
+
+    if (!secs_error_is_ok(err = secs_ii_item_create_list(&root))) {
+        goto cleanup;
+    }
+    if (!secs_error_is_ok(err = secs_ii_item_list_append_u2(root, dataid))) {
+        goto cleanup;
+    }
+    if (!secs_error_is_ok(err = secs_ii_item_list_append_u2(root, ceid))) {
+        goto cleanup;
+    }
+    if (!secs_error_is_ok(err = secs_ii_item_create_list(&params))) {
+        goto cleanup;
+    }
+    if (!secs_error_is_ok(err = secs_ii_item_list_append_take(root, &params))) {
+        goto cleanup;
+    }
+
+    if (!secs_error_is_ok(err = secs_ii_encode(root, out_body, out_body_n))) {
+        goto cleanup;
+    }
+
+cleanup:
+    secs_ii_item_destroy(params);
+    secs_ii_item_destroy(root);
+    return err;
+}
+
+static secs_error_t encode_s6f11_body_builder(uint16_t dataid,
+                                             uint16_t ceid,
+                                             uint8_t **out_body,
+                                             size_t *out_body_n) {
+    *out_body = NULL;
+    *out_body_n = 0;
+
+    secs_error_t err = (secs_error_t){0, NULL};
+    secs_ii_builder_t *b = NULL;
+    secs_ii_item_t *root = NULL;
+
+    if (!secs_error_is_ok(err = secs_ii_builder_create(&b))) {
+        goto cleanup;
+    }
+    if (!secs_error_is_ok(err = secs_ii_builder_list_begin(b))) {
+        goto cleanup;
+    }
+    if (!secs_error_is_ok(err = secs_ii_builder_add_u2(b, dataid))) {
+        goto cleanup;
+    }
+    if (!secs_error_is_ok(err = secs_ii_builder_add_u2(b, ceid))) {
+        goto cleanup;
+    }
+    if (!secs_error_is_ok(err = secs_ii_builder_list_begin(b))) {
+        goto cleanup;
+    }
+    if (!secs_error_is_ok(err = secs_ii_builder_list_end(b))) {
+        goto cleanup;
+    }
+    if (!secs_error_is_ok(err = secs_ii_builder_list_end(b))) {
+        goto cleanup;
+    }
+
+    if (!secs_error_is_ok(err = secs_ii_builder_finalize(b, &root))) {
+        goto cleanup;
+    }
+    if (!secs_error_is_ok(err = secs_ii_encode(root, out_body, out_body_n))) {
+        goto cleanup;
+    }
+
+cleanup:
+    secs_ii_item_destroy(root);
+    secs_ii_builder_destroy(b);
+    if (!secs_error_is_ok(err)) {
+        secs_free(*out_body);
+        *out_body = NULL;
+        *out_body_n = 0;
+    }
+    return err;
+}
+
+static secs_error_t encode_s6f11_body_custom(uint16_t dataid,
+                                            uint16_t ceid,
+                                            enum item_style style,
+                                            uint8_t **out_body,
+                                            size_t *out_body_n) {
+    if (style == ITEM_STYLE_BUILDER) {
+        return encode_s6f11_body_builder(dataid, ceid, out_body, out_body_n);
+    }
+    return encode_s6f11_body_legacy(dataid, ceid, out_body, out_body_n);
+}
+
+static secs_error_t encode_s6f12_body_legacy(uint16_t dataid,
                                             uint16_t ceid,
                                             const struct device_data *d,
                                             uint8_t **out_body,
@@ -300,13 +431,16 @@ static secs_error_t encode_s6f12_body_custom(uint16_t dataid,
     }
 
     if (ceid == 0x1001u) {
-        if (!secs_error_is_ok(err = secs_ii_item_list_append_ascii(data, d->device_name))) {
+        if (!secs_error_is_ok(
+                err = secs_ii_item_list_append_ascii(data, d->device_name))) {
             goto cleanup;
         }
-        if (!secs_error_is_ok(err = secs_ii_item_list_append_u1(data, d->status_code))) {
+        if (!secs_error_is_ok(
+                err = secs_ii_item_list_append_u1(data, d->status_code))) {
             goto cleanup;
         }
-        if (!secs_error_is_ok(err = secs_ii_item_list_append_u4(data, d->uptime_seconds))) {
+        if (!secs_error_is_ok(
+                err = secs_ii_item_list_append_u4(data, d->uptime_seconds))) {
             goto cleanup;
         }
     } else if (ceid == 0x1002u) {
@@ -316,7 +450,8 @@ static secs_error_t encode_s6f12_body_custom(uint16_t dataid,
         temps[2] = d->t3;
         float avg = (temps[0] + temps[1] + temps[2]) / 3.0f;
 
-        if (!secs_error_is_ok(err = secs_ii_item_list_append_ascii(data, "Temperature Sensors"))) {
+        if (!secs_error_is_ok(
+                err = secs_ii_item_list_append_ascii(data, "Temperature Sensors"))) {
             goto cleanup;
         }
         if (!secs_error_is_ok(err = secs_ii_item_create_list(&nested))) {
@@ -386,8 +521,151 @@ cleanup:
     return err;
 }
 
+static secs_error_t encode_s6f12_body_builder(uint16_t dataid,
+                                             uint16_t ceid,
+                                             const struct device_data *d,
+                                             uint8_t **out_body,
+                                             size_t *out_body_n) {
+    *out_body = NULL;
+    *out_body_n = 0;
+
+    secs_error_t err = (secs_error_t){0, NULL};
+    secs_ii_builder_t *b = NULL;
+    secs_ii_item_t *root = NULL;
+    secs_ii_item_t *tmp = NULL;
+
+    if (!secs_error_is_ok(err = secs_ii_builder_create(&b))) {
+        goto cleanup;
+    }
+    if (!secs_error_is_ok(err = secs_ii_builder_list_begin(b))) {
+        goto cleanup;
+    }
+    if (!secs_error_is_ok(err = secs_ii_builder_add_u2(b, dataid))) {
+        goto cleanup;
+    }
+    if (!secs_error_is_ok(err = secs_ii_builder_add_u2(b, ceid))) {
+        goto cleanup;
+    }
+    if (!secs_error_is_ok(err = secs_ii_builder_list_begin(b))) {
+        goto cleanup;
+    }
+
+    if (ceid == 0x1001u) {
+        if (!secs_error_is_ok(err = secs_ii_builder_add_ascii(b, d->device_name))) {
+            goto cleanup;
+        }
+        if (!secs_error_is_ok(err = secs_ii_builder_add_u1(b, d->status_code))) {
+            goto cleanup;
+        }
+        if (!secs_error_is_ok(err = secs_ii_builder_add_u4(b, d->uptime_seconds))) {
+            goto cleanup;
+        }
+    } else if (ceid == 0x1002u) {
+        float temps[3];
+        temps[0] = d->t1;
+        temps[1] = d->t2;
+        temps[2] = d->t3;
+        float avg = (temps[0] + temps[1] + temps[2]) / 3.0f;
+
+        if (!secs_error_is_ok(err = secs_ii_builder_add_ascii(b, "Temperature Sensors"))) {
+            goto cleanup;
+        }
+        if (!secs_error_is_ok(err = secs_ii_builder_list_begin(b))) {
+            goto cleanup;
+        }
+        if (!secs_error_is_ok(err = secs_ii_item_create_f4(temps, 3, &tmp))) {
+            goto cleanup;
+        }
+        if (!secs_error_is_ok(err = secs_ii_builder_add_item_take(b, &tmp))) {
+            goto cleanup;
+        }
+        if (!secs_error_is_ok(err = secs_ii_builder_list_end(b))) {
+            goto cleanup;
+        }
+        if (!secs_error_is_ok(err = secs_ii_builder_add_f4(b, avg))) {
+            goto cleanup;
+        }
+    } else if (ceid == 0x1003u) {
+        if (!secs_error_is_ok(err = secs_ii_builder_add_u2(b, d->alarm_count))) {
+            goto cleanup;
+        }
+        if (!secs_error_is_ok(err = secs_ii_builder_list_begin(b))) {
+            goto cleanup;
+        }
+        if (!secs_error_is_ok(err = secs_ii_builder_add_ascii(b, d->alarm_msg_1))) {
+            goto cleanup;
+        }
+        if (!secs_error_is_ok(err = secs_ii_builder_add_ascii(b, d->alarm_msg_2))) {
+            goto cleanup;
+        }
+        if (!secs_error_is_ok(err = secs_ii_builder_list_end(b))) {
+            goto cleanup;
+        }
+    } else if (ceid == 0x1004u) {
+        float yield = 0.0f;
+        if (d->total_count != 0u) {
+            yield = (float)d->good_count / (float)d->total_count;
+        }
+
+        if (!secs_error_is_ok(err = secs_ii_builder_add_u4(b, d->total_count))) {
+            goto cleanup;
+        }
+        if (!secs_error_is_ok(err = secs_ii_builder_add_u4(b, d->good_count))) {
+            goto cleanup;
+        }
+        if (!secs_error_is_ok(err = secs_ii_builder_add_u4(b, d->bad_count))) {
+            goto cleanup;
+        }
+        if (!secs_error_is_ok(err = secs_ii_builder_add_f4(b, yield))) {
+            goto cleanup;
+        }
+    } else {
+        if (!secs_error_is_ok(err = secs_ii_builder_add_ascii(b, "UNKNOWN_CEID"))) {
+            goto cleanup;
+        }
+    }
+
+    if (!secs_error_is_ok(err = secs_ii_builder_list_end(b))) {
+        goto cleanup;
+    }
+    if (!secs_error_is_ok(err = secs_ii_builder_list_end(b))) {
+        goto cleanup;
+    }
+
+    if (!secs_error_is_ok(err = secs_ii_builder_finalize(b, &root))) {
+        goto cleanup;
+    }
+    if (!secs_error_is_ok(err = secs_ii_encode(root, out_body, out_body_n))) {
+        goto cleanup;
+    }
+
+cleanup:
+    secs_ii_item_destroy(tmp);
+    secs_ii_item_destroy(root);
+    secs_ii_builder_destroy(b);
+    if (!secs_error_is_ok(err)) {
+        secs_free(*out_body);
+        *out_body = NULL;
+        *out_body_n = 0;
+    }
+    return err;
+}
+
+static secs_error_t encode_s6f12_body_custom(uint16_t dataid,
+                                            uint16_t ceid,
+                                            const struct device_data *d,
+                                            enum item_style style,
+                                            uint8_t **out_body,
+                                            size_t *out_body_n) {
+    if (style == ITEM_STYLE_BUILDER) {
+        return encode_s6f12_body_builder(dataid, ceid, d, out_body, out_body_n);
+    }
+    return encode_s6f12_body_legacy(dataid, ceid, d, out_body, out_body_n);
+}
+
 struct server_state {
     struct device_data d;
+    enum item_style item_style;
 };
 
 static secs_error_t s6f11_handler(void *user_data,
@@ -420,10 +698,12 @@ static secs_error_t s6f11_handler(void *user_data,
            (unsigned)dataid,
            (unsigned)ceid);
 
-    return encode_s6f12_body_custom(dataid, ceid, &st->d, out_body, out_body_n);
+    return encode_s6f12_body_custom(
+        dataid, ceid, &st->d, st->item_style, out_body, out_body_n);
 }
 
-static int run_client_requests(secs_protocol_session_t *proto) {
+static int run_client_requests(secs_protocol_session_t *proto,
+                               enum item_style item_style) {
     const uint16_t ceids[4] = {0x1001, 0x1002, 0x1003, 0x1004};
 
     for (size_t i = 0; i < 4; ++i) {
@@ -433,27 +713,10 @@ static int run_client_requests(secs_protocol_session_t *proto) {
         uint8_t *req_body = NULL;
         size_t req_body_n = 0;
 
-        secs_error_t err = (secs_error_t){0, NULL};
-        secs_ii_item_t *root = NULL;
-        secs_ii_item_t *params = NULL;
-
-        if (!secs_error_is_ok(err = secs_ii_item_create_list(&root))) {
-            goto cleanup_req;
-        }
-        if (!secs_error_is_ok(err = secs_ii_item_list_append_u2(root, dataid))) {
-            goto cleanup_req;
-        }
-        if (!secs_error_is_ok(err = secs_ii_item_list_append_u2(root, ceid))) {
-            goto cleanup_req;
-        }
-        if (!secs_error_is_ok(err = secs_ii_item_create_list(&params))) {
-            goto cleanup_req;
-        }
-        if (!secs_error_is_ok(err = secs_ii_item_list_append_take(root, &params))) {
-            goto cleanup_req;
-        }
-        if (!secs_error_is_ok(err = secs_ii_encode(root, &req_body, &req_body_n))) {
-            goto cleanup_req;
+        secs_error_t err = encode_s6f11_body_custom(
+            dataid, ceid, item_style, &req_body, &req_body_n);
+        if (!secs_error_is_ok(err)) {
+            return 1;
         }
 
         printf("\n[client] request S6F11 CEID=0x%04X DATAID=%u\n",
@@ -466,7 +729,8 @@ static int run_client_requests(secs_protocol_session_t *proto) {
                        secs_protocol_session_request(
                            proto, 6, 11, req_body, req_body_n, 3000, &reply))) {
             secs_data_message_free(&reply);
-            goto cleanup_req;
+            secs_free(req_body);
+            return 1;
         }
 
         printf("[client] recv S%uF%u W=%d SB=0x%08" PRIX32 " body=%zu\n",
@@ -478,13 +742,7 @@ static int run_client_requests(secs_protocol_session_t *proto) {
 
         secs_data_message_free(&reply);
 
-cleanup_req:
         secs_free(req_body);
-        secs_ii_item_destroy(params);
-        secs_ii_item_destroy(root);
-        if (!secs_error_is_ok(err)) {
-            return 1;
-        }
     }
 
     return 0;
@@ -528,6 +786,7 @@ static int run_server(const struct options *opt) {
 
     struct server_state st;
     init_device_data(&st.d);
+    st.item_style = opt->item_style;
 
     if (!ensure_ok("secs_context_create", secs_context_create(&ctx))) {
         goto cleanup;
@@ -646,7 +905,7 @@ static int run_client(const struct options *opt) {
         goto cleanup;
     }
 
-    exit_code = run_client_requests(proto);
+    exit_code = run_client_requests(proto, opt->item_style);
     if (exit_code == 0) {
         printf("\nPASS\n");
     }
@@ -675,6 +934,7 @@ static int run_loopback(const struct options *opt) {
 
     struct server_state st;
     init_device_data(&st.d);
+    st.item_style = opt->item_style;
 
     if (!ensure_ok("secs_context_create", secs_context_create(&ctx))) {
         goto cleanup;
@@ -770,7 +1030,7 @@ static int run_loopback(const struct options *opt) {
         goto cleanup;
     }
 
-    exit_code = run_client_requests(client_proto);
+    exit_code = run_client_requests(client_proto, opt->item_style);
     if (exit_code == 0) {
         printf("\nPASS\n");
     }

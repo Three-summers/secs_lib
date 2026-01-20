@@ -21,10 +21,13 @@
 #include "secs/core/common.hpp"
 #include "secs/core/error.hpp"
 #include "secs/ii/item.hpp"
+#include "secs/protocol/ceid_dispatcher.hpp"
 #include "secs/protocol/session.hpp"
+#include "secs/protocol/typed_handler.hpp"
 #include "secs/secs1/link.hpp"
 #include "secs/secs1/serial_port_link.hpp"
 #include "secs/secs1/state_machine.hpp"
+#include "secs/utils/ceid_helpers.hpp"
 #include "secs/utils/ii_helpers.hpp"
 
 #include <asio/as_tuple.hpp>
@@ -41,6 +44,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -61,6 +65,7 @@ using secs::ii::Item;
 using secs::ii::List;
 
 using secs::protocol::DataMessage;
+using secs::protocol::CeidDispatcher;
 using secs::protocol::HandlerResult;
 using ProtoOptions = secs::protocol::SessionOptions;
 using ProtocolSession = secs::protocol::Session;
@@ -71,6 +76,12 @@ enum class Role : std::uint8_t {
     loopback = 2,
 };
 
+enum class Impl : std::uint8_t {
+    raw = 0,   // 直接在 Router handler 内手写 decode/encode
+    typed = 1, // TypedHandler + 声明式消息（secs_members）
+    ceid = 2,  // CeidDispatcher：按 CEID 分发 handler
+};
+
 struct Options final {
     Role role{Role::loopback};
 
@@ -79,6 +90,7 @@ struct Options final {
     std::uint16_t device_id{0x0001};
     bool reverse_bit{false};
     bool reverse_bit_set{false};
+    Impl impl{Impl::raw};
 };
 
 struct DeviceData final {
@@ -105,6 +117,8 @@ static void print_usage(const char *argv0) {
               << " --role <server|client|loopback> [options]\n\n"
               << "选项:\n"
               << "  --role <server|client|loopback>\n"
+              << "  --impl <raw|typed|ceid>\n"
+              << "                     server/loopback 的 S6F11 handler 写法（默认 raw）\n"
               << "  --serial <name>      串口名（Windows: COM5/COM10；Linux: /dev/ttyUSB0）\n"
               << "  --baud <i32>         波特率（默认 9600；虚拟串口可忽略）\n"
               << "  --device-id <u16>    DeviceID（支持 0x 前缀，默认 0x0001）\n"
@@ -164,6 +178,22 @@ static bool parse_role(std::string_view s, Role &out) {
     return false;
 }
 
+static bool parse_impl(std::string_view s, Impl &out) {
+    if (s == "raw") {
+        out = Impl::raw;
+        return true;
+    }
+    if (s == "typed") {
+        out = Impl::typed;
+        return true;
+    }
+    if (s == "ceid") {
+        out = Impl::ceid;
+        return true;
+    }
+    return false;
+}
+
 static std::optional<Options> parse_args(int argc, char **argv) {
     Options opt{};
 
@@ -185,6 +215,14 @@ static std::optional<Options> parse_args(int argc, char **argv) {
             const char *v = need_value("--role");
             if (!v || !parse_role(v, opt.role)) {
                 std::cerr << "非法 role: " << (v ? v : "") << "\n";
+                return std::nullopt;
+            }
+            continue;
+        }
+        if (a == "--impl") {
+            const char *v = need_value("--impl");
+            if (!v || !parse_impl(v, opt.impl)) {
+                std::cerr << "非法 impl: " << (v ? v : "") << "\n";
                 return std::nullopt;
             }
             continue;
@@ -350,6 +388,252 @@ static Item build_s6f12_response_item(std::uint16_t dataid,
     }
 }
 
+// ------------------------------ 写法二：声明式消息（secs_members） + TypedHandler
+//
+// - 消息体结构：与 examples/README.md 的“统一业务”一致
+//   - S6F11 body: <L <U2 DATAID> <U2 CEID> <L PARAMS>>
+//   - S6F12 body: <L <U2 DATAID> <U2 CEID> <L DATA>>
+// - 重点：不再手写 to_item/from_item；只需提供 secs_members()，由库内模板生成映射。
+
+struct S6F11Body final {
+    std::uint16_t dataid{0};
+    std::uint16_t ceid{0};
+    secs::ii::Item params{secs::ii::List{}};
+
+    static constexpr auto secs_members() {
+        return std::make_tuple(&S6F11Body::dataid,
+                               &S6F11Body::ceid,
+                               &S6F11Body::params);
+    }
+};
+
+struct S6F12Body final {
+    std::uint16_t dataid{0};
+    std::uint16_t ceid{0};
+    secs::ii::Item data{secs::ii::List{}};
+
+    static constexpr auto secs_members() {
+        return std::make_tuple(
+            &S6F12Body::dataid, &S6F12Body::ceid, &S6F12Body::data);
+    }
+};
+
+struct Ceid1001Data final {
+    std::string device_name{};
+    std::uint8_t status_code{0};
+    std::uint32_t uptime_seconds{0};
+
+    static constexpr auto secs_members() {
+        return std::make_tuple(&Ceid1001Data::device_name,
+                               &Ceid1001Data::status_code,
+                               &Ceid1001Data::uptime_seconds);
+    }
+};
+
+struct FloatList final {
+    std::vector<float> values{};
+
+    static constexpr auto secs_members() {
+        // vector-only 模式：编码为 <L elem...>，其中 elem 为 F4(单值)。
+        return std::make_tuple(&FloatList::values);
+    }
+};
+
+static Item build_s6f11_request_item_declarative(std::uint16_t dataid,
+                                                 std::uint16_t ceid) {
+    S6F11Body body{};
+    body.dataid = dataid;
+    body.ceid = ceid;
+    body.params = Item::list({}); // 示例保持 PARAMS 为空
+    return secs::ii::to_item(body);
+}
+
+static Item build_s6f12_data_payload_item(std::uint16_t ceid,
+                                          const DeviceData &d) {
+    switch (ceid) {
+    case 0x1001: {
+        Ceid1001Data payload{};
+        payload.device_name = d.device_name;
+        payload.status_code = d.status_code;
+        payload.uptime_seconds = d.uptime_seconds;
+        return secs::ii::to_item(payload);
+    }
+    case 0x1002: {
+        const float avg =
+            (d.temp_sensor_1 + d.temp_sensor_2 + d.temp_sensor_3) / 3.0f;
+        FloatList temps{};
+        temps.values = {d.temp_sensor_1, d.temp_sensor_2, d.temp_sensor_3};
+        return Item::list({
+            Item::ascii("Temperature Sensors"),
+            secs::ii::to_item(temps),
+            Item::f4({avg}),
+        });
+    }
+    case 0x1003:
+        return Item::list({
+            Item::u2({d.alarm_count}),
+            Item::list({
+                Item::ascii(d.alarm_msg_1),
+                Item::ascii(d.alarm_msg_2),
+            }),
+        });
+    case 0x1004: {
+        const float yield =
+            (d.total_count == 0)
+                ? 0.0f
+                : (static_cast<float>(d.good_count) /
+                   static_cast<float>(d.total_count));
+        return Item::list({
+            Item::u4({d.total_count}),
+            Item::u4({d.good_count}),
+            Item::u4({d.bad_count}),
+            Item::f4({yield}),
+        });
+    }
+    default:
+        return Item::list({Item::ascii("UNKNOWN_CEID")});
+    }
+}
+
+class S6F11TypedHandler final
+    : public secs::protocol::TypedHandler<S6F11Body, S6F12Body> {
+public:
+    S6F11TypedHandler(const DeviceData *device, bool verbose)
+        : device_(device), verbose_(verbose) {}
+
+    asio::awaitable<std::pair<std::error_code, S6F12Body>>
+    handle(const S6F11Body &req, const DataMessage &raw) override {
+        if (!device_) {
+            co_return std::pair{make_error_code(errc::invalid_argument),
+                                S6F12Body{}};
+        }
+
+        if (verbose_) {
+            std::cout << "[server][typed] recv S" << static_cast<int>(raw.stream)
+                      << "F" << static_cast<int>(raw.function)
+                      << " W=" << (raw.w_bit ? 1 : 0) << " SB=0x" << std::hex
+                      << raw.system_bytes << std::dec << " DATAID=" << req.dataid
+                      << " CEID=0x" << std::hex << req.ceid << std::dec
+                      << " body_n=" << raw.body.size() << "\n";
+        }
+
+        S6F12Body rsp{};
+        rsp.dataid = req.dataid;
+        rsp.ceid = req.ceid;
+        rsp.data = build_s6f12_data_payload_item(req.ceid, *device_);
+        co_return std::pair{std::error_code{}, std::move(rsp)};
+    }
+
+private:
+    const DeviceData *device_{nullptr};
+    bool verbose_{false};
+};
+
+static void install_s6f11_handler(secs::protocol::Router &router,
+                                  Impl impl,
+                                  DeviceData &device,
+                                  bool verbose) {
+    if (impl == Impl::typed) {
+        auto handler = std::make_shared<S6F11TypedHandler>(&device, verbose);
+        secs::protocol::register_typed_handler(
+            router, 6, 11, std::move(handler));
+        return;
+    }
+
+    if (impl == Impl::ceid) {
+        auto extractor =
+            [](const DataMessage &,
+               const Item &body) -> std::optional<CeidDispatcher::Ceid> {
+            const auto ceid = secs::utils::extract_ceid_s6f11_like(body);
+            if (!ceid.has_value()) {
+                return std::nullopt;
+            }
+            return static_cast<CeidDispatcher::Ceid>(ceid.value());
+        };
+
+        auto disp = std::make_shared<CeidDispatcher>(extractor);
+
+        // 示例：注册 4 个 CEID；并给出 default handler（未注册 CEID 时兜底）
+        auto item_handler =
+            [&device, verbose](
+                CeidDispatcher::Ceid ceid,
+                const Item &req_body,
+                const DataMessage &raw)
+                -> asio::awaitable<CeidDispatcher::ItemHandlerResult> {
+            auto req = secs::ii::from_item<S6F11Body>(req_body);
+            if (!req.has_value()) {
+                co_return std::pair{make_error_code(errc::invalid_argument),
+                                    Item::list({})};
+            }
+
+            if (verbose) {
+                std::cout << "[server][ceid] recv S"
+                          << static_cast<int>(raw.stream) << "F"
+                          << static_cast<int>(raw.function)
+                          << " W=" << (raw.w_bit ? 1 : 0) << " SB=0x" << std::hex
+                          << raw.system_bytes << std::dec
+                          << " DATAID=" << req->dataid << " CEID=0x" << std::hex
+                          << static_cast<std::uint16_t>(ceid) << std::dec
+                          << " body_n=" << raw.body.size() << "\n";
+            }
+
+            S6F12Body rsp{};
+            rsp.dataid = req->dataid;
+            rsp.ceid = static_cast<std::uint16_t>(ceid);
+            rsp.data = build_s6f12_data_payload_item(
+                static_cast<std::uint16_t>(ceid), device);
+            co_return std::pair{std::error_code{}, secs::ii::to_item(rsp)};
+        };
+
+        disp->set_item(0x1001, item_handler);
+        disp->set_item(0x1002, item_handler);
+        disp->set_item(0x1003, item_handler);
+        disp->set_item(0x1004, item_handler);
+        disp->set_default_item(item_handler);
+
+        secs::protocol::register_ceid_dispatcher(
+            router, 6, 11, std::move(disp));
+        return;
+    }
+
+    // 默认：raw（手写 decode/encode）
+    router.set(
+        6,
+        11,
+        [&device, verbose](const DataMessage &req)
+            -> asio::awaitable<HandlerResult> {
+            if (verbose) {
+                std::cout << "[server][raw] recv S"
+                          << static_cast<int>(req.stream) << "F"
+                          << static_cast<int>(req.function)
+                          << " W=" << (req.w_bit ? 1 : 0) << " SB=0x" << std::hex
+                          << req.system_bytes << std::dec
+                          << " body_n=" << req.body.size() << "\n";
+            }
+            if (!req.w_bit) {
+                co_return HandlerResult{std::error_code{}, {}};
+            }
+            auto [dec_ec, decoded] = secs::utils::decode_one_item_if_any(
+                bytes_view{req.body.data(), req.body.size()});
+            if (dec_ec || !decoded.has_value()) {
+                co_return HandlerResult{make_error_code(errc::invalid_argument),
+                                        {}};
+            }
+            const auto parsed = parse_ceid_fields(decoded->item);
+            if (!parsed.has_value()) {
+                co_return HandlerResult{make_error_code(errc::invalid_argument),
+                                        {}};
+            }
+            const auto rsp_item = build_s6f12_response_item(
+                parsed->dataid, parsed->ceid, device);
+            auto [enc_ec, body] = secs::utils::encode_item(rsp_item);
+            if (enc_ec) {
+                co_return HandlerResult{enc_ec, {}};
+            }
+            co_return HandlerResult{std::error_code{}, std::move(body)};
+        });
+}
+
 static std::optional<Item> try_decode_body(const DataMessage &msg) {
     if (msg.body.empty()) {
         return Item::list({});
@@ -373,7 +657,7 @@ static void print_reply_summary(const DataMessage &reply) {
 }
 
 static asio::awaitable<int>
-run_client_queries(ProtocolSession &proto) {
+run_client_queries(ProtocolSession &proto, Impl impl) {
     const std::array<std::uint16_t, 4> ceids{
         0x1001, 0x1002, 0x1003, 0x1004,
     };
@@ -383,7 +667,10 @@ run_client_queries(ProtocolSession &proto) {
         const std::uint16_t dataid = static_cast<std::uint16_t>(i + 1);
         const std::uint16_t ceid = ceids[i];
 
-        const auto req_item = build_s6f11_request_item(dataid, ceid);
+        const auto req_item =
+            (impl == Impl::raw)
+                ? build_s6f11_request_item(dataid, ceid)
+                : build_s6f11_request_item_declarative(dataid, ceid);
         auto [enc_ec, req_body] = secs::utils::encode_item(req_item);
         if (enc_ec) {
             std::cout << "[client] encode request failed: " << enc_ec.message() << "\n";
@@ -440,9 +727,10 @@ static ProtocolSession make_protocol_session(secs::secs1::StateMachine &sm,
     return ProtocolSession(sm, device_id, opt);
 }
 
-static asio::awaitable<int> run_loopback(std::uint16_t device_id) {
+static asio::awaitable<int> run_loopback(const Options &opt) {
     auto ex = co_await asio::this_coro::executor;
 
+    const auto device_id = opt.device_id;
     auto [host_link, eq_link] = secs::secs1::MemoryLink::create(ex);
 
     secs::secs1::StateMachine host_sm(host_link, device_id);
@@ -452,37 +740,14 @@ static asio::awaitable<int> run_loopback(std::uint16_t device_id) {
     ProtocolSession eq = make_protocol_session(eq_sm, device_id, true);
 
     DeviceData device{};
-    eq.router().set(
-        6,
-        11,
-        [&device](const DataMessage &req) -> asio::awaitable<HandlerResult> {
-            if (!req.w_bit) {
-                co_return HandlerResult{std::error_code{}, {}};
-            }
-            auto [dec_ec, decoded] = secs::utils::decode_one_item_if_any(
-                bytes_view{req.body.data(), req.body.size()});
-            if (dec_ec || !decoded.has_value()) {
-                co_return HandlerResult{make_error_code(errc::invalid_argument), {}};
-            }
-            const auto parsed = parse_ceid_fields(decoded->item);
-            if (!parsed.has_value()) {
-                co_return HandlerResult{make_error_code(errc::invalid_argument), {}};
-            }
-            const auto rsp_item = build_s6f12_response_item(
-                parsed->dataid, parsed->ceid, device);
-            auto [enc_ec, body] = secs::utils::encode_item(rsp_item);
-            if (enc_ec) {
-                co_return HandlerResult{enc_ec, {}};
-            }
-            co_return HandlerResult{std::error_code{}, std::move(body)};
-        });
+    install_s6f11_handler(eq.router(), opt.impl, device, false);
 
     asio::co_spawn(
         ex,
         [&]() -> asio::awaitable<void> { co_await eq.async_run(); },
         asio::detached);
 
-    const int rc = co_await run_client_queries(host);
+    const int rc = co_await run_client_queries(host, opt.impl);
 
     host.stop();
     eq.stop();
@@ -510,33 +775,7 @@ static asio::awaitable<int> run_server_serial(const Options &opt) {
     ProtocolSession proto = make_protocol_session(sm, opt.device_id, opt.reverse_bit);
 
     DeviceData device{};
-    proto.router().set(
-        6,
-        11,
-        [&device](const DataMessage &req) -> asio::awaitable<HandlerResult> {
-            std::cout << "[server] recv S" << static_cast<int>(req.stream) << "F"
-                      << static_cast<int>(req.function) << " W="
-                      << (req.w_bit ? 1 : 0) << " body_n=" << req.body.size() << "\n";
-            if (!req.w_bit) {
-                co_return HandlerResult{std::error_code{}, {}};
-            }
-            auto [dec_ec, decoded] = secs::utils::decode_one_item_if_any(
-                bytes_view{req.body.data(), req.body.size()});
-            if (dec_ec || !decoded.has_value()) {
-                co_return HandlerResult{make_error_code(errc::invalid_argument), {}};
-            }
-            const auto parsed = parse_ceid_fields(decoded->item);
-            if (!parsed.has_value()) {
-                co_return HandlerResult{make_error_code(errc::invalid_argument), {}};
-            }
-            const auto rsp_item = build_s6f12_response_item(
-                parsed->dataid, parsed->ceid, device);
-            auto [enc_ec, body] = secs::utils::encode_item(rsp_item);
-            if (enc_ec) {
-                co_return HandlerResult{enc_ec, {}};
-            }
-            co_return HandlerResult{std::error_code{}, std::move(body)};
-        });
+    install_s6f11_handler(proto.router(), opt.impl, device, true);
 
     co_await proto.async_run();
     co_return 0;
@@ -559,7 +798,7 @@ static asio::awaitable<int> run_client_serial(const Options &opt) {
     secs::secs1::StateMachine sm(link, opt.device_id);
     ProtocolSession proto = make_protocol_session(sm, opt.device_id, opt.reverse_bit);
 
-    const int rc = co_await run_client_queries(proto);
+    const int rc = co_await run_client_queries(proto, opt.impl);
     proto.stop();
     if (rc == 0) {
         std::cout << "\nPASS\n";
@@ -597,7 +836,7 @@ int main(int argc, char **argv) {
                 break;
             case Role::loopback:
                 std::cout << "=== SECS-I Custom Loopback ===\n\n";
-                rc = co_await run_loopback(opt->device_id);
+                rc = co_await run_loopback(*opt);
                 break;
             }
             ioc.stop();
