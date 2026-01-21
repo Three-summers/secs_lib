@@ -229,7 +229,8 @@ if (ec) {
 | `name: SxFy [W] <Item>.` | 定义消息模板。`W` 表示 W-bit=1。 |
 | `<L>` / `<L <U4 1>>` | List 定义。 |
 | `<A "Text">` | ASCII 字符串。 |
-| `<U4 $VAR>` | **SMLX 变量占位符**。需在运行时注入。 |
+| `<U4 VAR>` | **SMLX 变量占位符**（整值替换）。需在运行时注入。 |
+| `<A "xx ${VAR} yy">` | **SMLX 字符串插值**（仅变量名）。在渲染阶段用变量替换 `${VAR}`。 |
 | `if (msg_name) rsp_name.` | **自动回复规则**。收到 msg_name 自动回 rsp_name。 |
 | `every 10 send msg_name.` | **定时任务**。每 10 秒发送一次。 |
 
@@ -238,7 +239,7 @@ if (ec) {
 ```sml
 // 定义模板
 s1f1: S1F1 W <L>.
-s1f2: S1F2 <L <A $MDLN> <A $SOFTREV>>.
+s1f2: S1F2 <L <A MDLN> <A SOFTREV>>.
 
 // 规则
 if (s1f1) s1f2.
@@ -271,7 +272,7 @@ if (auto ec = rt.load(sml_content); ec) {
 
 ### 3. 变量注入（RenderContext）
 
-SML 模板中的占位符（如 `$MDLN`）需要通过 `RenderContext` 注入值。
+SML 模板中的占位符（如 `MDLN`）需要通过 `RenderContext` 注入值；ASCII 也支持在字符串内使用 `${MDLN}` 插值。
 
 #### 场景 A：主动发送消息时注入变量
 

@@ -2,6 +2,7 @@
 
 #include "secs/core/error.hpp"
 
+#include <cctype>
 #include <new>
 #include <system_error>
 #include <type_traits>
@@ -24,6 +25,8 @@ public:
             return "missing variable";
         case render_errc::type_mismatch:
             return "type mismatch";
+        case render_errc::invalid_interpolation:
+            return "invalid string interpolation";
         }
         return "unknown render error";
     }
@@ -31,11 +34,82 @@ public:
 
 const RenderErrorCategory kRenderErrorCategory{};
 
+[[nodiscard]] bool is_valid_interpolation_var_name(std::string_view name) noexcept {
+    if (name.empty()) {
+        return false;
+    }
+
+    const unsigned char c0 = static_cast<unsigned char>(name.front());
+    if (!(std::isalpha(c0) || name.front() == '_')) {
+        return false;
+    }
+
+    for (const char c : name.substr(1)) {
+        const unsigned char uc = static_cast<unsigned char>(c);
+        if (!(std::isalnum(uc) || c == '_')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] std::error_code expand_ascii_interpolation(std::string_view input,
+                                                         const RenderContext &ctx,
+                                                         std::string &out) {
+    out.clear();
+    out.reserve(input.size());
+
+    std::size_t i = 0;
+    while (i < input.size()) {
+        const auto pos = input.find("${", i);
+        if (pos == std::string_view::npos) {
+            out.append(input.substr(i));
+            break;
+        }
+
+        out.append(input.substr(i, pos - i));
+
+        const auto var_start = pos + 2;
+        const auto end = input.find('}', var_start);
+        if (end == std::string_view::npos) {
+            return make_error_code(render_errc::invalid_interpolation);
+        }
+
+        const auto name = input.substr(var_start, end - var_start);
+        if (!is_valid_interpolation_var_name(name)) {
+            return make_error_code(render_errc::invalid_interpolation);
+        }
+
+        const auto *v = ctx.get(name);
+        if (!v) {
+            return make_error_code(render_errc::missing_variable);
+        }
+        const auto *ascii = v->get_if<secs::ii::ASCII>();
+        if (!ascii) {
+            return make_error_code(render_errc::type_mismatch);
+        }
+        out.append(ascii->value);
+
+        i = end + 1;
+    }
+    return {};
+}
+
 [[nodiscard]] std::error_code render_ascii(const TplASCII &a,
                                            const RenderContext &ctx,
                                            secs::ii::Item &out) {
     if (const auto *s = std::get_if<std::string>(&a.value)) {
-        out = secs::ii::Item::ascii(*s);
+        if (s->find("${") == std::string::npos) {
+            out = secs::ii::Item::ascii(*s);
+            return {};
+        }
+
+        std::string expanded;
+        const auto ec = expand_ascii_interpolation(*s, ctx, expanded);
+        if (ec) {
+            return ec;
+        }
+        out = secs::ii::Item::ascii(std::move(expanded));
         return {};
     }
 

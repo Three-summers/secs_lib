@@ -388,6 +388,119 @@ void test_smlx_render_ascii_placeholder() {
     TEST_EXPECT_EQ(ascii->value, std::string("WET.01"));
 }
 
+void test_smlx_render_ascii_string_interpolation_single_var() {
+    auto result = parse_sml(R"(
+    m: S1F1 <A "MDLN=${MDLN}">.
+  )");
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.messages.size(), 1u);
+
+    RenderContext ctx;
+    ctx.set("MDLN", Item::ascii("WET.01"));
+
+    Item rendered{List{}};
+    TEST_EXPECT_OK(render_item(result.document.messages[0].item, ctx, rendered));
+
+    auto *ascii = rendered.get_if<ASCII>();
+    TEST_EXPECT(ascii != nullptr);
+    TEST_EXPECT_EQ(ascii->value, std::string("MDLN=WET.01"));
+}
+
+void test_smlx_render_ascii_string_interpolation_multiple_and_repeated_vars() {
+    auto result = parse_sml(R"(
+    m: S1F1 <A "X=${X},Y=${Y},X2=${X}">.
+  )");
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.messages.size(), 1u);
+
+    RenderContext ctx;
+    ctx.set("X", Item::ascii("1"));
+    ctx.set("Y", Item::ascii("2"));
+
+    Item rendered{List{}};
+    TEST_EXPECT_OK(render_item(result.document.messages[0].item, ctx, rendered));
+
+    auto *ascii = rendered.get_if<ASCII>();
+    TEST_EXPECT(ascii != nullptr);
+    TEST_EXPECT_EQ(ascii->value, std::string("X=1,Y=2,X2=1"));
+}
+
+void test_smlx_render_ascii_string_interpolation_missing_variable_is_error() {
+    auto result = parse_sml(R"(
+    m: S1F1 <A "X=${X}">.
+  )");
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.messages.size(), 1u);
+
+    RenderContext ctx{};
+    Item rendered{List{}};
+    const auto ec = render_item(result.document.messages[0].item, ctx, rendered);
+    TEST_EXPECT_EQ(ec, make_error_code(render_errc::missing_variable));
+}
+
+void test_smlx_render_ascii_string_interpolation_type_mismatch_is_error() {
+    auto result = parse_sml(R"(
+    m: S1F1 <A "X=${X}">.
+  )");
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.messages.size(), 1u);
+
+    RenderContext ctx{};
+    ctx.set("X", Item::u2(std::vector<std::uint16_t>{1}));
+
+    Item rendered{List{}};
+    const auto ec = render_item(result.document.messages[0].item, ctx, rendered);
+    TEST_EXPECT_EQ(ec, make_error_code(render_errc::type_mismatch));
+}
+
+void test_smlx_render_ascii_string_interpolation_invalid_is_error() {
+    // 未闭合 `}`
+    {
+        auto result = parse_sml(R"(
+        m: S1F1 <A "X=${X">.
+      )");
+        TEST_EXPECT_OK(result.ec);
+
+        RenderContext ctx{};
+        ctx.set("X", Item::ascii("1"));
+
+        Item rendered{List{}};
+        const auto ec =
+            render_item(result.document.messages[0].item, ctx, rendered);
+        TEST_EXPECT_EQ(ec, make_error_code(render_errc::invalid_interpolation));
+    }
+
+    // 空变量名 `${}`
+    {
+        auto result = parse_sml(R"(
+        m: S1F1 <A "X=${}">.
+      )");
+        TEST_EXPECT_OK(result.ec);
+
+        RenderContext ctx{};
+        Item rendered{List{}};
+        const auto ec =
+            render_item(result.document.messages[0].item, ctx, rendered);
+        TEST_EXPECT_EQ(ec, make_error_code(render_errc::invalid_interpolation));
+    }
+
+    // 非法变量名（包含 '-'）
+    {
+        auto result = parse_sml(R"(
+        m: S1F1 <A "X=${X-Y}">.
+      )");
+        TEST_EXPECT_OK(result.ec);
+
+        RenderContext ctx{};
+        ctx.set("X", Item::ascii("1"));
+
+        Item rendered{List{}};
+        const auto ec =
+            render_item(result.document.messages[0].item, ctx, rendered);
+        TEST_EXPECT_EQ(ec, make_error_code(render_errc::invalid_interpolation));
+    }
+}
+
 void test_smlx_render_numeric_placeholder_expands_values() {
     auto result = parse_sml(R"(
     m: S1F1 <U2 1 SVIDS 3>.
@@ -652,6 +765,9 @@ void test_render_error_category_messages_more_cases() {
     TEST_EXPECT_EQ(
         std::string(cat.message(static_cast<int>(render_errc::type_mismatch))),
         std::string("type mismatch"));
+    TEST_EXPECT_EQ(std::string(cat.message(static_cast<int>(
+                       render_errc::invalid_interpolation))),
+                   std::string("invalid string interpolation"));
     TEST_EXPECT_EQ(std::string(cat.message(12345)),
                    std::string("unknown render error"));
 }
@@ -1676,6 +1792,11 @@ int main() {
     test_parser_capture_pattern_list_size_hint_bracket_errors();
     test_parser_capture_pattern_binary_out_of_range_is_error();
     test_smlx_render_ascii_placeholder();
+    test_smlx_render_ascii_string_interpolation_single_var();
+    test_smlx_render_ascii_string_interpolation_multiple_and_repeated_vars();
+    test_smlx_render_ascii_string_interpolation_missing_variable_is_error();
+    test_smlx_render_ascii_string_interpolation_type_mismatch_is_error();
+    test_smlx_render_ascii_string_interpolation_invalid_is_error();
     test_smlx_render_numeric_placeholder_expands_values();
     test_smlx_render_binary_placeholder_expands_values();
     test_smlx_render_boolean_placeholder_expands_values();

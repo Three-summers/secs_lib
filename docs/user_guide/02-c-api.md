@@ -190,7 +190,7 @@ secs_sml_runtime_create(&rt);
 // 可以从文件读，也可以直接加载字符串
 const char* sml_src = 
     "s1f1: S1F1 W <L>."
-    "s1f2: S1F2 <L <A $MDLN> >."
+    "s1f2: S1F2 <L <A MDLN> >."
     "if (s1f1) s1f2.";
     
 secs_sml_runtime_load_cstr(rt, sml_src);
@@ -210,7 +210,7 @@ secs_sml_runtime_destroy(rt);
 
 ### 3. SMLX 变量注入 (RenderContext)
 
-如果 SML 模板中包含变量（如 `$MDLN`），你需要创建一个 Context 并注入值，这在 C API 中也是支持的。
+如果 SML 模板中包含变量（如 `MDLN`），你需要创建一个 Context 并注入值，这在 C API 中也是支持的；ASCII 也支持在字符串内使用 `${MDLN}` 插值。
 
 **注意：** 目前 `set_sml_default_handler` 使用的是无状态自动回复。如果你需要注入变量，建议使用 `secs_sml_runtime_match_response` 手动匹配并渲染。
 

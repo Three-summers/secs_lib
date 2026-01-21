@@ -17,6 +17,7 @@ enum class render_errc : int {
     ok = 0,
     missing_variable = 1, // 变量未提供
     type_mismatch = 2,    // 变量类型与占位符位置不匹配
+    invalid_interpolation = 3, // 字符串插值语法不合法（仅用于 ASCII 字面量）
 };
 
 const std::error_category &render_error_category() noexcept;
@@ -85,4 +86,3 @@ namespace std {
 template <>
 struct is_error_code_enum<secs::sml::render_errc> : true_type {};
 } // namespace std
-
