@@ -2907,12 +2907,14 @@ secs_error_t secs_sml_runtime_match_response_with_context(
 
         secs::ii::Item decoded{secs::ii::List{}};
         std::size_t consumed = 0;
-        auto dec_ec = secs::ii::decode_one(
-            bytes_view{reinterpret_cast<const byte *>(body_bytes), body_n},
-            decoded,
-            consumed);
-        if (dec_ec) {
-            return from_error_code(dec_ec);
+        if (body_n != 0) {
+            auto dec_ec = secs::ii::decode_one(
+                bytes_view{reinterpret_cast<const byte *>(body_bytes), body_n},
+                decoded,
+                consumed);
+            if (dec_ec) {
+                return from_error_code(dec_ec);
+            }
         }
 
         secs::sml::RenderContext empty_ctx{};
@@ -2956,12 +2958,14 @@ secs_error_t secs_sml_runtime_match_response_with_capture(
 
         secs::ii::Item decoded{secs::ii::List{}};
         std::size_t consumed = 0;
-        auto dec_ec = secs::ii::decode_one(
-            bytes_view{reinterpret_cast<const byte *>(body_bytes), body_n},
-            decoded,
-            consumed);
-        if (dec_ec) {
-            return from_error_code(dec_ec);
+        if (body_n != 0) {
+            auto dec_ec = secs::ii::decode_one(
+                bytes_view{reinterpret_cast<const byte *>(body_bytes), body_n},
+                decoded,
+                consumed);
+            if (dec_ec) {
+                return from_error_code(dec_ec);
+            }
         }
 
         secs::sml::RenderContext empty_ctx{};
@@ -3022,12 +3026,14 @@ secs_error_t secs_sml_runtime_match_response_with_trace(
 
         secs::ii::Item decoded{secs::ii::List{}};
         std::size_t consumed = 0;
-        auto dec_ec = secs::ii::decode_one(
-            bytes_view{reinterpret_cast<const byte *>(body_bytes), body_n},
-            decoded,
-            consumed);
-        if (dec_ec) {
-            return from_error_code(dec_ec);
+        if (body_n != 0) {
+            auto dec_ec = secs::ii::decode_one(
+                bytes_view{reinterpret_cast<const byte *>(body_bytes), body_n},
+                decoded,
+                consumed);
+            if (dec_ec) {
+                return from_error_code(dec_ec);
+            }
         }
 
         secs::sml::RenderContext empty_ctx{};
@@ -4229,10 +4235,12 @@ make_protocol_raw_handler(secs_protocol_handler_fn cb, void *user_data) {
 
             secs::ii::Item decoded{secs::ii::List{}};
             std::size_t consumed = 0;
-            const auto dec_ec = secs::ii::decode_one(
-                bytes_view{msg.body.data(), msg.body.size()}, decoded, consumed);
-            if (dec_ec) {
-                co_return secs::protocol::HandlerResult{dec_ec, {}};
+            if (!msg.body.empty()) {
+                const auto dec_ec = secs::ii::decode_one(
+                    bytes_view{msg.body.data(), msg.body.size()}, decoded, consumed);
+                if (dec_ec) {
+                    co_return secs::protocol::HandlerResult{dec_ec, {}};
+                }
             }
 
             // Data Capture：允许在条件里用 `<pattern>` 抓取 `$NAME`，并把捕获结果

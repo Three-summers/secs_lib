@@ -3521,6 +3521,74 @@ static void test_sml_runtime_match_response_with_context(void) {
     secs_sml_runtime_destroy(rt);
 }
 
+static void test_sml_runtime_match_response_empty_body(void) {
+    secs_sml_runtime_t *rt = NULL;
+    expect_ok("secs_sml_runtime_create(match empty body)",
+              secs_sml_runtime_create(&rt));
+
+    const char *sml = "rsp: S1F2 <L>.\n"
+                      "if (S1F1) rsp.\n";
+    expect_ok("secs_sml_runtime_load(match empty body)",
+              secs_sml_runtime_load(rt, sml, strlen(sml)));
+
+    /* body_bytes=NULL 且 body_n=0：兼容部分设备/模拟器发送“空 bytes” */
+    {
+        char *out_name = NULL;
+        expect_ok("secs_sml_runtime_match_response_with_context(empty body)",
+                  secs_sml_runtime_match_response_with_context(
+                      rt, 1, 1, NULL, 0, NULL, &out_name));
+        if (!out_name || strcmp(out_name, "rsp") != 0) {
+            fprintf(stderr,
+                    "FAIL: match_response_with_context(empty body) expected rsp\n");
+            ++g_failures;
+        }
+        secs_free(out_name);
+    }
+
+    {
+        char *out_name = NULL;
+        secs_sml_render_context_t *captures = NULL;
+        expect_ok("secs_sml_runtime_match_response_with_capture(empty body)",
+                  secs_sml_runtime_match_response_with_capture(
+                      rt, 1, 1, NULL, 0, NULL, &out_name, &captures));
+        if (!out_name || strcmp(out_name, "rsp") != 0) {
+            fprintf(stderr,
+                    "FAIL: match_response_with_capture(empty body) expected rsp\n");
+            ++g_failures;
+        }
+        if (!captures) {
+            fprintf(stderr,
+                    "FAIL: match_response_with_capture(empty body) expected captures ctx\n");
+            ++g_failures;
+        }
+        secs_sml_render_context_destroy(captures);
+        secs_free(out_name);
+    }
+
+    {
+        char *out_name = NULL;
+        secs_sml_match_trace_t *traces = NULL;
+        size_t trace_n = 0;
+        expect_ok("secs_sml_runtime_match_response_with_trace(empty body)",
+                  secs_sml_runtime_match_response_with_trace(
+                      rt, 1, 1, NULL, 0, NULL, &out_name, &traces, &trace_n));
+        if (!out_name || strcmp(out_name, "rsp") != 0) {
+            fprintf(stderr,
+                    "FAIL: match_response_with_trace(empty body) expected rsp\n");
+            ++g_failures;
+        }
+        if (traces || trace_n != 0) {
+            fprintf(stderr,
+                    "FAIL: match_response_with_trace(empty body) expected empty traces\n");
+            ++g_failures;
+            secs_sml_match_traces_free(traces, trace_n);
+        }
+        secs_free(out_name);
+    }
+
+    secs_sml_runtime_destroy(rt);
+}
+
 static void test_sml_runtime_match_response_with_trace(void) {
     enum {
         REASON_STREAM_FUNCTION_MISMATCH = 0,
@@ -5524,6 +5592,27 @@ static void test_hsms_protocol_loopback(void) {
             secs_data_message_free(&reply);
         }
 
+        /* 兼容：部分设备/模拟器会发送“空 bytes”的 body（body_n=0） */
+        {
+            secs_data_message_t reply;
+            memset(&reply, 0, sizeof(reply));
+            expect_ok("secs_protocol_session_request(sml s20f1 empty bytes)",
+                      secs_protocol_session_request(
+                          client_proto, 20, 1, NULL, 0, 1000, &reply));
+            if (reply.stream != 20u || reply.function != 2u || reply.w_bit != 0) {
+                fprintf(stderr,
+                        "FAIL: sml s20f1(empty bytes) reply header mismatch\n");
+                ++g_failures;
+            }
+            if (reply.body_n != exp20_n || (exp20_n != 0u && !reply.body) ||
+                (exp20_n != 0u && memcmp(reply.body, exp20, exp20_n) != 0)) {
+                fprintf(stderr,
+                        "FAIL: sml s20f1(empty bytes) reply body mismatch\n");
+                ++g_failures;
+            }
+            secs_data_message_free(&reply);
+        }
+
         /* S21F1 -> S21F2 */
         {
             secs_data_message_t reply;
@@ -5584,7 +5673,7 @@ static void test_hsms_protocol_loopback(void) {
         secs_sml_runtime_destroy(rt);
         rt = NULL;
 
-        /* request body：空 List（必须是有效 SECS-II 编码，不能是空 bytes） */
+        /* request body：空 List（推荐发送有效 SECS-II 编码；兼容模式下空 bytes 也会视为 <L[0]>） */
         secs_ii_item_t *req_item = NULL;
         expect_ok("secs_ii_item_create_list(sml stream req)",
                   secs_ii_item_create_list(&req_item));
@@ -6349,6 +6438,7 @@ int main(void) {
     test_sml_render_context_lifecycle();
     test_sml_runtime_encode_message_body_with_context();
     test_sml_runtime_match_response_with_context();
+    test_sml_runtime_match_response_empty_body();
     test_sml_runtime_match_response_with_capture();
     test_sml_runtime_match_response_with_trace();
     test_sml_runtime_match_response_with_trace_empty_rules();
