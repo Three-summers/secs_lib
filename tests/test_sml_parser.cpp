@@ -438,7 +438,7 @@ void test_smlx_render_ascii_string_interpolation_missing_variable_is_error() {
     TEST_EXPECT_EQ(ec, make_error_code(render_errc::missing_variable));
 }
 
-void test_smlx_render_ascii_string_interpolation_type_mismatch_is_error() {
+void test_smlx_render_ascii_string_interpolation_numeric_is_stringized() {
     auto result = parse_sml(R"(
     m: S1F1 <A "X=${X}">.
   )");
@@ -449,8 +449,11 @@ void test_smlx_render_ascii_string_interpolation_type_mismatch_is_error() {
     ctx.set("X", Item::u2(std::vector<std::uint16_t>{1}));
 
     Item rendered{List{}};
-    const auto ec = render_item(result.document.messages[0].item, ctx, rendered);
-    TEST_EXPECT_EQ(ec, make_error_code(render_errc::type_mismatch));
+    TEST_EXPECT_OK(render_item(result.document.messages[0].item, ctx, rendered));
+
+    auto *ascii = rendered.get_if<ASCII>();
+    TEST_EXPECT(ascii != nullptr);
+    TEST_EXPECT_EQ(ascii->value, std::string("X=1"));
 }
 
 void test_smlx_render_ascii_string_interpolation_invalid_is_error() {
@@ -1795,7 +1798,7 @@ int main() {
     test_smlx_render_ascii_string_interpolation_single_var();
     test_smlx_render_ascii_string_interpolation_multiple_and_repeated_vars();
     test_smlx_render_ascii_string_interpolation_missing_variable_is_error();
-    test_smlx_render_ascii_string_interpolation_type_mismatch_is_error();
+    test_smlx_render_ascii_string_interpolation_numeric_is_stringized();
     test_smlx_render_ascii_string_interpolation_invalid_is_error();
     test_smlx_render_numeric_placeholder_expands_values();
     test_smlx_render_binary_placeholder_expands_values();

@@ -316,6 +316,42 @@ static secs_error_t fill_context_for_response(const char *response_name,
                                    ctx, "UPTIME_SECONDS", d->uptime_seconds))) {
             return err;
         }
+        /* SMLX：演示占位符混写与字符串插值（SVIDS/BYTES/BOOLS） */
+        {
+            const uint16_t svids[] = {100, 200};
+            secs_ii_item_t *it = NULL;
+            err = secs_ii_item_create_u2(svids, 2, &it);
+            if (!secs_error_is_ok(err)) {
+                secs_ii_item_destroy(it);
+                return err;
+            }
+            err = secs_sml_render_context_set(ctx, "SVIDS", it);
+            secs_ii_item_destroy(it);
+            if (!secs_error_is_ok(err)) {
+                return err;
+            }
+        }
+        {
+            const uint8_t bytes[] = {0x02, 0x03};
+            if (!secs_error_is_ok(err = secs_sml_render_context_set_binary(
+                                       ctx, "BYTES", bytes, sizeof(bytes)))) {
+                return err;
+            }
+        }
+        {
+            const uint8_t bools[] = {1, 0, 1};
+            secs_ii_item_t *it = NULL;
+            err = secs_ii_item_create_boolean(bools, 3, &it);
+            if (!secs_error_is_ok(err)) {
+                secs_ii_item_destroy(it);
+                return err;
+            }
+            err = secs_sml_render_context_set(ctx, "BOOLS", it);
+            secs_ii_item_destroy(it);
+            if (!secs_error_is_ok(err)) {
+                return err;
+            }
+        }
         return err;
     }
 

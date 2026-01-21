@@ -320,6 +320,13 @@ static void fill_context_for_response(std::string_view response_name,
         ctx.set("DEVICE_NAME", Item::ascii(d.device_name));
         ctx.set("STATUS_CODE", Item::u1({d.status_code}));
         ctx.set("UPTIME_SECONDS", Item::u4({d.uptime_seconds}));
+        ctx.set("SVIDS", Item::u2(std::vector<std::uint16_t>{100, 200}));
+        ctx.set("BYTES",
+                Item::binary(std::vector<secs::ii::byte>{
+                    static_cast<secs::ii::byte>(0x02),
+                    static_cast<secs::ii::byte>(0x03),
+                }));
+        ctx.set("BOOLS", Item::boolean(std::vector<bool>{true, false, true}));
         return;
     }
 

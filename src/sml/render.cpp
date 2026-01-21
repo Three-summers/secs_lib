@@ -3,6 +3,8 @@
 #include "secs/core/error.hpp"
 
 #include <cctype>
+#include <charconv>
+#include <limits>
 #include <new>
 #include <system_error>
 #include <type_traits>
@@ -10,6 +12,146 @@
 namespace secs::sml {
 
 namespace {
+
+template <class T>
+[[nodiscard]] bool append_integer_(std::string &out, T v) {
+    static_assert(std::is_integral_v<T>, "T must be integral");
+
+    char buf[64]{};
+    auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), v, 10);
+    if (ec != std::errc{}) {
+        return false;
+    }
+    out.append(buf, static_cast<std::size_t>(ptr - buf));
+    return true;
+}
+
+template <class T>
+[[nodiscard]] bool append_float_(std::string &out, T v) {
+    static_assert(std::is_floating_point_v<T>, "T must be floating point");
+
+    char buf[128]{};
+    auto [ptr, ec] = std::to_chars(buf,
+                                   buf + sizeof(buf),
+                                   v,
+                                   std::chars_format::general,
+                                   std::numeric_limits<T>::max_digits10);
+    if (ec != std::errc{}) {
+        return false;
+    }
+    out.append(buf, static_cast<std::size_t>(ptr - buf));
+    return true;
+}
+
+template <class T, class AppendOneFn>
+[[nodiscard]] bool append_joined_(std::string &out,
+                                  const std::vector<T> &values,
+                                  AppendOneFn &&append_one) {
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            out.push_back(' ');
+        }
+        if (!append_one(out, values[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool append_hex_byte_(std::string &out, secs::ii::byte b) {
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    const auto u = static_cast<unsigned int>(b);
+    out.push_back(kHex[(u >> 4) & 0x0F]);
+    out.push_back(kHex[u & 0x0F]);
+    return true;
+}
+
+[[nodiscard]] bool append_item_as_ascii_(std::string &out,
+                                        const secs::ii::Item &item) {
+    return std::visit(
+        [&](const auto &v) -> bool {
+            using T = std::decay_t<decltype(v)>;
+
+            if constexpr (std::is_same_v<T, secs::ii::List>) {
+                return false;
+            } else if constexpr (std::is_same_v<T, secs::ii::ASCII>) {
+                out.append(v.value);
+                return true;
+            } else if constexpr (std::is_same_v<T, secs::ii::Binary>) {
+                for (std::size_t i = 0; i < v.value.size(); ++i) {
+                    if (i != 0) {
+                        out.push_back(' ');
+                    }
+                    out.append("0x");
+                    if (!append_hex_byte_(out, v.value[i])) {
+                        return false;
+                    }
+                }
+                return true;
+            } else if constexpr (std::is_same_v<T, secs::ii::Boolean>) {
+                for (std::size_t i = 0; i < v.values.size(); ++i) {
+                    if (i != 0) {
+                        out.push_back(' ');
+                    }
+                    out.push_back(v.values[i] ? '1' : '0');
+                }
+                return true;
+            } else if constexpr (std::is_same_v<T, secs::ii::I1>) {
+                return append_joined_(
+                    out,
+                    v.values,
+                    [](std::string &o, std::int8_t x) { return append_integer_(o, x); });
+            } else if constexpr (std::is_same_v<T, secs::ii::I2>) {
+                return append_joined_(
+                    out,
+                    v.values,
+                    [](std::string &o, std::int16_t x) { return append_integer_(o, x); });
+            } else if constexpr (std::is_same_v<T, secs::ii::I4>) {
+                return append_joined_(
+                    out,
+                    v.values,
+                    [](std::string &o, std::int32_t x) { return append_integer_(o, x); });
+            } else if constexpr (std::is_same_v<T, secs::ii::I8>) {
+                return append_joined_(
+                    out,
+                    v.values,
+                    [](std::string &o, std::int64_t x) { return append_integer_(o, x); });
+            } else if constexpr (std::is_same_v<T, secs::ii::U1>) {
+                return append_joined_(
+                    out,
+                    v.values,
+                    [](std::string &o, std::uint8_t x) { return append_integer_(o, x); });
+            } else if constexpr (std::is_same_v<T, secs::ii::U2>) {
+                return append_joined_(
+                    out,
+                    v.values,
+                    [](std::string &o, std::uint16_t x) { return append_integer_(o, x); });
+            } else if constexpr (std::is_same_v<T, secs::ii::U4>) {
+                return append_joined_(
+                    out,
+                    v.values,
+                    [](std::string &o, std::uint32_t x) { return append_integer_(o, x); });
+            } else if constexpr (std::is_same_v<T, secs::ii::U8>) {
+                return append_joined_(
+                    out,
+                    v.values,
+                    [](std::string &o, std::uint64_t x) { return append_integer_(o, x); });
+            } else if constexpr (std::is_same_v<T, secs::ii::F4>) {
+                return append_joined_(
+                    out,
+                    v.values,
+                    [](std::string &o, float x) { return append_float_(o, x); });
+            } else if constexpr (std::is_same_v<T, secs::ii::F8>) {
+                return append_joined_(
+                    out,
+                    v.values,
+                    [](std::string &o, double x) { return append_float_(o, x); });
+            } else {
+                return false;
+            }
+        },
+        item.storage());
+}
 
 class RenderErrorCategory final : public std::error_category {
 public:
@@ -84,11 +226,9 @@ const RenderErrorCategory kRenderErrorCategory{};
         if (!v) {
             return make_error_code(render_errc::missing_variable);
         }
-        const auto *ascii = v->get_if<secs::ii::ASCII>();
-        if (!ascii) {
+        if (!append_item_as_ascii_(out, *v)) {
             return make_error_code(render_errc::type_mismatch);
         }
-        out.append(ascii->value);
 
         i = end + 1;
     }
