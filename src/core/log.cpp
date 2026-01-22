@@ -1,6 +1,10 @@
 #include "secs/core/log.hpp"
 
+#include "core/spdlog_logger.hpp"
+
 #include <spdlog/spdlog.h>
+
+#include <mutex>
 
 namespace secs::core {
 namespace {
@@ -48,12 +52,65 @@ namespace {
 
 } // namespace
 
-void set_log_level(LogLevel level) noexcept {
-    // spdlog 可能被业务侧额外配置；这里仅做最小的全局级别设置。
-    spdlog::set_level(to_spdlog_level(level));
+namespace {
+
+spdlog::logger *ensure_secs_logger_raw_() noexcept {
+    static std::shared_ptr<spdlog::logger> logger;
+    static std::once_flag once;
+
+    try {
+        std::call_once(once, []() noexcept {
+            try {
+                auto base = spdlog::default_logger();
+                if (!base) {
+                    return;
+                }
+                auto l = std::make_shared<spdlog::logger>("secs",
+                                                          base->sinks().begin(),
+                                                          base->sinks().end());
+                l->set_level(base->level());
+                logger = std::move(l);
+            } catch (...) {
+                // 兜底：创建失败时保持为空，调用方会降级到 default logger。
+            }
+        });
+    } catch (...) {
+    }
+
+    return logger ? logger.get() : nullptr;
 }
 
-LogLevel log_level() noexcept { return from_spdlog_level(spdlog::get_level()); }
+} // namespace
+
+spdlog::logger *spdlog_logger_raw() noexcept {
+    if (auto *logger = ensure_secs_logger_raw_()) {
+        return logger;
+    }
+    return spdlog::default_logger_raw();
+}
+
+void set_log_level(LogLevel level) noexcept {
+    // 仅调整库内命名 logger，避免污染宿主进程的全局日志策略。
+    auto *logger = ensure_secs_logger_raw_();
+    if (!logger) {
+        return;
+    }
+    try {
+        logger->set_level(to_spdlog_level(level));
+    } catch (...) {
+    }
+}
+
+LogLevel log_level() noexcept {
+    auto *logger = ensure_secs_logger_raw_();
+    if (!logger) {
+        return LogLevel::off;
+    }
+    try {
+        return from_spdlog_level(logger->level());
+    } catch (...) {
+        return LogLevel::off;
+    }
+}
 
 } // namespace secs::core
-

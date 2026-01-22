@@ -9,7 +9,7 @@ namespace secs::core {
  *
  * 说明：
  * - 本库内部日志使用 spdlog，但不把 spdlog 类型暴露到 public headers；
- * - 业务侧可通过 set_log_level 调整全局日志级别。
+ * - 业务侧可通过 set_log_level 调整库内命名 logger（secs）的日志级别。
  */
 enum class LogLevel : std::uint8_t {
     trace = 0,
@@ -25,4 +25,3 @@ void set_log_level(LogLevel level) noexcept;
 [[nodiscard]] LogLevel log_level() noexcept;
 
 } // namespace secs::core
-

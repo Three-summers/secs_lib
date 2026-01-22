@@ -3,15 +3,18 @@
 #include "secs/core/error.hpp"
 #include "secs/hsms/timer.hpp"
 
+#include "core/spdlog_logger.hpp"
+
 #include <asio/as_tuple.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
+#include <asio/dispatch.hpp>
 #include <asio/steady_timer.hpp>
+#include <asio/strand.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 
 #include <algorithm>
-#include <spdlog/spdlog.h>
 #include <vector>
 
 namespace secs::hsms {
@@ -53,9 +56,86 @@ constexpr std::uint8_t kRspReject = 1;
 // 置为已完成（避免等待方无意义阻塞）。 该事件会在 start_reader_() 时
 // reset，并在 reader_loop_ 退出时 set。
 Session::Session(asio::any_io_executor ex, SessionOptions options)
-    : executor_(ex), options_(options),
-      connection_(ex, ConnectionOptions{.t8 = options.t8}) {
+    : executor_(asio::make_strand(ex)),
+      options_(options),
+      connection_(executor_, ConnectionOptions{.t8 = options.t8}) {
     reader_stopped_event_.set();
+}
+
+std::uint32_t Session::normalized_system_bytes_max_() const noexcept {
+    const auto max_value = options_.system_bytes_max_value;
+    if (max_value == 0U) {
+        return std::numeric_limits<std::uint32_t>::max();
+    }
+    return max_value;
+}
+
+bool Session::is_system_bytes_in_flight_(std::uint32_t sb) const noexcept {
+    if (sb == 0U) {
+        return true;
+    }
+    try {
+        std::lock_guard lk(system_bytes_mu_);
+        return system_bytes_in_flight_.find(sb) != system_bytes_in_flight_.end();
+    } catch (...) {
+        // best-effort：异常路径下不阻断分配，但可能降低“在飞唯一”保证强度。
+        return false;
+    }
+}
+
+bool Session::try_mark_system_bytes_in_flight_(std::uint32_t sb) noexcept {
+    if (sb == 0U) {
+        return false;
+    }
+    try {
+        std::lock_guard lk(system_bytes_mu_);
+        return system_bytes_in_flight_.insert(sb).second;
+    } catch (...) {
+        return false;
+    }
+}
+
+void Session::unmark_system_bytes_in_flight_(std::uint32_t sb) noexcept {
+    if (sb == 0U) {
+        return;
+    }
+    try {
+        std::lock_guard lk(system_bytes_mu_);
+        (void)system_bytes_in_flight_.erase(sb);
+    } catch (...) {
+    }
+}
+
+void Session::clear_system_bytes_in_flight_() noexcept {
+    try {
+        std::lock_guard lk(system_bytes_mu_);
+        system_bytes_in_flight_.clear();
+    } catch (...) {
+    }
+}
+
+std::uint32_t Session::allocate_system_bytes() noexcept {
+    // 目标：保证“在飞唯一”且永不返回 0（0 作为保留值）。
+    const auto max_value = normalized_system_bytes_max_();
+    if (max_value == 0U) {
+        return 0U;
+    }
+
+    const auto max_pending =
+        options_.max_pending_requests == 0 ? std::size_t{1}
+                                           : options_.max_pending_requests;
+    const std::size_t max_attempts = std::min<std::size_t>(
+        static_cast<std::size_t>(max_value), max_pending + 2U);
+
+    for (std::size_t i = 0; i < max_attempts; ++i) {
+        const auto raw = system_bytes_.fetch_add(1U);
+        const auto sb =
+            static_cast<std::uint32_t>((raw % max_value) + 1U); // 1..max
+        if (!is_system_bytes_in_flight_(sb)) {
+            return sb;
+        }
+    }
+    return 0U;
 }
 
 void Session::reset_state_() noexcept {
@@ -69,6 +149,7 @@ void Session::reset_state_() noexcept {
 
     inbound_data_.clear();
     pending_.clear();
+    clear_system_bytes_in_flight_();
 }
 
 void Session::set_selected_() noexcept {
@@ -79,7 +160,9 @@ void Session::set_selected_() noexcept {
     connection_.enable_data_writes();
     const auto gen = selected_generation_.fetch_add(1U) + 1U;
     selected_event_.set();
-    SPDLOG_DEBUG("hsms selected: generation={}", gen);
+    SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
+                        "hsms selected: generation={}",
+                        gen);
 
     if (options_.linktest_interval != core::duration{}) {
         try {
@@ -113,11 +196,14 @@ void Session::set_not_selected_() noexcept {
     inbound_event_.reset();
 
     cancel_pending_data_(core::make_error_code(core::errc::cancelled));
-    SPDLOG_DEBUG("hsms not-selected");
+    SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(), "hsms not-selected");
 }
 
 void Session::on_disconnected_(std::error_code reason) noexcept {
-    SPDLOG_DEBUG("hsms disconnected: ec={}({})", reason.value(), reason.message());
+    SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
+                        "hsms disconnected: ec={}({})",
+                        reason.value(),
+                        reason.message());
     state_ = SessionState::disconnected;
     disconnected_reason_ = reason;
     connection_.disable_data_writes(reason);
@@ -135,6 +221,7 @@ void Session::on_disconnected_(std::error_code reason) noexcept {
         pending->ready.cancel();
     }
     pending_.clear();
+    clear_system_bytes_in_flight_();
     inbound_data_.clear();
 }
 
@@ -184,17 +271,29 @@ void Session::emit_control_event_(ControlDirection direction,
 }
 
 void Session::stop() noexcept {
-    stop_requested_ = true;
-    connection_.cancel_and_close();
+    // 约束：core::Event/Connection 默认假设在同一 executor/strand 语境；
+    // stop() 通过 dispatch 收敛到 Session 自身 executor_，避免跨线程直接 cancel waiters。
+    try {
+        asio::dispatch(executor_, [this]() noexcept {
+            if (stop_requested_) {
+                return;
+            }
+            stop_requested_ = true;
+            connection_.cancel_and_close();
 
-    // 若正在被动 accept，关闭 acceptor 以打断 async_accept（best-effort）。
-    if (passive_acceptor_) {
-        std::error_code ignore{};
-        passive_acceptor_->close(ignore);
+            // 若正在被动 accept，关闭 acceptor 以打断 async_accept（best-effort）。
+            if (passive_acceptor_) {
+                std::error_code ignore{};
+                passive_acceptor_->close(ignore);
+            }
+
+            SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
+                                "hsms stop requested");
+            on_disconnected_(core::make_error_code(core::errc::cancelled));
+        });
+    } catch (...) {
+        // best-effort：dispatch/post 失败通常意味着资源不足，此处不抛异常。
     }
-
-    SPDLOG_DEBUG("hsms stop requested");
-    on_disconnected_(core::make_error_code(core::errc::cancelled));
 }
 
 void Session::start_reader_() {
@@ -433,6 +532,18 @@ asio::awaitable<void> Session::linktest_loop_(std::uint64_t generation) {
 
 asio::awaitable<std::error_code>
 Session::async_wait_reader_stopped(std::optional<core::duration> timeout) {
+    const auto ex = co_await asio::this_coro::executor;
+    if (ex != executor_) {
+        try {
+            co_return co_await asio::co_spawn(
+                executor_,
+                async_wait_reader_stopped(timeout),
+                asio::use_awaitable);
+        } catch (...) {
+            co_return core::make_error_code(core::errc::out_of_memory);
+        }
+    }
+
     co_return co_await reader_stopped_event_.async_wait(timeout);
 }
 
@@ -469,11 +580,12 @@ void Session::cancel_pending_data_(std::error_code reason) noexcept {
 
     for (const auto sb : to_erase) {
         pending_.erase(sb);
+        unmark_system_bytes_in_flight_(sb);
     }
 }
 
 asio::awaitable<std::pair<std::error_code, Message>>
-Session::async_control_transaction_(const Message &req,
+Session::async_control_transaction_(Message req,
                                     SType expected_rsp,
                                     core::duration timeout) {
     // 控制事务：把请求登记到 pending_，由 reader_loop_ 收到响应后唤醒。
@@ -485,13 +597,33 @@ Session::async_control_transaction_(const Message &req,
                             Message{}};
     }
 
+    if (req.header.system_bytes == 0U) {
+        req.header.system_bytes = allocate_system_bytes();
+    }
     const auto sb = req.header.system_bytes;
+    if (sb == 0U) {
+        co_return std::pair{core::make_error_code(core::errc::buffer_overflow),
+                            Message{}};
+    }
     auto pending = std::make_shared<Pending>(expected_rsp);
-    pending_.insert_or_assign(sb, pending);
+    const bool inserted = pending_.emplace(sb, pending).second;
+    if (!inserted) {
+        // SystemBytes 冲突属于“协议层隐性炸点”：断线收敛，避免请求-响应错配与状态漂移。
+        connection_.cancel_and_close();
+        on_disconnected_(core::make_error_code(core::errc::buffer_overflow));
+        co_return std::pair{core::make_error_code(core::errc::buffer_overflow),
+                            Message{}};
+    }
+    if (!try_mark_system_bytes_in_flight_(sb)) {
+        pending_.erase(sb);
+        co_return std::pair{core::make_error_code(core::errc::out_of_memory),
+                            Message{}};
+    }
 
     auto ec = co_await connection_.async_write_message(req);
     if (ec) {
         pending_.erase(sb);
+        unmark_system_bytes_in_flight_(sb);
         co_return std::pair{ec, Message{}};
     }
     emit_control_event_(ControlDirection::tx, req);
@@ -504,10 +636,12 @@ Session::async_control_transaction_(const Message &req,
         // - SELECT 等握手失败是否“立即断线”属于更高层的策略（见 async_open_*）。
         // - LINKTEST 周期心跳通常需要“连续失败阈值”，因此也不能在这里一刀切断线。
         pending_.erase(sb);
+        unmark_system_bytes_in_flight_(sb);
         co_return std::pair{ec, Message{}};
     }
 
     pending_.erase(sb);
+    unmark_system_bytes_in_flight_(sb);
     if (ec) {
         co_return std::pair{pending->ec ? pending->ec : ec, Message{}};
     }
@@ -523,7 +657,7 @@ Session::async_control_transaction_(const Message &req,
 }
 
 asio::awaitable<std::pair<std::error_code, Message>>
-Session::async_data_transaction_(const Message &req, core::duration timeout) {
+Session::async_data_transaction_(Message req, core::duration timeout) {
     // 数据事务（W=1）：同样用 pending_ 做请求-响应匹配；按 HSMS-SS 语义，
     // T3 超时只取消事务，不强制断线。
     const auto max_pending =
@@ -534,23 +668,44 @@ Session::async_data_transaction_(const Message &req, core::duration timeout) {
                             Message{}};
     }
 
+    if (req.header.system_bytes == 0U) {
+        req.header.system_bytes = allocate_system_bytes();
+    }
     const auto sb = req.header.system_bytes;
+    if (sb == 0U) {
+        co_return std::pair{core::make_error_code(core::errc::buffer_overflow),
+                            Message{}};
+    }
     auto pending = std::make_shared<Pending>(SType::data);
-    pending_.insert_or_assign(sb, pending);
+    const bool inserted = pending_.emplace(sb, pending).second;
+    if (!inserted) {
+        connection_.cancel_and_close();
+        on_disconnected_(core::make_error_code(core::errc::buffer_overflow));
+        co_return std::pair{core::make_error_code(core::errc::buffer_overflow),
+                            Message{}};
+    }
+    if (!try_mark_system_bytes_in_flight_(sb)) {
+        pending_.erase(sb);
+        co_return std::pair{core::make_error_code(core::errc::out_of_memory),
+                            Message{}};
+    }
 
     auto ec = co_await connection_.async_write_message(req);
     if (ec) {
         pending_.erase(sb);
+        unmark_system_bytes_in_flight_(sb);
         co_return std::pair{ec, Message{}};
     }
 
     ec = co_await pending->ready.async_wait(timeout);
     if (ec == core::make_error_code(core::errc::timeout)) {
         pending_.erase(sb);
+        unmark_system_bytes_in_flight_(sb);
         co_return std::pair{ec, Message{}};
     }
 
     pending_.erase(sb);
+    unmark_system_bytes_in_flight_(sb);
     if (ec) {
         co_return std::pair{pending->ec ? pending->ec : ec, Message{}};
     }
@@ -567,13 +722,26 @@ Session::async_data_transaction_(const Message &req, core::duration timeout) {
 
 asio::awaitable<std::error_code>
 Session::async_open_active(const asio::ip::tcp::endpoint &endpoint) {
+    const auto ex = co_await asio::this_coro::executor;
+    if (ex != executor_) {
+        try {
+            co_return co_await asio::co_spawn(
+                executor_,
+                async_open_active(endpoint),
+                asio::use_awaitable);
+        } catch (...) {
+            co_return core::make_error_code(core::errc::out_of_memory);
+        }
+    }
+
     if (stop_requested_) {
         co_return core::make_error_code(core::errc::cancelled);
     }
 
-    SPDLOG_DEBUG("hsms open_active: port={} session_id={}",
-                 endpoint.port(),
-                 options_.session_id);
+    SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
+                        "hsms open_active: port={} session_id={}",
+                        endpoint.port(),
+                        options_.session_id);
 
     Connection conn(executor_, ConnectionOptions{.t8 = options_.t8});
     auto ec = co_await conn.async_connect(endpoint);
@@ -586,12 +754,26 @@ Session::async_open_active(const asio::ip::tcp::endpoint &endpoint) {
 }
 
 asio::awaitable<std::error_code>
-Session::async_open_active(Connection &&connection) {
+Session::async_open_active(Connection connection) {
+    const auto ex = co_await asio::this_coro::executor;
+    if (ex != executor_) {
+        try {
+            co_return co_await asio::co_spawn(
+                executor_,
+                async_open_active(std::move(connection)),
+                asio::use_awaitable);
+        } catch (...) {
+            co_return core::make_error_code(core::errc::out_of_memory);
+        }
+    }
+
     if (stop_requested_) {
         co_return core::make_error_code(core::errc::cancelled);
     }
 
-    SPDLOG_DEBUG("hsms open_active(connection): session_id={}", options_.session_id);
+    SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
+                        "hsms open_active(connection): session_id={}",
+                        options_.session_id);
 
     if (reader_running_) {
         // 若旧连接的 reader_loop_ 仍在跑，先关闭旧连接并等待其退出，避免两个
@@ -608,7 +790,7 @@ Session::async_open_active(Connection &&connection) {
     Message req =
         make_select_req(kHsmsSsControlSessionId, allocate_system_bytes());
     auto [tr_ec, rsp] = co_await async_control_transaction_(
-        req, SType::select_rsp, options_.t6);
+        std::move(req), SType::select_rsp, options_.t6);
     if (tr_ec) {
         // SELECT 控制事务超时（T6）按“通信失败”处理：断线收敛，避免双方状态机分叉。
         connection_.cancel_and_close();
@@ -622,29 +804,58 @@ Session::async_open_active(Connection &&connection) {
     }
 
     set_selected_();
-    SPDLOG_DEBUG("hsms open_active selected");
+    SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
+                        "hsms open_active selected");
     co_return std::error_code{};
 }
 
 asio::awaitable<std::error_code>
 Session::async_open_passive(asio::ip::tcp::socket socket) {
+    const auto ex = co_await asio::this_coro::executor;
+    if (ex != executor_) {
+        try {
+            co_return co_await asio::co_spawn(
+                executor_,
+                async_open_passive(std::move(socket)),
+                asio::use_awaitable);
+        } catch (...) {
+            co_return core::make_error_code(core::errc::out_of_memory);
+        }
+    }
+
     if (stop_requested_) {
         co_return core::make_error_code(core::errc::cancelled);
     }
 
-    SPDLOG_DEBUG("hsms open_passive(socket): session_id={}", options_.session_id);
+    SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
+                        "hsms open_passive(socket): session_id={}",
+                        options_.session_id);
 
     Connection conn(std::move(socket), ConnectionOptions{.t8 = options_.t8});
     co_return co_await async_open_passive(std::move(conn));
 }
 
 asio::awaitable<std::error_code>
-Session::async_open_passive(Connection &&connection) {
+Session::async_open_passive(Connection connection) {
+    const auto ex = co_await asio::this_coro::executor;
+    if (ex != executor_) {
+        try {
+            co_return co_await asio::co_spawn(
+                executor_,
+                async_open_passive(std::move(connection)),
+                asio::use_awaitable);
+        } catch (...) {
+            co_return core::make_error_code(core::errc::out_of_memory);
+        }
+    }
+
     if (stop_requested_) {
         co_return core::make_error_code(core::errc::cancelled);
     }
 
-    SPDLOG_DEBUG("hsms open_passive(connection): session_id={}", options_.session_id);
+    SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
+                        "hsms open_passive(connection): session_id={}",
+                        options_.session_id);
 
     if (reader_running_) {
         // 同主动端：确保不会有“两个 reader_loop_ 同时存在”。
@@ -663,12 +874,25 @@ Session::async_open_passive(Connection &&connection) {
         co_return ec;
     }
 
-    SPDLOG_DEBUG("hsms open_passive selected");
+    SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
+                        "hsms open_passive selected");
     co_return std::error_code{};
 }
 
 asio::awaitable<std::error_code>
 Session::async_run_active(const asio::ip::tcp::endpoint &endpoint) {
+    const auto ex = co_await asio::this_coro::executor;
+    if (ex != executor_) {
+        try {
+            co_return co_await asio::co_spawn(
+                executor_,
+                async_run_active(endpoint),
+                asio::use_awaitable);
+        } catch (...) {
+            co_return core::make_error_code(core::errc::out_of_memory);
+        }
+    }
+
     while (!stop_requested_) {
         auto ec = co_await async_open_active(endpoint);
         if (ec) {
@@ -695,6 +919,18 @@ Session::async_run_active(const asio::ip::tcp::endpoint &endpoint) {
 
 asio::awaitable<std::error_code>
 Session::async_run_passive(asio::ip::tcp::acceptor &acceptor) {
+    const auto ex = co_await asio::this_coro::executor;
+    if (ex != executor_) {
+        try {
+            co_return co_await asio::co_spawn(
+                executor_,
+                async_run_passive(acceptor),
+                asio::use_awaitable);
+        } catch (...) {
+            co_return core::make_error_code(core::errc::out_of_memory);
+        }
+    }
+
     if (stop_requested_) {
         co_return core::make_error_code(core::errc::cancelled);
     }
@@ -746,6 +982,18 @@ Session::async_run_passive(asio::ip::tcp::acceptor &acceptor) {
 }
 
 asio::awaitable<std::error_code> Session::async_send(const Message &msg) {
+    const auto ex = co_await asio::this_coro::executor;
+    if (ex != executor_) {
+        try {
+            Message copy = msg;
+            co_return co_await asio::co_spawn(executor_,
+                                              async_send(copy),
+                                              asio::use_awaitable);
+        } catch (...) {
+            co_return core::make_error_code(core::errc::out_of_memory);
+        }
+    }
+
     if (!connection_.is_open()) {
         co_return core::make_error_code(core::errc::invalid_argument);
     }
@@ -754,16 +1002,18 @@ asio::awaitable<std::error_code> Session::async_send(const Message &msg) {
     }
 
     if (msg.is_data()) {
-        SPDLOG_DEBUG("hsms send data: S{}F{} W={} sb={} body_n={}",
-                     static_cast<int>(msg.stream()),
-                     static_cast<int>(msg.function()),
-                     msg.w_bit() ? 1 : 0,
-                     msg.header.system_bytes,
-                     msg.body.size());
+        SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
+                            "hsms send data: S{}F{} W={} sb={} body_n={}",
+                            static_cast<int>(msg.stream()),
+                            static_cast<int>(msg.function()),
+                            msg.w_bit() ? 1 : 0,
+                            msg.header.system_bytes,
+                            msg.body.size());
     } else {
-        SPDLOG_DEBUG("hsms send control: stype={} sb={}",
-                     static_cast<int>(msg.header.s_type),
-                     msg.header.system_bytes);
+        SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
+                            "hsms send control: stype={} sb={}",
+                            static_cast<int>(msg.header.s_type),
+                            msg.header.system_bytes);
     }
 
     auto ec = co_await connection_.async_write_message(msg);
@@ -775,6 +1025,19 @@ asio::awaitable<std::error_code> Session::async_send(const Message &msg) {
 
 asio::awaitable<std::pair<std::error_code, Message>>
 Session::async_receive_data(std::optional<core::duration> timeout) {
+    const auto ex = co_await asio::this_coro::executor;
+    if (ex != executor_) {
+        try {
+            co_return co_await asio::co_spawn(
+                executor_,
+                async_receive_data(timeout),
+                asio::use_awaitable);
+        } catch (...) {
+            co_return std::pair{core::make_error_code(core::errc::out_of_memory),
+                                Message{}};
+        }
+    }
+
     while (inbound_data_.empty()) {
         if (!timeout.has_value() && state_ == SessionState::disconnected &&
             disconnected_reason_.has_value()) {
@@ -812,6 +1075,19 @@ Session::async_request_data(std::uint8_t stream,
                             std::uint8_t function,
                             core::bytes_view body,
                             std::optional<core::duration> timeout) {
+    const auto ex = co_await asio::this_coro::executor;
+    if (ex != executor_) {
+        try {
+            co_return co_await asio::co_spawn(
+                executor_,
+                async_request_data(stream, function, body, timeout),
+                asio::use_awaitable);
+        } catch (...) {
+            co_return std::pair{core::make_error_code(core::errc::out_of_memory),
+                                Message{}};
+        }
+    }
+
     if (state_ != SessionState::selected) {
         co_return std::pair{core::make_error_code(core::errc::invalid_argument),
                             Message{}};
@@ -825,11 +1101,22 @@ Session::async_request_data(std::uint8_t stream,
     const auto sb = allocate_system_bytes();
     Message req = make_data_message(
         options_.session_id, stream, function, true, sb, body);
-    co_return co_await async_data_transaction_(req,
+    co_return co_await async_data_transaction_(std::move(req),
                                                timeout.value_or(options_.t3));
 }
 
 asio::awaitable<std::error_code> Session::async_linktest() {
+    const auto ex = co_await asio::this_coro::executor;
+    if (ex != executor_) {
+        try {
+            co_return co_await asio::co_spawn(executor_,
+                                              async_linktest(),
+                                              asio::use_awaitable);
+        } catch (...) {
+            co_return core::make_error_code(core::errc::out_of_memory);
+        }
+    }
+
     if (state_ != SessionState::selected) {
         co_return core::make_error_code(core::errc::invalid_argument);
     }
@@ -837,7 +1124,7 @@ asio::awaitable<std::error_code> Session::async_linktest() {
     Message req =
         make_linktest_req(kHsmsSsControlSessionId, allocate_system_bytes());
     auto [ec, rsp] = co_await async_control_transaction_(
-        req, SType::linktest_rsp, options_.t6);
+        std::move(req), SType::linktest_rsp, options_.t6);
     if (ec) {
         co_return ec;
     }
@@ -850,6 +1137,18 @@ asio::awaitable<std::error_code> Session::async_linktest() {
 asio::awaitable<std::error_code>
 Session::async_wait_selected(std::uint64_t min_generation,
                              core::duration timeout) {
+    const auto ex = co_await asio::this_coro::executor;
+    if (ex != executor_) {
+        try {
+            co_return co_await asio::co_spawn(
+                executor_,
+                async_wait_selected(min_generation, timeout),
+                asio::use_awaitable);
+        } catch (...) {
+            co_return core::make_error_code(core::errc::out_of_memory);
+        }
+    }
+
     const auto deadline = core::steady_clock::now() + timeout;
     while (!stop_requested_) {
         if (state_ == SessionState::selected &&

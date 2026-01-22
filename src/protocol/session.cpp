@@ -6,6 +6,8 @@
 #include "secs/secs1/block.hpp"
 #include "secs/secs1/state_machine.hpp"
 
+#include "core/spdlog_logger.hpp"
+
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/dispatch.hpp>
@@ -17,7 +19,6 @@
 #include <new>
 #include <sstream>
 #include <string_view>
-#include <spdlog/spdlog.h>
 
 namespace secs::protocol {
 namespace {
@@ -78,7 +79,7 @@ void emit_dump_(const SessionOptions::DumpOptions &opt,
     }
     // 默认输出：走库内 spdlog（INFO 级别），便于运行时直接看到 dump。
     try {
-        SPDLOG_INFO("{}", text);
+        SPDLOG_LOGGER_INFO(secs::core::spdlog_logger_raw(), "{}", text);
     } catch (...) {
         // dump 仅用于调试，不应影响业务协程的可用性。
     }
@@ -368,18 +369,20 @@ asio::awaitable<std::error_code> Session::async_send_impl_(
     msg.system_bytes = sb;
     msg.body.assign(body.begin(), body.end());
 
-    SPDLOG_DEBUG("protocol async_send: S{}F{} W=0 sb={} body_n={}",
-                 static_cast<int>(msg.stream),
-                 static_cast<int>(msg.function),
-                 msg.system_bytes,
-                 msg.body.size());
+    SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
+                        "protocol async_send: S{}F{} W=0 sb={} body_n={}",
+                        static_cast<int>(msg.stream),
+                        static_cast<int>(msg.function),
+                        msg.system_bytes,
+                        msg.body.size());
 
     auto ec = co_await async_send_message_(msg);
     if (ec) {
-        SPDLOG_DEBUG("protocol async_send failed: sb={} ec={}({})",
-                     sb,
-                     ec.value(),
-                     ec.message());
+        SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
+                            "protocol async_send failed: sb={} ec={}({})",
+                            sb,
+                            ec.value(),
+                            ec.message());
     }
     system_bytes_.release(sb);
     co_return ec;
@@ -447,12 +450,14 @@ Session::async_request_impl_(std::uint8_t stream,
     if (backend_ == Backend::hsms) {
         ensure_hsms_run_loop_started_();
 
-        SPDLOG_DEBUG("protocol async_request(HSMS): S{}F{} -> expect F{} sb={} body_n={}",
-                     static_cast<int>(stream),
-                     static_cast<int>(function),
-                     static_cast<int>(expected_function),
-                     sb,
-                     req.body.size());
+        SPDLOG_LOGGER_DEBUG(
+            secs::core::spdlog_logger_raw(),
+            "protocol async_request(HSMS): S{}F{} -> expect F{} sb={} body_n={}",
+            static_cast<int>(stream),
+            static_cast<int>(function),
+            static_cast<int>(expected_function),
+            sb,
+            req.body.size());
 
         auto pending = std::make_shared<Pending>(stream, expected_function);
         {
@@ -470,10 +475,12 @@ Session::async_request_impl_(std::uint8_t stream,
 
         auto send_ec = co_await async_send_message_(req);
         if (send_ec) {
-            SPDLOG_DEBUG("protocol async_request(HSMS) send failed: sb={} ec={}({})",
-                         sb,
-                         send_ec.value(),
-                         send_ec.message());
+            SPDLOG_LOGGER_DEBUG(
+                secs::core::spdlog_logger_raw(),
+                "protocol async_request(HSMS) send failed: sb={} ec={}({})",
+                sb,
+                send_ec.value(),
+                send_ec.message());
             {
                 std::lock_guard lk(pending_mu_);
                 pending_.erase(sb);
@@ -490,50 +497,63 @@ Session::async_request_impl_(std::uint8_t stream,
         system_bytes_.release(sb);
 
         if (wait_ec == make_error_code(errc::timeout)) {
-            SPDLOG_DEBUG("protocol async_request(HSMS) timeout: sb={} t3_ms={}",
-                         sb,
-                         std::chrono::duration_cast<std::chrono::milliseconds>(t3)
-                             .count());
+            SPDLOG_LOGGER_DEBUG(
+                secs::core::spdlog_logger_raw(),
+                "protocol async_request(HSMS) timeout: sb={} t3_ms={}",
+                sb,
+                std::chrono::duration_cast<std::chrono::milliseconds>(t3).count());
             co_return std::pair{wait_ec, DataMessage{}};
         }
         if (wait_ec) {
-            SPDLOG_DEBUG("protocol async_request(HSMS) wait failed: sb={} ec={}({})",
-                         sb,
-                         wait_ec.value(),
-                         wait_ec.message());
+            SPDLOG_LOGGER_DEBUG(
+                secs::core::spdlog_logger_raw(),
+                "protocol async_request(HSMS) wait failed: sb={} ec={}({})",
+                sb,
+                wait_ec.value(),
+                wait_ec.message());
             co_return std::pair{pending->ec ? pending->ec : wait_ec,
                                 DataMessage{}};
         }
         if (pending->ec) {
-            SPDLOG_DEBUG("protocol async_request(HSMS) pending failed: sb={} ec={}({})",
-                         sb,
-                         pending->ec.value(),
-                         pending->ec.message());
+            SPDLOG_LOGGER_DEBUG(
+                secs::core::spdlog_logger_raw(),
+                "protocol async_request(HSMS) pending failed: sb={} ec={}({})",
+                sb,
+                pending->ec.value(),
+                pending->ec.message());
             co_return std::pair{pending->ec, DataMessage{}};
         }
         if (!pending->response.has_value()) {
-            SPDLOG_DEBUG("protocol async_request(HSMS) pending has no response: sb={}",
-                         sb);
+            SPDLOG_LOGGER_DEBUG(
+                secs::core::spdlog_logger_raw(),
+                "protocol async_request(HSMS) pending has no response: sb={}",
+                sb);
             co_return std::pair{make_error_code(errc::invalid_argument),
                                 DataMessage{}};
         }
-        SPDLOG_DEBUG("protocol async_request(HSMS) done: sb={}", sb);
+        SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
+                            "protocol async_request(HSMS) done: sb={}",
+                            sb);
         co_return std::pair{std::error_code{}, *pending->response};
     }
 
     // SECS-I：半双工，请求侧自己驱动接收循环，并在期间处理可能的入站主消息。
-    SPDLOG_DEBUG("protocol async_request(SECS-I): S{}F{} -> expect F{} sb={} body_n={}",
-                 static_cast<int>(stream),
-                 static_cast<int>(function),
-                 static_cast<int>(expected_function),
-                 sb,
-                 req.body.size());
+    SPDLOG_LOGGER_DEBUG(
+        secs::core::spdlog_logger_raw(),
+        "protocol async_request(SECS-I): S{}F{} -> expect F{} sb={} body_n={}",
+        static_cast<int>(stream),
+        static_cast<int>(function),
+        static_cast<int>(expected_function),
+        sb,
+        req.body.size());
     auto send_ec = co_await async_send_message_(req);
     if (send_ec) {
-        SPDLOG_DEBUG("protocol async_request(SECS-I) send failed: sb={} ec={}({})",
-                     sb,
-                     send_ec.value(),
-                     send_ec.message());
+        SPDLOG_LOGGER_DEBUG(
+            secs::core::spdlog_logger_raw(),
+            "protocol async_request(SECS-I) send failed: sb={} ec={}({})",
+            sb,
+            send_ec.value(),
+            send_ec.message());
         system_bytes_.release(sb);
         co_return std::pair{send_ec, DataMessage{}};
     }
@@ -542,10 +562,11 @@ Session::async_request_impl_(std::uint8_t stream,
     for (;;) {
         const auto now = secs::core::steady_clock::now();
         if (now >= deadline) {
-            SPDLOG_DEBUG("protocol async_request(SECS-I) timeout: sb={} t3_ms={}",
-                         sb,
-                         std::chrono::duration_cast<std::chrono::milliseconds>(t3)
-                             .count());
+            SPDLOG_LOGGER_DEBUG(
+                secs::core::spdlog_logger_raw(),
+                "protocol async_request(SECS-I) timeout: sb={} t3_ms={}",
+                sb,
+                std::chrono::duration_cast<std::chrono::milliseconds>(t3).count());
             system_bytes_.release(sb);
             co_return std::pair{make_error_code(errc::timeout), DataMessage{}};
         }
@@ -553,10 +574,12 @@ Session::async_request_impl_(std::uint8_t stream,
         const auto remaining = deadline - now;
         auto [ec, msg] = co_await async_receive_message_(remaining);
         if (ec) {
-            SPDLOG_DEBUG("protocol async_request(SECS-I) receive failed: sb={} ec={}({})",
-                         sb,
-                         ec.value(),
-                         ec.message());
+            SPDLOG_LOGGER_DEBUG(
+                secs::core::spdlog_logger_raw(),
+                "protocol async_request(SECS-I) receive failed: sb={} ec={}({})",
+                sb,
+                ec.value(),
+                ec.message());
             system_bytes_.release(sb);
             co_return std::pair{ec, DataMessage{}};
         }
@@ -566,7 +589,9 @@ Session::async_request_impl_(std::uint8_t stream,
                              msg.function == expected_function;
 
         if (matches) {
-            SPDLOG_DEBUG("protocol async_request(SECS-I) done: sb={}", sb);
+            SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
+                                "protocol async_request(SECS-I) done: sb={}",
+                                sb);
             system_bytes_.release(sb);
             co_return std::pair{std::error_code{}, std::move(msg)};
         }
@@ -693,30 +718,34 @@ asio::awaitable<void> Session::handle_inbound_(DataMessage msg) {
 
     auto handler_opt = router_.find(msg.stream, msg.function);
     if (!handler_opt.has_value()) {
-        SPDLOG_DEBUG("protocol inbound primary unhandled: S{}F{} W={} sb={} body_n={}",
-                     static_cast<int>(msg.stream),
-                     static_cast<int>(msg.function),
-                     msg.w_bit ? 1 : 0,
-                     msg.system_bytes,
-                     msg.body.size());
+        SPDLOG_LOGGER_DEBUG(
+            secs::core::spdlog_logger_raw(),
+            "protocol inbound primary unhandled: S{}F{} W={} sb={} body_n={}",
+            static_cast<int>(msg.stream),
+            static_cast<int>(msg.function),
+            msg.w_bit ? 1 : 0,
+            msg.system_bytes,
+            msg.body.size());
         co_return;
     }
 
     auto handler = std::move(*handler_opt);
-    SPDLOG_DEBUG("protocol inbound primary dispatch: S{}F{} W={} sb={} body_n={}",
-                 static_cast<int>(msg.stream),
-                 static_cast<int>(msg.function),
-                 msg.w_bit ? 1 : 0,
-                 msg.system_bytes,
-                 msg.body.size());
+    SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
+                        "protocol inbound primary dispatch: S{}F{} W={} sb={} body_n={}",
+                        static_cast<int>(msg.stream),
+                        static_cast<int>(msg.function),
+                        msg.w_bit ? 1 : 0,
+                        msg.system_bytes,
+                        msg.body.size());
     auto [ec, rsp_body] = co_await handler(msg);
     if (ec) {
-        SPDLOG_DEBUG("protocol handler returned error: S{}F{} sb={} ec={}({})",
-                     static_cast<int>(msg.stream),
-                     static_cast<int>(msg.function),
-                     msg.system_bytes,
-                     ec.value(),
-                     ec.message());
+        SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
+                            "protocol handler returned error: S{}F{} sb={} ec={}({})",
+                            static_cast<int>(msg.stream),
+                            static_cast<int>(msg.function),
+                            msg.system_bytes,
+                            ec.value(),
+                            ec.message());
         co_return;
     }
 
@@ -733,11 +762,12 @@ asio::awaitable<void> Session::handle_inbound_(DataMessage msg) {
     rsp.w_bit = false;
     rsp.system_bytes = msg.system_bytes;
     rsp.body = std::move(rsp_body);
-    SPDLOG_DEBUG("protocol auto-reply secondary: S{}F{} sb={} body_n={}",
-                 static_cast<int>(rsp.stream),
-                 static_cast<int>(rsp.function),
-                 rsp.system_bytes,
-                 rsp.body.size());
+    SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
+                        "protocol auto-reply secondary: S{}F{} sb={} body_n={}",
+                        static_cast<int>(rsp.stream),
+                        static_cast<int>(rsp.function),
+                        rsp.system_bytes,
+                        rsp.body.size());
     (void)co_await async_send_message_(rsp);
 }
 
@@ -762,10 +792,11 @@ bool Session::try_fulfill_pending_(DataMessage &msg) noexcept {
         return false;
     }
 
-    SPDLOG_DEBUG("protocol fulfill pending: S{}F{} sb={}",
-                 static_cast<int>(msg.stream),
-                 static_cast<int>(msg.function),
-                 msg.system_bytes);
+    SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
+                        "protocol fulfill pending: S{}F{} sb={}",
+                        static_cast<int>(msg.stream),
+                        static_cast<int>(msg.function),
+                        msg.system_bytes);
 
     pending->response = std::move(msg);
     pending->ec = std::error_code{};

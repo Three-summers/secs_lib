@@ -13,10 +13,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace secs::hsms {
@@ -88,6 +91,11 @@ struct SessionOptions final {
     // - 达到上限时，事务类 API 会快速失败，避免 pending_ 无界增长。
     std::size_t max_pending_requests{256};
 
+    // SystemBytes 的可用空间上限（包含该值，0 表示使用 UINT32_MAX）：
+    // - 生产使用建议保持默认值；
+    // - 单元测试可注入小空间以覆盖 wrap/exhaustion 分支。
+    std::uint32_t system_bytes_max_value{0};
+
     // 入站 data message 队列上限（0 表示不限制）：
     // - 当上层长时间不调用 async_receive_data() 且对端持续发送 data 时，
     //   inbound_data_ 可能无界增长；
@@ -124,19 +132,16 @@ public:
     [[nodiscard]] std::uint64_t selected_generation() const noexcept {
         return selected_generation_.load();
     }
-    [[nodiscard]] std::uint32_t allocate_system_bytes() noexcept {
-        return system_bytes_.fetch_add(1U);
-    }
+    [[nodiscard]] std::uint32_t allocate_system_bytes() noexcept;
 
     void stop() noexcept;
 
     asio::awaitable<std::error_code>
     async_open_active(const asio::ip::tcp::endpoint &endpoint);
-    asio::awaitable<std::error_code> async_open_active(Connection &&connection);
+    asio::awaitable<std::error_code> async_open_active(Connection connection);
     asio::awaitable<std::error_code>
     async_open_passive(asio::ip::tcp::socket socket);
-    asio::awaitable<std::error_code>
-    async_open_passive(Connection &&connection);
+    asio::awaitable<std::error_code> async_open_passive(Connection connection);
 
     // 主动端自动重连主循环：直到 stop()，或 auto_reconnect==false 且发生断线。
     asio::awaitable<std::error_code>
@@ -200,22 +205,28 @@ private:
     asio::awaitable<void> linktest_loop_(std::uint64_t generation);
 
     asio::awaitable<std::pair<std::error_code, Message>>
-    async_control_transaction_(const Message &req,
-                               SType expected_rsp,
-                               core::duration timeout);
+    async_control_transaction_(Message req, SType expected_rsp, core::duration timeout);
 
     asio::awaitable<std::pair<std::error_code, Message>>
-    async_data_transaction_(const Message &req, core::duration timeout);
+    async_data_transaction_(Message req, core::duration timeout);
 
     [[nodiscard]] bool fulfill_pending_(Message &msg) noexcept;
     void cancel_pending_data_(std::error_code reason) noexcept;
+
+    [[nodiscard]] std::uint32_t normalized_system_bytes_max_() const noexcept;
+    [[nodiscard]] bool is_system_bytes_in_flight_(std::uint32_t sb) const noexcept;
+    [[nodiscard]] bool try_mark_system_bytes_in_flight_(std::uint32_t sb) noexcept;
+    void unmark_system_bytes_in_flight_(std::uint32_t sb) noexcept;
+    void clear_system_bytes_in_flight_() noexcept;
 
     asio::any_io_executor executor_;
     SessionOptions options_{};
 
     Connection connection_;
 
-    std::atomic<std::uint32_t> system_bytes_{1};
+    std::atomic<std::uint32_t> system_bytes_{0};
+    mutable std::mutex system_bytes_mu_{};
+    std::unordered_set<std::uint32_t> system_bytes_in_flight_{};
 
     SessionState state_{SessionState::disconnected};
     std::atomic<std::uint64_t> selected_generation_{0};

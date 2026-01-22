@@ -1790,6 +1790,141 @@ void test_session_pending_limit_returns_buffer_overflow() {
     TEST_EXPECT(done.load());
 }
 
+void test_session_system_bytes_wraparound_avoids_inflight_collision() {
+    asio::io_context ioc;
+
+    SessionOptions opt;
+    opt.session_id = 0x0001;
+    opt.t3 = 500ms;
+    opt.t6 = 50ms;
+    opt.t7 = 200ms;
+    opt.t8 = 50ms;
+    opt.max_pending_requests = 8;
+    opt.system_bytes_max_value = 2;
+
+    Session server(ioc.get_executor(), opt);
+    Session client(ioc.get_executor(), opt);
+
+    auto duplex = make_memory_duplex(ioc.get_executor());
+    Connection client_conn(std::move(duplex.client_stream),
+                           ConnectionOptions{.t8 = opt.t8});
+    Connection server_conn(std::move(duplex.server_stream),
+                           ConnectionOptions{.t8 = opt.t8});
+
+    std::atomic<bool> done{false};
+    secs::core::Event server_got_req1{};
+
+    asio::co_spawn(
+        ioc,
+        [&, server_conn = std::move(server_conn)]() mutable
+        -> asio::awaitable<void> {
+            auto ec = co_await server.async_open_passive(std::move(server_conn));
+            TEST_EXPECT_OK(ec);
+
+            // 收到 3 个请求：
+            // - 第 1 个请求：延后回复，保持 pending 在飞；
+            // - 第 2 个请求：立即回复，让其完成后再发第 3 个请求；
+            // - 第 3 个请求：在回复第 1 个请求后再回复，用于验证不会被错配。
+            auto [rec1, req1] = co_await server.async_receive_data(500ms);
+            TEST_EXPECT_OK(rec1);
+            server_got_req1.set();
+
+            auto [rec2, req2] = co_await server.async_receive_data(500ms);
+            TEST_EXPECT_OK(rec2);
+
+            auto make_rsp = [&](const Message &req) {
+                const auto stream = req.stream();
+                const auto function = static_cast<std::uint8_t>(req.function() + 1U);
+                return secs::hsms::make_data_message(
+                    opt.session_id,
+                    stream,
+                    function,
+                    /*w=*/false,
+                    req.header.system_bytes,
+                    bytes_view{req.body.data(), req.body.size()});
+            };
+
+            TEST_EXPECT_OK(co_await server.async_send(make_rsp(req2)));
+
+            auto [rec3, req3] = co_await server.async_receive_data(500ms);
+            TEST_EXPECT_OK(rec3);
+
+            // 关键：先回复第 1 个请求，再回复第 3 个请求。
+            TEST_EXPECT_OK(co_await server.async_send(make_rsp(req1)));
+            TEST_EXPECT_OK(co_await server.async_send(make_rsp(req3)));
+            co_return;
+        },
+        asio::detached);
+
+    asio::co_spawn(
+        ioc,
+        [&, client_conn = std::move(client_conn)]() mutable
+        -> asio::awaitable<void> {
+            auto ec = co_await client.async_open_active(std::move(client_conn));
+            TEST_EXPECT_OK(ec);
+
+            const std::vector<byte> body1 = {static_cast<byte>(0x11)};
+            const std::vector<byte> body2 = {static_cast<byte>(0x22)};
+            const std::vector<byte> body3 = {static_cast<byte>(0x33)};
+
+            // 第 1 个请求先发出但不等待：保持其 pending 在飞。
+            struct Req1State final {
+                secs::core::Event done{};
+                std::error_code ec{};
+                Message rsp{};
+            };
+            auto req1 = std::make_shared<Req1State>();
+            asio::co_spawn(
+                ioc,
+                [&, req1]() -> asio::awaitable<void> {
+                    auto [ec1, rsp1] = co_await client.async_request_data(
+                        1,
+                        1,
+                        bytes_view{body1.data(), body1.size()},
+                        /*timeout=*/2s);
+                    req1->ec = ec1;
+                    req1->rsp = std::move(rsp1);
+                    req1->done.set();
+                    co_return;
+                },
+                asio::detached);
+
+            // 等待服务端确认已收到第 1 个请求，确保其 pending 已在飞（覆盖 wrap-around 冲突场景）。
+            TEST_EXPECT_OK(co_await server_got_req1.async_wait(500ms));
+
+            // 第 2 个请求：期望成功并完成。
+            auto [ec2, rsp2] = co_await client.async_request_data(
+                1, 1, bytes_view{body2.data(), body2.size()}, /*timeout=*/500ms);
+            TEST_EXPECT_OK(ec2);
+            TEST_EXPECT_EQ(rsp2.body.size(), body2.size());
+            TEST_EXPECT_EQ(rsp2.body[0], body2[0]);
+
+            // 第 3 个请求：SystemBytes 空间只有 2，此时应避免复用第 1 个请求的在飞值。
+            auto [ec3, rsp3] = co_await client.async_request_data(
+                1, 1, bytes_view{body3.data(), body3.size()}, /*timeout=*/500ms);
+            TEST_EXPECT_OK(ec3);
+            TEST_EXPECT_EQ(rsp3.body.size(), body3.size());
+            TEST_EXPECT_EQ(rsp3.body[0], body3[0]);
+
+            TEST_EXPECT_OK(co_await req1->done.async_wait(2s));
+            TEST_EXPECT_OK(req1->ec);
+            TEST_EXPECT_EQ(req1->rsp.body.size(), body1.size());
+            TEST_EXPECT_EQ(req1->rsp.body[0], body1[0]);
+
+            // 断言：第 1 个请求在飞期间，第 3 个请求不能复用同一个 SystemBytes。
+            TEST_EXPECT(req1->rsp.header.system_bytes != rsp3.header.system_bytes);
+
+            client.stop();
+            server.stop();
+            done = true;
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(done.load());
+}
+
 void test_session_deselect_drops_inbound_data_when_not_selected() {
     asio::io_context ioc;
 
@@ -2640,6 +2775,7 @@ int main() {
     RUN_TEST(test_session_select_timeout_late_select_rsp_is_ignored);
     RUN_TEST(test_session_pending_cancelled_on_disconnect);
     RUN_TEST(test_session_pending_limit_returns_buffer_overflow);
+    RUN_TEST(test_session_system_bytes_wraparound_avoids_inflight_collision);
     RUN_TEST(test_session_deselect_drops_inbound_data_when_not_selected);
     RUN_TEST(test_session_max_inbound_data_zero_is_unlimited);
     RUN_TEST(test_session_max_inbound_data_disconnects_on_overflow_and_receive_returns_reason);
