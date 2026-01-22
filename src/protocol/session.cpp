@@ -244,6 +244,41 @@ asio::awaitable<void> Session::async_run_impl_() {
             continue;
         }
         if (ec) {
+            // HSMS：断线在业务上是“可恢复事件”（允许上层重连或被动端再次 accept）。
+            // 这里不直接 stop，而是取消挂起请求后等待下一次 selected。
+            if (backend_ == Backend::hsms && hsms_ &&
+                hsms_->state() == secs::hsms::SessionState::disconnected &&
+                ec != make_error_code(errc::cancelled) && !stop_requested_) {
+                cancel_all_pending_(ec);
+
+                const auto target_gen = hsms_->selected_generation() + 1U;
+                while (!stop_requested_) {
+                    // 用较长超时模拟“无限等待”，同时确保 stop() 能通过 cancel 及时唤醒。
+                    const auto wait_ec =
+                        co_await hsms_->async_wait_selected(target_gen,
+                                                           std::chrono::hours{24});
+                    if (!wait_ec) {
+                        break;
+                    }
+                    if (wait_ec == make_error_code(errc::timeout)) {
+                        continue;
+                    }
+                    if (wait_ec == make_error_code(errc::cancelled)) {
+                        // HSMS stop() 会导致 async_wait_selected 返回 cancelled；此时按不可恢复处理。
+                        stop_requested_ = true;
+                        cancel_all_pending_(wait_ec);
+                        break;
+                    }
+
+                    // 其他错误：按不可恢复处理。
+                    stop_requested_ = true;
+                    cancel_all_pending_(wait_ec);
+                    break;
+                }
+                continue;
+            }
+
+            // 其他错误：按不可恢复处理。
             // 先置位 stop，再 cancel pending：避免并发新请求扩大窗口。
             stop_requested_ = true;
             cancel_all_pending_(ec);

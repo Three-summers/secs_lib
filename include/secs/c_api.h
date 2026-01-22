@@ -879,28 +879,15 @@ typedef struct secs_hsms_session_options {
     uint32_t t7_ms;
     uint32_t t8_ms;
     uint32_t linktest_interval_ms; /* 0 表示不自动发送 LINKTEST */
-    int auto_reconnect;
-    int passive_accept_select;
-} secs_hsms_session_options_t;
-
-/*
- * HSMS 会话参数 v2：
- * - 新增：linktest_max_consecutive_failures（对应 C++：
- *   SessionOptions::linktest_max_consecutive_failures）
- * - 约定：0 表示使用库默认值（默认 1：一次失败即断线）
- */
-typedef struct secs_hsms_session_options_v2 {
-    uint16_t session_id;
-    uint32_t t3_ms;
-    uint32_t t5_ms;
-    uint32_t t6_ms;
-    uint32_t t7_ms;
-    uint32_t t8_ms;
-    uint32_t linktest_interval_ms; /* 0 表示不自动发送 LINKTEST */
+    /*
+     * Linktest 连续失败阈值：达到阈值后断线。
+     * - 0：使用库默认值（默认 1：一次失败即断线）
+     * - 其他：会被 clamp 到 [1, +inf)
+     */
     uint32_t linktest_max_consecutive_failures;
     int auto_reconnect;
     int passive_accept_select;
-} secs_hsms_session_options_v2_t;
+} secs_hsms_session_options_t;
 
 typedef struct secs_hsms_data_message {
     uint16_t session_id;
@@ -925,10 +912,6 @@ secs_error_t
 secs_hsms_session_create(secs_context_t *ctx,
                          const secs_hsms_session_options_t *options,
                          secs_hsms_session_t **out_sess);
-secs_error_t
-secs_hsms_session_create_v2(secs_context_t *ctx,
-                            const secs_hsms_session_options_v2_t *options,
-                            secs_hsms_session_t **out_sess);
 
 /*
  * 打开连接（阻塞式）。
@@ -956,6 +939,22 @@ secs_error_t secs_hsms_session_open_active_ip(secs_hsms_session_t *sess,
 secs_error_t secs_hsms_session_open_passive_ip(secs_hsms_session_t *sess,
                                                const char *ip,
                                                uint16_t port);
+
+/*
+ * 自动重连主循环（阻塞式；不得在库内部 io 线程调用）：
+ * - run_active_ip：主动端连接并进入 selected；断线后按 t5_ms 退避并重连。
+ * - run_passive_ip：被动端反复 listen/accept；每次连接进入 selected，断线后按 t5_ms 退避并等待下一次连接。
+ *
+ * 退出条件：
+ * - 调用 secs_hsms_session_stop()；
+ * - auto_reconnect==0 时：首次断线/失败后返回。
+ */
+secs_error_t secs_hsms_session_run_active_ip(secs_hsms_session_t *sess,
+                                             const char *ip,
+                                             uint16_t port);
+secs_error_t secs_hsms_session_run_passive_ip(secs_hsms_session_t *sess,
+                                              const char *ip,
+                                              uint16_t port);
 secs_error_t
 secs_hsms_session_open_active_connection(secs_hsms_session_t *sess,
                                          secs_hsms_connection_t **io_conn);
@@ -1011,13 +1010,8 @@ secs_hsms_session_request_data(secs_hsms_session_t *sess,
 
 typedef struct secs_protocol_session secs_protocol_session_t;
 
-typedef struct secs_protocol_session_options {
-    uint32_t t3_ms;
-    uint32_t poll_interval_ms;
-} secs_protocol_session_options_t;
-
 /*
- * 协议层会话参数 v2：
+ * 协议层会话参数：
  * - 新增：max_pending_requests（对应 C++：protocol::SessionOptions::max_pending_requests）
  * - 新增：dump_flags/dump_sink（对应 C++：protocol::SessionOptions::dump）
  *
@@ -1038,14 +1032,14 @@ typedef enum secs_protocol_dump_flags {
     SECS_PROTOCOL_DUMP_SECS2_DECODE = 1u << 4
 } secs_protocol_dump_flags_t;
 
-typedef struct secs_protocol_session_options_v2 {
+typedef struct secs_protocol_session_options {
     uint32_t t3_ms;
     uint32_t poll_interval_ms;
     size_t max_pending_requests;
     uint32_t dump_flags;
     secs_protocol_dump_sink_fn dump_sink; /* NULL 表示使用库内 spdlog 输出 */
     void *dump_sink_user;
-} secs_protocol_session_options_v2_t;
+} secs_protocol_session_options_t;
 
 typedef struct secs_data_message_view {
     uint8_t stream;
@@ -1205,13 +1199,6 @@ secs_error_t secs_protocol_session_create_from_hsms(
     const secs_protocol_session_options_t *options,
     secs_protocol_session_t **out_sess);
 
-secs_error_t secs_protocol_session_create_from_hsms_v2(
-    secs_context_t *ctx,
-    secs_hsms_session_t *hsms_sess,
-    uint16_t session_id,
-    const secs_protocol_session_options_v2_t *options,
-    secs_protocol_session_t **out_sess);
-
 /*
  * 从 SECS-I（串口）创建协议层会话。
  *
@@ -1236,15 +1223,6 @@ secs_error_t secs_protocol_session_create_from_secs1_serial(
     const secs_protocol_session_options_t *options,
     secs_protocol_session_t **out_sess);
 
-secs_error_t secs_protocol_session_create_from_secs1_serial_v2(
-    secs_context_t *ctx,
-    const char *serial_path,
-    int baud,
-    uint16_t device_id,
-    int reverse_bit,
-    const secs_protocol_session_options_v2_t *options,
-    secs_protocol_session_t **out_sess);
-
 /*
  * 创建一对“内存互联”的 SECS-I protocol session（用于 loopback，无需真实串口）。
  *
@@ -1256,13 +1234,6 @@ secs_error_t secs_protocol_session_create_from_secs1_memory_duplex(
     secs_context_t *ctx,
     uint16_t device_id,
     const secs_protocol_session_options_t *options,
-    secs_protocol_session_t **out_host,
-    secs_protocol_session_t **out_equipment);
-
-secs_error_t secs_protocol_session_create_from_secs1_memory_duplex_v2(
-    secs_context_t *ctx,
-    uint16_t device_id,
-    const secs_protocol_session_options_v2_t *options,
     secs_protocol_session_t **out_host,
     secs_protocol_session_t **out_equipment);
 

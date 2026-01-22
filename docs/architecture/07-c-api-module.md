@@ -374,7 +374,6 @@ typedef struct secs_error {
 │  secs_sml_runtime_create()         secs_sml_runtime_destroy()           │
 │  secs_hsms_connection_create_*()   secs_hsms_connection_destroy()       │
 │  secs_hsms_session_create()        secs_hsms_session_destroy()          │
-│  secs_hsms_session_create_v2()     secs_hsms_session_destroy()          │
 │  secs_protocol_session_create_*()  secs_protocol_session_destroy()      │
 │                                                                         │
 │  注意：destroy 函数内部使用 guard_void() 吞掉异常，保证不抛出           │
@@ -534,7 +533,7 @@ typedef struct secs_error {
 │  t8_ms                         t8                         字符间隔超时  │
 │  linktest_interval_ms          linktest_interval          心跳周期      │
 │  linktest_max_consecutive_     linktest_max_consecutive_  连续失败阈值  │
-│    failures (v2)                 failures                               │
+│    failures                     failures                               │
 │  auto_reconnect                auto_reconnect             自动重连      │
 │  passive_accept_select         passive_accept_select      被动接受选择  │
 │                                                                         │
@@ -555,8 +554,14 @@ typedef struct secs_error {
 │  主动 TCP              secs_hsms_session_open_         连接远端并       │
 │                          active_ip(sess, ip, port)     发送 SELECT      │
 │                                                                         │
+│  主动 TCP（主循环）     secs_hsms_session_run_          连接远端；断线   │
+│                          active_ip(sess, ip, port)     按 T5 重连       │
+│                                                                         │
 │  被动 TCP              secs_hsms_session_open_         监听并接受       │
 │                          passive_ip(sess, ip, port)    一个连接         │
+│                                                                         │
+│  被动 TCP（主循环）     secs_hsms_session_run_          循环 accept；    │
+│                          passive_ip(sess, ip, port)    断线继续等待     │
 │                                                                         │
 │  主动 Connection       secs_hsms_session_open_         注入已有连接     │
 │                          active_connection(sess, &c)   (测试用)         │
@@ -838,10 +843,12 @@ typedef struct secs_error {
 |-----|------|------|
 | `secs_hsms_connection_create_memory_duplex(...)` | 创建内存连接对 | 否 |
 | `secs_hsms_connection_destroy(c)` | 销毁连接 | 否 |
-| `secs_hsms_session_create[_v2](...)` | 创建会话 | 否 |
+| `secs_hsms_session_create(...)` | 创建会话 | 否 |
 | `secs_hsms_session_destroy(sess)` | 销毁会话 | 是 |
 | `secs_hsms_session_open_active_ip(...)` | 主动连接 | 是 |
+| `secs_hsms_session_run_active_ip(...)` | 主动连接（阻塞主循环；断线按 T5 重连） | 是 |
 | `secs_hsms_session_open_passive_ip(...)` | 被动监听 | 是 |
+| `secs_hsms_session_run_passive_ip(...)` | 被动监听（阻塞主循环；断线后继续 accept） | 是 |
 | `secs_hsms_session_open_*_connection(...)` | 注入连接 | 是 |
 | `secs_hsms_session_is_selected(...)` | 查询选择状态 | 是 |
 | `secs_hsms_session_stop(sess)` | 停止会话 | 否 |
@@ -854,9 +861,9 @@ typedef struct secs_error {
 
 | API | 功能 | 阻塞 |
 |-----|------|------|
-| `secs_protocol_session_create_from_hsms[_v2](...)` | 从 HSMS 创建（v2 支持更多选项，如 dump） | 否 |
-| `secs_protocol_session_create_from_secs1_serial[_v2](...)` | 从串口创建（SECS-I；内部打开串口） | 是 |
-| `secs_protocol_session_create_from_secs1_memory_duplex[_v2](...)` | 创建一对内存互联 SECS-I session（loopback） | 否 |
+| `secs_protocol_session_create_from_hsms(...)` | 从 HSMS 创建（支持更多选项，如 max_pending_requests、dump） | 否 |
+| `secs_protocol_session_create_from_secs1_serial(...)` | 从串口创建（SECS-I；内部打开串口） | 是 |
+| `secs_protocol_session_create_from_secs1_memory_duplex(...)` | 创建一对内存互联 SECS-I session（loopback） | 否 |
 | `secs_protocol_session_destroy(sess)` | 销毁会话 | 是 |
 | `secs_protocol_session_stop(sess)` | 停止会话 | 否 |
 | `secs_protocol_session_set_handler(...)` | 注册 handler | 否 |

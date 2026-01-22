@@ -1466,11 +1466,11 @@ static void test_ii_encode_decode_and_malicious(void) {
     secs_ii_item_destroy(list);
 }
 
-static void test_hsms_session_create_v2_smoke(void) {
+static void test_hsms_session_create_smoke(void) {
     secs_context_t *ctx = NULL;
-    expect_ok("secs_context_create(v2)", secs_context_create(&ctx));
+    expect_ok("secs_context_create", secs_context_create(&ctx));
 
-    secs_hsms_session_options_v2_t opt;
+    secs_hsms_session_options_t opt;
     memset(&opt, 0, sizeof(opt));
     opt.session_id = 0x1010;
     opt.t3_ms = 2000;
@@ -1484,8 +1484,8 @@ static void test_hsms_session_create_v2_smoke(void) {
     opt.passive_accept_select = 1;
 
     secs_hsms_session_t *sess = NULL;
-    expect_ok("secs_hsms_session_create_v2",
-              secs_hsms_session_create_v2(ctx, &opt, &sess));
+    expect_ok("secs_hsms_session_create",
+              secs_hsms_session_create(ctx, &opt, &sess));
     secs_hsms_session_destroy(sess);
 
     secs_context_destroy(ctx);
@@ -4720,12 +4720,12 @@ static void test_hsms_protocol_loopback(void) {
     atomic_int dump_calls;
     atomic_init(&dump_calls, 0);
 
-    secs_protocol_session_options_v2_t client_proto_opt;
+    secs_protocol_session_options_t client_proto_opt;
     memset(&client_proto_opt, 0, sizeof(client_proto_opt));
     client_proto_opt.t3_ms = 1000;
     client_proto_opt.poll_interval_ms = 5;
 
-    secs_protocol_session_options_v2_t server_proto_opt;
+    secs_protocol_session_options_t server_proto_opt;
     memset(&server_proto_opt, 0, sizeof(server_proto_opt));
     server_proto_opt.t3_ms = 1000;
     server_proto_opt.poll_interval_ms = 5;
@@ -4736,19 +4736,19 @@ static void test_hsms_protocol_loopback(void) {
     secs_protocol_session_t *client_proto = NULL;
     secs_protocol_session_t *server_proto = NULL;
     expect_ok(
-        "secs_protocol_session_create_from_hsms_v2(client)",
-        secs_protocol_session_create_from_hsms_v2(ctx,
-                                                  client_hsms,
-                                                  hsms_opt.session_id,
-                                                  &client_proto_opt,
-                                                  &client_proto));
+        "secs_protocol_session_create_from_hsms(client)",
+        secs_protocol_session_create_from_hsms(ctx,
+                                               client_hsms,
+                                               hsms_opt.session_id,
+                                               &client_proto_opt,
+                                               &client_proto));
     expect_ok(
-        "secs_protocol_session_create_from_hsms_v2(server)",
-        secs_protocol_session_create_from_hsms_v2(ctx,
-                                                  server_hsms,
-                                                  hsms_opt.session_id,
-                                                  &server_proto_opt,
-                                                  &server_proto));
+        "secs_protocol_session_create_from_hsms(server)",
+        secs_protocol_session_create_from_hsms(ctx,
+                                               server_hsms,
+                                               hsms_opt.session_id,
+                                               &server_proto_opt,
+                                               &server_proto));
 
     /* 参数校验：protocol send/request 的 body 指针/长度不一致必须拒绝 */
     {
@@ -6203,11 +6203,11 @@ static void test_protocol_session_secs1_memory_duplex(void) {
     secs_context_destroy(ctx);
 }
 
-static void test_protocol_session_secs1_memory_duplex_v2(void) {
+static void test_protocol_session_secs1_memory_duplex_max_pending(void) {
     secs_context_t *ctx = NULL;
-    expect_ok("secs_context_create(secs1 duplex v2)", secs_context_create(&ctx));
+    expect_ok("secs_context_create(secs1 duplex)", secs_context_create(&ctx));
 
-    secs_protocol_session_options_v2_t opt;
+    secs_protocol_session_options_t opt;
     memset(&opt, 0, sizeof(opt));
     opt.t3_ms = 200;
     opt.poll_interval_ms = 1;
@@ -6215,11 +6215,11 @@ static void test_protocol_session_secs1_memory_duplex_v2(void) {
 
     secs_protocol_session_t *host = NULL;
     secs_protocol_session_t *equip = NULL;
-    expect_ok("secs_protocol_session_create_from_secs1_memory_duplex_v2",
-              secs_protocol_session_create_from_secs1_memory_duplex_v2(
+    expect_ok("secs_protocol_session_create_from_secs1_memory_duplex",
+              secs_protocol_session_create_from_secs1_memory_duplex(
                   ctx, 0x0101, &opt, &host, &equip));
 
-    expect_ok("secs_protocol_session_set_handler(secs1 equip v2)",
+    expect_ok("secs_protocol_session_set_handler(secs1 equip)",
               secs_protocol_session_set_handler(
                   equip, 1, 1, secs1_simple_reply_handler, NULL));
 
@@ -6239,7 +6239,7 @@ static void test_protocol_session_secs1_memory_duplex_v2(void) {
 
     pthread_t th;
     if (pthread_create(&th, NULL, secs1_poll_loop_thread, &args) != 0) {
-        fprintf(stderr, "FAIL: pthread_create(secs1 poll loop v2)\n");
+        fprintf(stderr, "FAIL: pthread_create(secs1 poll loop)\n");
         ++g_failures;
     }
 
@@ -6247,7 +6247,7 @@ static void test_protocol_session_secs1_memory_duplex_v2(void) {
         const uint8_t body[1] = {0x02u};
         secs_data_message_t reply;
         memset(&reply, 0, sizeof(reply));
-        expect_ok("secs_protocol_session_request(secs1 v2 host->equip)",
+        expect_ok("secs_protocol_session_request(secs1 host->equip)",
                   secs_protocol_session_request(
                       host, 1, 1, body, sizeof(body), 1000, &reply));
         secs_data_message_free(&reply);
@@ -6257,11 +6257,11 @@ static void test_protocol_session_secs1_memory_duplex_v2(void) {
     (void)pthread_join(th, NULL);
 
     if (atomic_load(&poll_errors) != 0) {
-        fprintf(stderr, "FAIL: secs1 v2 poll loop got error\n");
+        fprintf(stderr, "FAIL: secs1 poll loop got error\n");
         ++g_failures;
     }
     if (atomic_load(&handled_cnt) <= 0) {
-        fprintf(stderr, "FAIL: secs1 v2 poll loop handled_cnt should > 0\n");
+        fprintf(stderr, "FAIL: secs1 poll loop handled_cnt should > 0\n");
         ++g_failures;
     }
 
@@ -6297,15 +6297,15 @@ static void test_protocol_session_secs1_serial_pty_smoke(void) {
     {
         const char *bad_path = "/dev/secs_lib_no_such_tty";
 
-        secs_protocol_session_options_v2_t opt;
+        secs_protocol_session_options_t opt;
         memset(&opt, 0, sizeof(opt));
         opt.t3_ms = 200;
         opt.poll_interval_ms = 1;
         opt.max_pending_requests = 8;
 
         secs_protocol_session_t *sess = NULL;
-        expect_err("secs_protocol_session_create_from_secs1_serial_v2(bad path)",
-                   secs_protocol_session_create_from_secs1_serial_v2(
+        expect_err("secs_protocol_session_create_from_secs1_serial(bad path,max_pending)",
+                   secs_protocol_session_create_from_secs1_serial(
                        ctx, bad_path, 0, 0x0101, 0, &opt, &sess));
         secs_protocol_session_destroy(sess);
     }
@@ -6337,15 +6337,15 @@ static void test_protocol_session_secs1_serial_pty_smoke(void) {
         if (fd >= 0) {
             (void)close(fd);
 
-            secs_protocol_session_options_v2_t opt;
+            secs_protocol_session_options_t opt;
             memset(&opt, 0, sizeof(opt));
             opt.t3_ms = 200;
             opt.poll_interval_ms = 1;
             opt.max_pending_requests = 8;
 
             secs_protocol_session_t *sess = NULL;
-            expect_err("secs_protocol_session_create_from_secs1_serial_v2(tmpfile)",
-                       secs_protocol_session_create_from_secs1_serial_v2(
+            expect_err("secs_protocol_session_create_from_secs1_serial(tmpfile,max_pending)",
+                       secs_protocol_session_create_from_secs1_serial(
                            ctx, path, 0, 0x0101, 0, &opt, &sess));
             secs_protocol_session_destroy(sess);
 
@@ -6356,7 +6356,7 @@ static void test_protocol_session_secs1_serial_pty_smoke(void) {
     struct pty_pair p;
     const int has_pty = create_pty_pair(&p);
 
-    /* v1：覆盖 make_proto_options(non-null) + SerialPortLink::open */
+    /* 覆盖：make_proto_options(non-null) + SerialPortLink::open */
     {
         secs_protocol_session_options_t opt;
         memset(&opt, 0, sizeof(opt));
@@ -6383,9 +6383,9 @@ static void test_protocol_session_secs1_serial_pty_smoke(void) {
         }
     }
 
-    /* v2：覆盖 create_from_secs1_serial_v2 分支（含 max_pending_requests 赋值） */
+    /* 覆盖：max_pending_requests 赋值分支 */
     {
-        secs_protocol_session_options_v2_t opt;
+        secs_protocol_session_options_t opt;
         memset(&opt, 0, sizeof(opt));
         opt.t3_ms = 200;
         opt.poll_interval_ms = 1;
@@ -6393,16 +6393,16 @@ static void test_protocol_session_secs1_serial_pty_smoke(void) {
 
         secs_protocol_session_t *sess = NULL;
         if (has_pty) {
-            expect_ok("secs_protocol_session_create_from_secs1_serial_v2(pty)",
-                      secs_protocol_session_create_from_secs1_serial_v2(
+            expect_ok("secs_protocol_session_create_from_secs1_serial(pty,max_pending)",
+                      secs_protocol_session_create_from_secs1_serial(
                           ctx, p.slave_path, 0, 0x0101, 0, &opt, &sess));
 
             int handled = 1;
-            expect_ok("secs_protocol_session_poll_once(secs1 serial v2 timeout)",
+            expect_ok("secs_protocol_session_poll_once(secs1 serial timeout,max_pending)",
                       secs_protocol_session_poll_once(sess, 5, &handled));
             if (handled != 0) {
                 fprintf(stderr,
-                        "FAIL: secs1 serial v2 poll_once(timeout) should handled=0\n");
+                        "FAIL: secs1 serial poll_once(timeout) should handled=0\n");
                 ++g_failures;
             }
 
@@ -6424,7 +6424,7 @@ int main(void) {
     test_log_set_level_smoke();
     test_context_create_with_options_smoke();
     test_invalid_argument_fast_fail();
-    test_hsms_session_create_v2_smoke();
+    test_hsms_session_create_smoke();
     test_ii_encode_decode_and_malicious();
     test_ii_all_types_and_views();
     test_ii_list_builder_helpers();
@@ -6445,7 +6445,7 @@ int main(void) {
     test_hsms_open_passive_ip_invalid_cases();
     test_hsms_open_ip_smoke();
     test_protocol_session_secs1_memory_duplex();
-    test_protocol_session_secs1_memory_duplex_v2();
+    test_protocol_session_secs1_memory_duplex_max_pending();
     test_protocol_session_secs1_serial_pty_smoke();
     test_hsms_protocol_loopback();
 
