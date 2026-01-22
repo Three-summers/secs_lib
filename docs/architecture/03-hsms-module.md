@@ -547,6 +547,21 @@
 │  │  5. set_selected_()                                         │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                     │
+│  async_run_passive(acceptor) - 自动重连主循环：                      │
+│  ┌────────────────────────────────────────────────────────────┐    │
+│  │  while (!stop_requested_) {                                 │    │
+│  │      auto [ec, socket] = co_await acceptor.async_accept();  │    │
+│  │      if (ec && !auto_reconnect) co_return ec;               │    │
+│  │                                                             │    │
+│  │      auto ec2 = co_await async_open_passive(std::move(socket));│    │
+│  │      if (ec2 && !auto_reconnect) co_return ec2;             │    │
+│  │                                                             │    │
+│  │      // 等待断线，然后按 T5 退避继续 accept                   │    │
+│  │      co_await disconnected_event_.async_wait();             │    │
+│  │      co_await async_sleep(T5);                              │    │
+│  │  }                                                          │    │
+│  └────────────────────────────────────────────────────────────┘    │
+│                                                                     │
 │  reader_loop_ 控制消息处理：                                        │
 │  ┌────────────────────────────────────────────────────────────┐    │
 │  │  // 控制消息：先触发可选观测回调（on_control_event）         │    │

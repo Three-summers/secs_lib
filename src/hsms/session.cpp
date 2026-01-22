@@ -187,6 +187,12 @@ void Session::stop() noexcept {
     stop_requested_ = true;
     connection_.cancel_and_close();
 
+    // 若正在被动 accept，关闭 acceptor 以打断 async_accept（best-effort）。
+    if (passive_acceptor_) {
+        std::error_code ignore{};
+        passive_acceptor_->close(ignore);
+    }
+
     SPDLOG_DEBUG("hsms stop requested");
     on_disconnected_(core::make_error_code(core::errc::cancelled));
 }
@@ -678,6 +684,58 @@ Session::async_run_active(const asio::ip::tcp::endpoint &endpoint) {
         // 等待断线，然后按 T5 退避后重连。
         (void)co_await disconnected_event_.async_wait(std::nullopt);
         if (!options_.auto_reconnect || stop_requested_) {
+            co_return std::error_code{};
+        }
+
+        Timer timer(executor_);
+        (void)co_await timer.async_wait_for(options_.t5);
+    }
+    co_return std::error_code{};
+}
+
+asio::awaitable<std::error_code>
+Session::async_run_passive(asio::ip::tcp::acceptor &acceptor) {
+    if (stop_requested_) {
+        co_return core::make_error_code(core::errc::cancelled);
+    }
+
+    passive_acceptor_ = &acceptor;
+    struct Reset final {
+        Session *self;
+        ~Reset() { self->passive_acceptor_ = nullptr; }
+    } reset{this};
+
+    while (!stop_requested_) {
+        auto [acc_ec, socket] =
+            co_await acceptor.async_accept(asio::as_tuple(asio::use_awaitable));
+        if (acc_ec) {
+            if (stop_requested_) {
+                co_return std::error_code{};
+            }
+            if (!options_.auto_reconnect) {
+                co_return acc_ec;
+            }
+            Timer timer(executor_);
+            (void)co_await timer.async_wait_for(options_.t5);
+            continue;
+        }
+
+        auto ec = co_await async_open_passive(std::move(socket));
+        if (ec) {
+            if (stop_requested_) {
+                co_return std::error_code{};
+            }
+            if (!options_.auto_reconnect) {
+                co_return ec;
+            }
+            Timer timer(executor_);
+            (void)co_await timer.async_wait_for(options_.t5);
+            continue;
+        }
+
+        // 等待断线（SEPARATE/对端关闭/错误等），然后决定是否继续 accept。
+        (void)co_await disconnected_event_.async_wait(std::nullopt);
+        if (stop_requested_ || !options_.auto_reconnect) {
             co_return std::error_code{};
         }
 

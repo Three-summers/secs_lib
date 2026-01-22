@@ -142,6 +142,12 @@ public:
     asio::awaitable<std::error_code>
     async_run_active(const asio::ip::tcp::endpoint &endpoint);
 
+    // 被动端自动重连主循环（服务端）：
+    // - acceptor 的生命周期必须覆盖本协程运行期；
+    // - stop() 会 best-effort 取消/关闭 acceptor，以打断 async_accept。
+    asio::awaitable<std::error_code>
+    async_run_passive(asio::ip::tcp::acceptor &acceptor);
+
     asio::awaitable<std::error_code> async_send(const Message &msg);
 
     // 等待下一条数据消息（控制消息会被内部消费/响应）。
@@ -217,6 +223,10 @@ private:
 
     bool stop_requested_{false};
     bool reader_running_{false};
+
+    // 若 async_run_passive 正在等待 accept，可通过 stop() 取消/关闭 acceptor。
+    // 约束：acceptor 必须在 async_run_passive 协程结束前保持有效。
+    asio::ip::tcp::acceptor *passive_acceptor_{nullptr};
 
     secs::core::Event selected_event_{};
     secs::core::Event disconnected_event_{};
