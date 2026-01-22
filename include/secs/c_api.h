@@ -780,6 +780,55 @@ secs_error_t secs_sml_render_context_get(const secs_sml_render_context_t *ctx,
                                          const char *name,
                                          secs_ii_item_t **out_value);
 
+/*
+ * 便捷读取变量（用于减少调用方的样板代码）：
+ * - 数值/Boolean 类型：要求数组长度必须为 1，输出标量值；
+ * - ASCII/Binary：输出 view（指向 ctx 内部内存），生命周期随 ctx；
+ * - 若不存在返回 NOT_FOUND；
+ * - 类型不匹配/长度不符合约定返回 INVALID_ARGUMENT。
+ */
+secs_error_t secs_sml_render_context_get_ascii_view(const secs_sml_render_context_t *ctx,
+                                                    const char *name,
+                                                    const char **out_ptr,
+                                                    size_t *out_n);
+secs_error_t secs_sml_render_context_get_binary_view(const secs_sml_render_context_t *ctx,
+                                                     const char *name,
+                                                     const uint8_t **out_ptr,
+                                                     size_t *out_n);
+secs_error_t secs_sml_render_context_get_boolean(const secs_sml_render_context_t *ctx,
+                                                 const char *name,
+                                                 uint8_t *out_value01);
+secs_error_t secs_sml_render_context_get_i1(const secs_sml_render_context_t *ctx,
+                                            const char *name,
+                                            int8_t *out_value);
+secs_error_t secs_sml_render_context_get_i2(const secs_sml_render_context_t *ctx,
+                                            const char *name,
+                                            int16_t *out_value);
+secs_error_t secs_sml_render_context_get_i4(const secs_sml_render_context_t *ctx,
+                                            const char *name,
+                                            int32_t *out_value);
+secs_error_t secs_sml_render_context_get_i8(const secs_sml_render_context_t *ctx,
+                                            const char *name,
+                                            int64_t *out_value);
+secs_error_t secs_sml_render_context_get_u1(const secs_sml_render_context_t *ctx,
+                                            const char *name,
+                                            uint8_t *out_value);
+secs_error_t secs_sml_render_context_get_u2(const secs_sml_render_context_t *ctx,
+                                            const char *name,
+                                            uint16_t *out_value);
+secs_error_t secs_sml_render_context_get_u4(const secs_sml_render_context_t *ctx,
+                                            const char *name,
+                                            uint32_t *out_value);
+secs_error_t secs_sml_render_context_get_u8(const secs_sml_render_context_t *ctx,
+                                            const char *name,
+                                            uint64_t *out_value);
+secs_error_t secs_sml_render_context_get_f4(const secs_sml_render_context_t *ctx,
+                                            const char *name,
+                                            float *out_value);
+secs_error_t secs_sml_render_context_get_f8(const secs_sml_render_context_t *ctx,
+                                            const char *name,
+                                            double *out_value);
+
 /* ----------------------------- SML Runtime（Context-Aware）
  * ----------------------------- */
 

@@ -2813,6 +2813,95 @@ secs_error_t secs_sml_render_context_get(const secs_sml_render_context_t *ctx,
     });
 }
 
+secs_error_t secs_sml_render_context_get_ascii_view(const secs_sml_render_context_t *ctx,
+                                                    const char *name,
+                                                    const char **out_ptr,
+                                                    size_t *out_n) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !name || !out_ptr || !out_n) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_ptr = nullptr;
+        *out_n = 0;
+
+        const auto *item = ctx->ctx.get(std::string_view{name});
+        if (!item) {
+            return c_api_err(SECS_C_API_NOT_FOUND);
+        }
+        const auto *v = item->get_if<secs::ii::ASCII>();
+        if (!v) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_ptr = v->value.data();
+        *out_n = v->value.size();
+        return ok();
+    });
+}
+
+secs_error_t secs_sml_render_context_get_binary_view(const secs_sml_render_context_t *ctx,
+                                                     const char *name,
+                                                     const uint8_t **out_ptr,
+                                                     size_t *out_n) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx || !name || !out_ptr || !out_n) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_ptr = nullptr;
+        *out_n = 0;
+
+        const auto *item = ctx->ctx.get(std::string_view{name});
+        if (!item) {
+            return c_api_err(SECS_C_API_NOT_FOUND);
+        }
+        const auto *v = item->get_if<secs::ii::Binary>();
+        if (!v) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        *out_ptr = reinterpret_cast<const uint8_t *>(v->value.data());
+        *out_n = v->value.size();
+        return ok();
+    });
+}
+
+#define SECS_SML_RENDER_CONTEXT_GET_SCALAR_IMPL(c_type, cpp_type, tag, convert_expr) \
+    secs_error_t secs_sml_render_context_get_##tag(                                  \
+        const secs_sml_render_context_t *ctx, const char *name, c_type *out_value) { \
+        return guard_error([&]() -> secs_error_t {                                    \
+            if (!ctx || !name || !out_value) {                                        \
+                return c_api_err(SECS_C_API_INVALID_ARGUMENT);                        \
+            }                                                                         \
+            *out_value = {};                                                          \
+                                                                                      \
+            const auto *item = ctx->ctx.get(std::string_view{name});                  \
+            if (!item) {                                                              \
+                return c_api_err(SECS_C_API_NOT_FOUND);                               \
+            }                                                                         \
+            const auto *v = item->get_if<cpp_type>();                                 \
+            if (!v || v->values.size() != 1) {                                        \
+                return c_api_err(SECS_C_API_INVALID_ARGUMENT);                        \
+            }                                                                         \
+            *out_value = (convert_expr);                                              \
+            return ok();                                                              \
+        });                                                                           \
+    }
+
+SECS_SML_RENDER_CONTEXT_GET_SCALAR_IMPL(uint8_t,
+                                       secs::ii::Boolean,
+                                       boolean,
+                                       v->values[0] ? 1u : 0u)
+SECS_SML_RENDER_CONTEXT_GET_SCALAR_IMPL(int8_t, secs::ii::I1, i1, v->values[0])
+SECS_SML_RENDER_CONTEXT_GET_SCALAR_IMPL(int16_t, secs::ii::I2, i2, v->values[0])
+SECS_SML_RENDER_CONTEXT_GET_SCALAR_IMPL(int32_t, secs::ii::I4, i4, v->values[0])
+SECS_SML_RENDER_CONTEXT_GET_SCALAR_IMPL(int64_t, secs::ii::I8, i8, v->values[0])
+SECS_SML_RENDER_CONTEXT_GET_SCALAR_IMPL(uint8_t, secs::ii::U1, u1, v->values[0])
+SECS_SML_RENDER_CONTEXT_GET_SCALAR_IMPL(uint16_t, secs::ii::U2, u2, v->values[0])
+SECS_SML_RENDER_CONTEXT_GET_SCALAR_IMPL(uint32_t, secs::ii::U4, u4, v->values[0])
+SECS_SML_RENDER_CONTEXT_GET_SCALAR_IMPL(uint64_t, secs::ii::U8, u8, v->values[0])
+SECS_SML_RENDER_CONTEXT_GET_SCALAR_IMPL(float, secs::ii::F4, f4, v->values[0])
+SECS_SML_RENDER_CONTEXT_GET_SCALAR_IMPL(double, secs::ii::F8, f8, v->values[0])
+
+#undef SECS_SML_RENDER_CONTEXT_GET_SCALAR_IMPL
+
 // ----------------------------- SML Runtime（Context-Aware） -----------------------------
 
 secs_error_t secs_sml_runtime_encode_message_body(

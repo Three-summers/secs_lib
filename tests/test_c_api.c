@@ -3258,6 +3258,17 @@ static void test_sml_runtime_match_response_with_capture(void) {
     }
 
     if (captures) {
+        /* 便捷：直接取标量（避免手动 get + item_view）。 */
+        {
+            uint16_t cap_a = 0;
+            expect_ok("secs_sml_render_context_get_u2(CAP_A)",
+                      secs_sml_render_context_get_u2(captures, "CAP_A", &cap_a));
+            if (cap_a != 0x1001) {
+                fprintf(stderr, "FAIL: capture A scalar mismatch\n");
+                ++g_failures;
+            }
+        }
+
         /* CAP_A: <U2 0x1001> */
         secs_ii_item_t *a_item = NULL;
         expect_ok("secs_sml_render_context_get(CAP_A)",
@@ -3300,6 +3311,36 @@ static void test_sml_runtime_match_response_with_capture(void) {
             secs_ii_item_destroy(child);
         }
         secs_ii_item_destroy(b_item);
+
+        /* 类型不匹配：应返回 INVALID_ARGUMENT */
+        {
+            uint16_t v = 0;
+            secs_error_t err =
+                secs_sml_render_context_get_u2(captures, "CAP_B", &v);
+            expect_err("secs_sml_render_context_get_u2(CAP_B)", err);
+            if (err.value != (int)SECS_C_API_INVALID_ARGUMENT ||
+                err.category == NULL || strcmp(err.category, "secs.c_api") != 0) {
+                failf("render_context_get_u2(CAP_B) should be secs.c_api/INVALID_ARGUMENT",
+                      err);
+            }
+        }
+
+        /* 不存在：应返回 NOT_FOUND */
+        {
+            uint16_t v = 123;
+            secs_error_t err =
+                secs_sml_render_context_get_u2(captures, "NO_SUCH", &v);
+            expect_err("secs_sml_render_context_get_u2(NO_SUCH)", err);
+            if (err.value != (int)SECS_C_API_NOT_FOUND ||
+                err.category == NULL || strcmp(err.category, "secs.c_api") != 0) {
+                failf("render_context_get_u2(NO_SUCH) should be secs.c_api/NOT_FOUND",
+                      err);
+            }
+            if (v != 0) {
+                fprintf(stderr, "FAIL: render_context_get_u2(NO_SUCH) expected 0\n");
+                ++g_failures;
+            }
+        }
 
         /* 不存在：应返回 NOT_FOUND */
         {
