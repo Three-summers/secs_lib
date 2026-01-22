@@ -1447,6 +1447,122 @@ static void test_ii_encode_decode_and_malicious(void) {
         }
     }
 
+    /* 恶意输入：超大 List length（65536，需要 3 字节长度字段）
+     * - 默认 DecodeLimits.max_list_items=65535，应返回 list_too_large；
+     * - 放宽 max_list_items 后应允许解码（用于验证 C 包装层 limits 映射）。 */
+    {
+        const size_t list_len = 65536u;
+        const size_t n = 4u + list_len * 2u; /* List header(4) + N*(BIN empty=2) */
+        uint8_t *raw = (uint8_t *)secs_malloc(n);
+        if (!raw) {
+            fprintf(stderr, "FAIL: secs_malloc failed for large list bytes\n");
+            ++g_failures;
+        } else {
+            /* List: format_code=0x00, length_bytes=3 -> FormatByte=0x03 */
+            raw[0] = 0x03u;
+            raw[1] = 0x01u;
+            raw[2] = 0x00u;
+            raw[3] = 0x00u;
+            /* Child: Binary: format_code=0x08, length_bytes=1 -> 0x21, length=0 */
+            for (size_t i = 0; i < list_len; ++i) {
+                raw[4u + i * 2u] = 0x21u;
+                raw[4u + i * 2u + 1u] = 0x00u;
+            }
+
+            /* 默认限制：应拒绝 */
+            {
+                size_t consumed = 123;
+                secs_ii_item_t *decoded = NULL;
+                secs_error_t err =
+                    secs_ii_decode_one(raw, n, &consumed, &decoded);
+                expect_err("secs_ii_decode_one(list_len=65536)", err);
+                if (consumed != 0u) {
+                    fprintf(stderr,
+                            "FAIL: decode_one(list too large) consumed=%zu\n",
+                            consumed);
+                    ++g_failures;
+                }
+                if (err.category && strcmp(err.category, "secs.ii") != 0) {
+                    fprintf(stderr,
+                            "FAIL: list_too_large category mismatch: %s\n",
+                            err.category);
+                    ++g_failures;
+                }
+                if (decoded) {
+                    secs_ii_item_destroy(decoded);
+                }
+            }
+
+            /* 放宽 max_list_items：应允许解码，并能拿到正确 list size */
+            {
+                secs_ii_decode_limits_t limits;
+                memset(&limits, 0, sizeof(limits));
+                secs_ii_decode_limits_init_default(&limits);
+                limits.max_list_items = (uint32_t)list_len;
+                limits.max_total_items = list_len + 1u;
+
+                size_t consumed = 0;
+                secs_ii_item_t *decoded = NULL;
+                secs_error_t err = secs_ii_decode_one_with_limits(
+                    raw, n, &limits, &consumed, &decoded);
+                expect_ok("secs_ii_decode_one_with_limits(list_len=65536)", err);
+                if (secs_error_is_ok(err)) {
+                    if (consumed != n) {
+                        fprintf(stderr,
+                                "FAIL: decode_one_with_limits consumed mismatch: %zu != %zu\n",
+                                consumed,
+                                n);
+                        ++g_failures;
+                    }
+                    size_t child_n = 0;
+                    expect_ok("secs_ii_item_list_size(large list)",
+                              secs_ii_item_list_size(decoded, &child_n));
+                    if (child_n != list_len) {
+                        fprintf(stderr,
+                                "FAIL: decoded large list size mismatch: %zu != %zu\n",
+                                child_n,
+                                list_len);
+                        ++g_failures;
+                    }
+
+                    /* 抽样检查首尾元素是空 Binary */
+                    const size_t idxs[] = {0u, list_len - 1u};
+                    for (size_t k = 0; k < 2u; ++k) {
+                        secs_ii_item_t *child = NULL;
+                        expect_ok("secs_ii_item_list_get(large list)",
+                                  secs_ii_item_list_get(decoded, idxs[k], &child));
+                        secs_ii_item_type_t ty;
+                        expect_ok("secs_ii_item_get_type(large list child)",
+                                  secs_ii_item_get_type(child, &ty));
+                        if (ty != SECS_II_ITEM_BINARY) {
+                            fprintf(stderr,
+                                    "FAIL: large list child type mismatch: %d\n",
+                                    (int)ty);
+                            ++g_failures;
+                        }
+                        const uint8_t *p = NULL;
+                        size_t pn = 0;
+                        expect_ok("secs_ii_item_binary_view(large list child)",
+                                  secs_ii_item_binary_view(child, &p, &pn));
+                        (void)p;
+                        if (pn != 0u) {
+                            fprintf(stderr,
+                                    "FAIL: large list child payload len=%zu\n",
+                                    pn);
+                            ++g_failures;
+                        }
+                        secs_ii_item_destroy(child);
+                    }
+                }
+                if (decoded) {
+                    secs_ii_item_destroy(decoded);
+                }
+            }
+
+            secs_free(raw);
+        }
+    }
+
     /* 参数校验：空指针 + 非零长度应报 INVALID_ARGUMENT */
     {
         size_t consumed = 0;

@@ -166,6 +166,45 @@ static void test_encode_frame_rejects_oversized_body() {
     TEST_EXPECT_EQ(ec, make_error_code(errc::buffer_overflow));
 }
 
+static void test_encode_decode_frame_max_payload_boundary() {
+    // 边界/大用例：payload 恰好等于 kMaxPayloadSize，应能正常编码与解码。
+    const std::size_t max_body =
+        static_cast<std::size_t>(kMaxPayloadSize) - static_cast<std::size_t>(kHeaderSize);
+    std::vector<byte> body(max_body);
+    for (std::size_t i = 0; i < body.size(); ++i) {
+        body[i] = static_cast<byte>(i & 0xFFu);
+    }
+
+    const auto msg = make_data_message(/*session_id=*/0x0001,
+                                       /*stream=*/1,
+                                       /*function=*/2,
+                                       /*w_bit=*/false,
+                                       /*system_bytes=*/0x11223344,
+                                       bytes_view{body.data(), body.size()});
+
+    std::vector<byte> frame;
+    TEST_EXPECT_OK(encode_frame(msg, frame));
+    TEST_EXPECT_EQ(frame.size(),
+                   static_cast<std::size_t>(kLengthFieldSize) +
+                       static_cast<std::size_t>(kHeaderSize) + max_body);
+
+    Message out{};
+    std::size_t consumed = 0;
+    const auto ec = decode_frame(bytes_view{frame.data(), frame.size()}, out, consumed);
+    TEST_EXPECT_OK(ec);
+    TEST_EXPECT_EQ(consumed, frame.size());
+    TEST_EXPECT_EQ(out.header.p_type, kPTypeSecs2);
+    TEST_EXPECT_EQ(out.header.s_type, SType::data);
+    TEST_EXPECT_EQ(out.header.system_bytes, 0x11223344U);
+    TEST_EXPECT_EQ(out.stream(), 1U);
+    TEST_EXPECT_EQ(out.function(), 2U);
+
+    TEST_EXPECT_EQ(out.body.size(), max_body);
+    TEST_EXPECT_EQ(out.body.front(), body.front());
+    TEST_EXPECT_EQ(out.body[12'345u], body[12'345u]);
+    TEST_EXPECT_EQ(out.body.back(), body.back());
+}
+
 static void test_decode_payload_rejects_too_small() {
     std::vector<byte> payload(static_cast<std::size_t>(kHeaderSize) - 1U,
                               static_cast<byte>(0));
@@ -281,6 +320,7 @@ int main() {
     test_make_control_messages();
     test_encode_frame_rejects_invalid_p_type();
     test_encode_frame_rejects_oversized_body();
+    test_encode_decode_frame_max_payload_boundary();
     test_decode_payload_rejects_too_small();
     test_decode_payload_rejects_invalid_p_type();
     test_decode_frame_length_errors();

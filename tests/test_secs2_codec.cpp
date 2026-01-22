@@ -216,6 +216,73 @@ void test_length_field_boundaries_list() {
     TEST_EXPECT_EQ(header_length_value(list256), 256u);
 }
 
+void test_large_list_length_3_bytes_and_decode_limits() {
+    // List 的 length 是“子元素个数”，当个数 > 65535 时需要 3 字节长度字段。
+    // 同时默认 DecodeLimits.max_list_items=65535，会拒绝该消息；本测试覆盖：
+    // - 编码端：3 字节 length 字段
+    // - 解码端：list_too_large（默认限制）与自定义限制放行
+    constexpr std::uint32_t list_len = 65'536u;
+
+    std::vector<Item> children;
+    children.reserve(list_len);
+    for (std::uint32_t i = 0; i < list_len; ++i) {
+        children.push_back(Item::binary(std::vector<byte>{}));
+    }
+    const auto item = Item::list(std::move(children));
+
+    std::vector<byte> encoded;
+    TEST_EXPECT_OK(encode(item, encoded));
+
+    TEST_EXPECT_EQ(header_length_bytes(encoded), 3u);
+    TEST_EXPECT_EQ(header_length_value(encoded), list_len);
+
+    const std::size_t expected_child_size = 2u; // BIN length=0 -> 2B（Format + Len）
+    const std::size_t expected_total_size =
+        1u + 3u + static_cast<std::size_t>(list_len) * expected_child_size;
+    TEST_EXPECT_EQ(encoded.size(), expected_total_size);
+
+    // 默认 DecodeLimits：应拒绝（避免超大 list 触发巨量 reserve/循环）。
+    {
+        Item out = placeholder_item();
+        std::size_t consumed = 123;
+        const auto ec =
+            decode_one(bytes_view{encoded.data(), encoded.size()}, out, consumed);
+        TEST_EXPECT_EQ(ec, make_error_code(errc::list_too_large));
+        TEST_EXPECT_EQ(consumed, 0u);
+    }
+
+    // 自定义 limits：放行该 list，并校验结构。
+    {
+        secs::ii::DecodeLimits limits{};
+        limits.max_list_items = list_len;
+        limits.max_total_items = static_cast<std::size_t>(list_len) + 1u;
+
+        Item out = placeholder_item();
+        std::size_t consumed = 0;
+        const auto ec = decode_one(bytes_view{encoded.data(), encoded.size()},
+                                   out,
+                                   consumed,
+                                   limits);
+        TEST_EXPECT_OK(ec);
+        TEST_EXPECT_EQ(consumed, encoded.size());
+
+        const auto *lst = out.get_if<secs::ii::List>();
+        TEST_EXPECT(lst != nullptr);
+        if (lst) {
+            TEST_EXPECT_EQ(lst->size(), static_cast<std::size_t>(list_len));
+            // 抽样检查：每个子项都应是空 Binary。
+            const std::size_t idxs[] = {0u, 1u, 2u, 123u, 1024u, 65'535u};
+            for (const auto idx : idxs) {
+                const auto *bin = (*lst)[idx].get_if<secs::ii::Binary>();
+                TEST_EXPECT(bin != nullptr);
+                if (bin) {
+                    TEST_EXPECT(bin->value.empty());
+                }
+            }
+        }
+    }
+}
+
 void test_stream_decode_consumed() {
     const auto a = Item::ascii("A");
     const auto b = Item::u4(std::vector<std::uint32_t>{0x12345678u});
@@ -691,6 +758,7 @@ int main() {
     test_item_comparisons();
     test_length_field_boundaries_ascii();
     test_length_field_boundaries_list();
+    test_large_list_length_3_bytes_and_decode_limits();
     test_stream_decode_consumed();
     test_decode_errors();
     test_decode_deep_list_nesting_rejected();
