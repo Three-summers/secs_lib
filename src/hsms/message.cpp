@@ -1,5 +1,7 @@
 #include "secs/hsms/message.hpp"
 
+#include "secs/core/metrics.hpp"
+
 #include <array>
 #include <cstring>
 #include <new>
@@ -162,20 +164,27 @@ std::vector<core::byte> encode_frame(const Message &msg) {
 
 std::error_code encode_frame(const Message &msg,
                              std::vector<core::byte> &out) noexcept {
+    secs::core::metrics_counter("secs.hsms.encode_frame.calls", 1);
+    secs::core::metrics_histogram("secs.hsms.encode_frame.body_bytes",
+                                  static_cast<std::uint64_t>(msg.body.size()));
+
     out.clear();
 
     if (msg.header.p_type != kPTypeSecs2) {
+        secs::core::metrics_counter("secs.hsms.encode_frame.errors", 1);
         return core::make_error_code(core::errc::invalid_argument);
     }
 
     const auto header_size = static_cast<std::size_t>(kHeaderSize);
     const auto max_payload_size = static_cast<std::size_t>(kMaxPayloadSize);
     if (max_payload_size < header_size) {
+        secs::core::metrics_counter("secs.hsms.encode_frame.errors", 1);
         return core::make_error_code(core::errc::invalid_argument);
     }
 
     const std::size_t max_body_size = max_payload_size - header_size;
     if (msg.body.size() > max_body_size) {
+        secs::core::metrics_counter("secs.hsms.encode_frame.errors", 1);
         return core::make_error_code(core::errc::buffer_overflow);
     }
 
@@ -184,10 +193,13 @@ std::error_code encode_frame(const Message &msg,
     try {
         out.resize(static_cast<std::size_t>(kLengthFieldSize) + payload_len);
     } catch (const std::bad_alloc &) {
+        secs::core::metrics_counter("secs.hsms.encode_frame.errors", 1);
         return core::make_error_code(core::errc::out_of_memory);
     } catch (const std::length_error &) {
+        secs::core::metrics_counter("secs.hsms.encode_frame.errors", 1);
         return core::make_error_code(core::errc::buffer_overflow);
     } catch (...) {
+        secs::core::metrics_counter("secs.hsms.encode_frame.errors", 1);
         return core::make_error_code(core::errc::invalid_argument);
     }
 
@@ -205,11 +217,14 @@ std::error_code encode_frame(const Message &msg,
         std::memcpy(h + kHeaderSize, msg.body.data(), msg.body.size());
     }
 
+    secs::core::metrics_counter("secs.hsms.encode_frame.ok", 1);
+    secs::core::metrics_histogram("secs.hsms.encode_frame.frame_bytes",
+                                  static_cast<std::uint64_t>(out.size()));
     return {};
 }
 
-std::error_code decode_payload(core::bytes_view payload,
-                               Message &out) noexcept {
+static std::error_code decode_payload_impl_(core::bytes_view payload,
+                                           Message &out) noexcept {
     if (payload.size() < kHeaderSize) {
         return core::make_error_code(core::errc::invalid_argument);
     }
@@ -232,9 +247,8 @@ std::error_code decode_payload(core::bytes_view payload,
 
     out.header = h;
     try {
-        out.body.assign(
-            payload.begin() + static_cast<std::ptrdiff_t>(kHeaderSize),
-            payload.end());
+        out.body.assign(payload.begin() + static_cast<std::ptrdiff_t>(kHeaderSize),
+                        payload.end());
     } catch (const std::bad_alloc &) {
         return core::make_error_code(core::errc::out_of_memory);
     } catch (const std::length_error &) {
@@ -245,34 +259,82 @@ std::error_code decode_payload(core::bytes_view payload,
     return {};
 }
 
+std::error_code decode_payload(core::bytes_view payload,
+                               Message &out) noexcept {
+    static constexpr const char *kCalls = "secs.hsms.decode_payload.calls";
+    static constexpr const char *kErrors = "secs.hsms.decode_payload.errors";
+    static constexpr const char *kOk = "secs.hsms.decode_payload.ok";
+    static constexpr const char *kInBytes = "secs.hsms.decode_payload.in_bytes";
+    static constexpr const char *kBodyBytes =
+        "secs.hsms.decode_payload.body_bytes";
+
+    secs::core::metrics_counter(kCalls, 1);
+    secs::core::metrics_histogram(kInBytes,
+                                  static_cast<std::uint64_t>(payload.size()));
+
+    auto ec = decode_payload_impl_(payload, out);
+
+    if (ec) {
+        secs::core::metrics_counter(kErrors, 1);
+        return ec;
+    }
+
+    secs::core::metrics_counter(kOk, 1);
+    secs::core::metrics_histogram(kBodyBytes,
+                                  static_cast<std::uint64_t>(out.body.size()));
+    return {};
+}
+
 std::error_code decode_frame(core::bytes_view frame,
                              Message &out,
                              std::size_t &consumed) noexcept {
+    static constexpr const char *kCalls = "secs.hsms.decode_frame.calls";
+    static constexpr const char *kErrors = "secs.hsms.decode_frame.errors";
+    static constexpr const char *kOk = "secs.hsms.decode_frame.ok";
+    static constexpr const char *kInBytes = "secs.hsms.decode_frame.in_bytes";
+    static constexpr const char *kConsumedBytes =
+        "secs.hsms.decode_frame.consumed_bytes";
+
+    secs::core::metrics_counter(kCalls, 1);
+    secs::core::metrics_histogram(kInBytes,
+                                  static_cast<std::uint64_t>(frame.size()));
+
     consumed = 0;
     if (frame.size() < kLengthFieldSize) {
+        secs::core::metrics_counter(kErrors, 1);
         return core::make_error_code(core::errc::invalid_argument);
     }
 
     const std::uint32_t payload_len = read_u32_be(frame.data());
     if (payload_len < kHeaderSize) {
+        secs::core::metrics_counter(kErrors, 1);
         return core::make_error_code(core::errc::invalid_argument);
     }
     if (payload_len > kMaxPayloadSize) {
+        secs::core::metrics_counter(kErrors, 1);
         return core::make_error_code(core::errc::buffer_overflow);
     }
 
     const std::size_t total_len =
         static_cast<std::size_t>(kLengthFieldSize) + payload_len;
     if (frame.size() < total_len) {
+        secs::core::metrics_counter(kErrors, 1);
         return core::make_error_code(core::errc::invalid_argument);
     }
 
-    auto ec = decode_payload(frame.subspan(kLengthFieldSize, payload_len), out);
+    // decode_frame 内部需要复用 decode_payload 的解析逻辑，但不应重复计数
+    // decode_payload 的指标（避免一条 decode_frame 触发两套 metrics）。
+    const auto payload = frame.subspan(kLengthFieldSize, payload_len);
+    auto ec = decode_payload_impl_(payload, out);
     if (ec) {
+        secs::core::metrics_counter(kErrors, 1);
         return ec;
     }
 
     consumed = total_len;
+    secs::core::metrics_counter(kOk, 1);
+    secs::core::metrics_histogram(kConsumedBytes,
+                                  static_cast<std::uint64_t>(consumed));
     return {};
 }
 

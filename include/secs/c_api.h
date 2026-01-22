@@ -82,6 +82,42 @@ typedef enum secs_log_level {
 
 secs_error_t secs_log_set_level(secs_log_level_t level);
 
+/* ----------------------------- 指标（metrics） ----------------------------- */
+
+/*
+ * 运行时指标 hook（可观测性）：
+ * - 由业务侧注入回调（例如对接 Prometheus/OpenTelemetry/自研 metrics）；
+ * - 默认无 hook：库内为 no-op；
+ * - 回调会在库内多个线程/协程中被调用，必须线程安全且尽量不要阻塞。
+ *
+ * 约定：
+ * - name 为 UTF-8 的 C 字符串，生命周期至少覆盖本次回调调用；
+ * - 回调如需持久化 name，请自行拷贝。
+ */
+typedef void (*secs_metrics_counter_fn)(void *user_data,
+                                        const char *name,
+                                        uint64_t delta);
+typedef void (*secs_metrics_gauge_fn)(void *user_data,
+                                      const char *name,
+                                      int64_t value);
+typedef void (*secs_metrics_histogram_fn)(void *user_data,
+                                          const char *name,
+                                          uint64_t value);
+
+typedef struct secs_metrics_hook {
+    secs_metrics_counter_fn counter;       /* 可为 NULL */
+    secs_metrics_gauge_fn gauge;           /* 可为 NULL */
+    secs_metrics_histogram_fn histogram;   /* 可为 NULL */
+    void *user_data;                       /* 透传给回调 */
+} secs_metrics_hook_t;
+
+/*
+ * 设置（或清除）全局 metrics hook：
+ * - hook==NULL：清除 hook（恢复默认 no-op）；
+ * - 成功返回 OK。
+ */
+secs_error_t secs_metrics_set_hook(const secs_metrics_hook_t *hook);
+
 /* ----------------------------- 上下文（io 线程） -----------------------------
  */
 

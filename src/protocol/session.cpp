@@ -1,6 +1,7 @@
 #include "secs/protocol/session.hpp"
 
 #include "secs/core/error.hpp"
+#include "secs/core/metrics.hpp"
 #include "secs/hsms/message.hpp"
 #include "secs/hsms/session.hpp"
 #include "secs/secs1/block.hpp"
@@ -352,13 +353,24 @@ asio::awaitable<std::error_code> Session::async_send(
 
 asio::awaitable<std::error_code> Session::async_send_impl_(
     std::uint8_t stream, std::uint8_t function, secs::core::bytes_view body) {
+    static constexpr const char *kCalls = "secs.protocol.send.calls";
+    static constexpr const char *kOk = "secs.protocol.send.ok";
+    static constexpr const char *kErrors = "secs.protocol.send.errors";
+    static constexpr const char *kBodyBytes = "secs.protocol.send.body_bytes";
+
+    secs::core::metrics_counter(kCalls, 1);
+    secs::core::metrics_histogram(kBodyBytes,
+                                  static_cast<std::uint64_t>(body.size()));
+
     if (!is_valid_stream(stream) || !is_primary_function(function)) {
+        secs::core::metrics_counter(kErrors, 1);
         co_return make_error_code(errc::invalid_argument);
     }
 
     std::uint32_t sb = 0;
     auto alloc_ec = system_bytes_.allocate(sb);
     if (alloc_ec) {
+        secs::core::metrics_counter(kErrors, 1);
         co_return alloc_ec;
     }
 
@@ -378,11 +390,14 @@ asio::awaitable<std::error_code> Session::async_send_impl_(
 
     auto ec = co_await async_send_message_(msg);
     if (ec) {
+        secs::core::metrics_counter(kErrors, 1);
         SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
                             "protocol async_send failed: sb={} ec={}({})",
                             sb,
                             ec.value(),
                             ec.message());
+    } else {
+        secs::core::metrics_counter(kOk, 1);
     }
     system_bytes_.release(sb);
     co_return ec;
@@ -421,14 +436,39 @@ Session::async_request_impl_(std::uint8_t stream,
                              std::uint8_t function,
                              secs::core::bytes_view body,
                              std::optional<secs::core::duration> timeout) {
+    static constexpr const char *kCalls = "secs.protocol.request.calls";
+    static constexpr const char *kOk = "secs.protocol.request.ok";
+    static constexpr const char *kErrors = "secs.protocol.request.errors";
+    static constexpr const char *kTimeouts = "secs.protocol.request.timeouts";
+    static constexpr const char *kInvalidArg =
+        "secs.protocol.request.invalid_argument";
+    static constexpr const char *kCancelled = "secs.protocol.request.cancelled";
+    static constexpr const char *kPendingOverflow =
+        "secs.protocol.request.pending_overflow";
+    static constexpr const char *kLatencyMs = "secs.protocol.request.latency_ms";
+    static constexpr const char *kBodyBytes = "secs.protocol.request.body_bytes";
+    static constexpr const char *kReplyBodyBytes =
+        "secs.protocol.reply.body_bytes";
+    static constexpr const char *kPendingGauge = "secs.protocol.pending_requests";
+
+    secs::core::metrics_counter(kCalls, 1);
+    secs::core::metrics_histogram(kBodyBytes,
+                                  static_cast<std::uint64_t>(body.size()));
+
     if (!is_valid_stream(stream) || !is_primary_function(function) ||
         !can_compute_secondary_function(function)) {
+        secs::core::metrics_counter(kErrors, 1);
+        secs::core::metrics_counter(kInvalidArg, 1);
         co_return std::pair{make_error_code(errc::invalid_argument),
                             DataMessage{}};
     }
     if (stop_requested_) {
+        secs::core::metrics_counter(kErrors, 1);
+        secs::core::metrics_counter(kCancelled, 1);
         co_return std::pair{make_error_code(errc::cancelled), DataMessage{}};
     }
+
+    const auto start = secs::core::steady_clock::now();
 
     const auto expected_function = secondary_function(function);
     const auto t3 = timeout.value_or(options_.t3);
@@ -436,6 +476,7 @@ Session::async_request_impl_(std::uint8_t stream,
     std::uint32_t sb = 0;
     auto alloc_ec = system_bytes_.allocate(sb);
     if (alloc_ec) {
+        secs::core::metrics_counter(kErrors, 1);
         co_return std::pair{alloc_ec, DataMessage{}};
     }
 
@@ -466,15 +507,20 @@ Session::async_request_impl_(std::uint8_t stream,
                 options_.max_pending_requests == 0 ? std::size_t{1}
                                                    : options_.max_pending_requests;
             if (pending_.size() >= max_pending) {
+                secs::core::metrics_counter(kErrors, 1);
+                secs::core::metrics_counter(kPendingOverflow, 1);
                 system_bytes_.release(sb);
                 co_return std::pair{make_error_code(errc::buffer_overflow),
                                     DataMessage{}};
             }
             pending_.insert_or_assign(sb, pending);
+            secs::core::metrics_gauge(
+                kPendingGauge, static_cast<std::int64_t>(pending_.size()));
         }
 
         auto send_ec = co_await async_send_message_(req);
         if (send_ec) {
+            secs::core::metrics_counter(kErrors, 1);
             SPDLOG_LOGGER_DEBUG(
                 secs::core::spdlog_logger_raw(),
                 "protocol async_request(HSMS) send failed: sb={} ec={}({})",
@@ -484,6 +530,8 @@ Session::async_request_impl_(std::uint8_t stream,
             {
                 std::lock_guard lk(pending_mu_);
                 pending_.erase(sb);
+                secs::core::metrics_gauge(
+                    kPendingGauge, static_cast<std::int64_t>(pending_.size()));
             }
             system_bytes_.release(sb);
             co_return std::pair{send_ec, DataMessage{}};
@@ -493,10 +541,14 @@ Session::async_request_impl_(std::uint8_t stream,
         {
             std::lock_guard lk(pending_mu_);
             pending_.erase(sb);
+            secs::core::metrics_gauge(
+                kPendingGauge, static_cast<std::int64_t>(pending_.size()));
         }
         system_bytes_.release(sb);
 
         if (wait_ec == make_error_code(errc::timeout)) {
+            secs::core::metrics_counter(kErrors, 1);
+            secs::core::metrics_counter(kTimeouts, 1);
             SPDLOG_LOGGER_DEBUG(
                 secs::core::spdlog_logger_raw(),
                 "protocol async_request(HSMS) timeout: sb={} t3_ms={}",
@@ -505,6 +557,7 @@ Session::async_request_impl_(std::uint8_t stream,
             co_return std::pair{wait_ec, DataMessage{}};
         }
         if (wait_ec) {
+            secs::core::metrics_counter(kErrors, 1);
             SPDLOG_LOGGER_DEBUG(
                 secs::core::spdlog_logger_raw(),
                 "protocol async_request(HSMS) wait failed: sb={} ec={}({})",
@@ -515,6 +568,7 @@ Session::async_request_impl_(std::uint8_t stream,
                                 DataMessage{}};
         }
         if (pending->ec) {
+            secs::core::metrics_counter(kErrors, 1);
             SPDLOG_LOGGER_DEBUG(
                 secs::core::spdlog_logger_raw(),
                 "protocol async_request(HSMS) pending failed: sb={} ec={}({})",
@@ -524,6 +578,7 @@ Session::async_request_impl_(std::uint8_t stream,
             co_return std::pair{pending->ec, DataMessage{}};
         }
         if (!pending->response.has_value()) {
+            secs::core::metrics_counter(kErrors, 1);
             SPDLOG_LOGGER_DEBUG(
                 secs::core::spdlog_logger_raw(),
                 "protocol async_request(HSMS) pending has no response: sb={}",
@@ -534,6 +589,16 @@ Session::async_request_impl_(std::uint8_t stream,
         SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
                             "protocol async_request(HSMS) done: sb={}",
                             sb);
+        secs::core::metrics_counter(kOk, 1);
+        secs::core::metrics_histogram(
+            kLatencyMs,
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    secs::core::steady_clock::now() - start)
+                    .count()));
+        secs::core::metrics_histogram(
+            kReplyBodyBytes,
+            static_cast<std::uint64_t>(pending->response->body.size()));
         co_return std::pair{std::error_code{}, *pending->response};
     }
 
@@ -548,6 +613,7 @@ Session::async_request_impl_(std::uint8_t stream,
         req.body.size());
     auto send_ec = co_await async_send_message_(req);
     if (send_ec) {
+        secs::core::metrics_counter(kErrors, 1);
         SPDLOG_LOGGER_DEBUG(
             secs::core::spdlog_logger_raw(),
             "protocol async_request(SECS-I) send failed: sb={} ec={}({})",
@@ -562,6 +628,8 @@ Session::async_request_impl_(std::uint8_t stream,
     for (;;) {
         const auto now = secs::core::steady_clock::now();
         if (now >= deadline) {
+            secs::core::metrics_counter(kErrors, 1);
+            secs::core::metrics_counter(kTimeouts, 1);
             SPDLOG_LOGGER_DEBUG(
                 secs::core::spdlog_logger_raw(),
                 "protocol async_request(SECS-I) timeout: sb={} t3_ms={}",
@@ -574,6 +642,7 @@ Session::async_request_impl_(std::uint8_t stream,
         const auto remaining = deadline - now;
         auto [ec, msg] = co_await async_receive_message_(remaining);
         if (ec) {
+            secs::core::metrics_counter(kErrors, 1);
             SPDLOG_LOGGER_DEBUG(
                 secs::core::spdlog_logger_raw(),
                 "protocol async_request(SECS-I) receive failed: sb={} ec={}({})",
@@ -593,6 +662,16 @@ Session::async_request_impl_(std::uint8_t stream,
                                 "protocol async_request(SECS-I) done: sb={}",
                                 sb);
             system_bytes_.release(sb);
+            secs::core::metrics_counter(kOk, 1);
+            secs::core::metrics_histogram(
+                kLatencyMs,
+                static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        secs::core::steady_clock::now() - start)
+                        .count()));
+            secs::core::metrics_histogram(
+                kReplyBodyBytes,
+                static_cast<std::uint64_t>(msg.body.size()));
             co_return std::pair{std::error_code{}, std::move(msg)};
         }
 

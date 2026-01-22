@@ -1,5 +1,7 @@
 #include "secs/ii/codec.hpp"
 
+#include "secs/core/metrics.hpp"
+
 #include <algorithm>
 #include <bit>
 #include <cstddef>
@@ -934,15 +936,29 @@ std::error_code encoded_size(const Item &item, std::size_t &out_size) noexcept {
     return encoded_size_impl(item, out_size);
 }
 
+std::error_code
+encode_to_impl_(mutable_bytes_view out,
+                const Item &item,
+                std::size_t &written) noexcept {
+    SpanWriter w(out);
+    auto ec = encode_item(item, w);
+    written = w.written();
+    return ec;
+}
+
 std::error_code encode(const Item &item, std::vector<byte> &out) noexcept {
+    secs::core::metrics_counter("secs.ii.encode.calls", 1);
+
     std::size_t size = 0;
     auto ec = encoded_size(item, size);
     if (ec) {
+        secs::core::metrics_counter("secs.ii.encode.errors", 1);
         return ec;
     }
 
     const auto offset = out.size();
     if (size > (std::numeric_limits<std::size_t>::max() - offset)) {
+        secs::core::metrics_counter("secs.ii.encode.errors", 1);
         return make_error_code(errc::length_overflow);
     }
 
@@ -953,34 +969,53 @@ std::error_code encode(const Item &item, std::vector<byte> &out) noexcept {
         out.reserve(offset + size);
         out.resize(offset + size);
     } catch (const std::bad_alloc &) {
+        secs::core::metrics_counter("secs.ii.encode.errors", 1);
         return make_error_code(errc::out_of_memory);
     } catch (const std::length_error &) {
+        secs::core::metrics_counter("secs.ii.encode.errors", 1);
         return make_error_code(errc::length_overflow);
     } catch (...) {
+        secs::core::metrics_counter("secs.ii.encode.errors", 1);
         return make_error_code(errc::invalid_header);
     }
     mutable_bytes_view dest{out.data() + offset, size};
 
     std::size_t written = 0;
-    ec = encode_to(dest, item, written);
+    ec = encode_to_impl_(dest, item, written);
     if (ec) {
         out.resize(offset);
+        secs::core::metrics_counter("secs.ii.encode.errors", 1);
         return ec;
     }
     if (written != size) {
         out.resize(offset);
+        secs::core::metrics_counter("secs.ii.encode.errors", 1);
         return make_error_code(errc::invalid_header);
     }
+
+    secs::core::metrics_counter("secs.ii.encode.ok", 1);
+    secs::core::metrics_histogram("secs.ii.encode.out_bytes",
+                                  static_cast<std::uint64_t>(size));
     return {};
 }
 
 std::error_code encode_to(mutable_bytes_view out,
                           const Item &item,
                           std::size_t &written) noexcept {
-    SpanWriter w(out);
-    auto ec = encode_item(item, w);
-    written = w.written();
-    return ec;
+    secs::core::metrics_counter("secs.ii.encode_to.calls", 1);
+    secs::core::metrics_histogram("secs.ii.encode_to.out_capacity_bytes",
+                                  static_cast<std::uint64_t>(out.size()));
+
+    auto ec = encode_to_impl_(out, item, written);
+    if (ec) {
+        secs::core::metrics_counter("secs.ii.encode_to.errors", 1);
+        return ec;
+    }
+
+    secs::core::metrics_counter("secs.ii.encode_to.ok", 1);
+    secs::core::metrics_histogram("secs.ii.encode_to.written_bytes",
+                                  static_cast<std::uint64_t>(written));
+    return {};
 }
 
 std::error_code
@@ -992,21 +1027,31 @@ std::error_code decode_one(bytes_view in,
                            Item &out,
                            std::size_t &consumed,
                            const DecodeLimits &limits) noexcept {
+    secs::core::metrics_counter("secs.ii.decode_one.calls", 1);
+    secs::core::metrics_histogram("secs.ii.decode_one.in_bytes",
+                                  static_cast<std::uint64_t>(in.size()));
+
     SpanReader r(in);
     DecodeBudget budget{};
     try {
         auto ec = decode_item(r, out, 0, budget, limits);
         if (ec) {
             consumed = 0;
+            secs::core::metrics_counter("secs.ii.decode_one.errors", 1);
             return ec;
         }
         consumed = r.consumed();
+        secs::core::metrics_counter("secs.ii.decode_one.ok", 1);
+        secs::core::metrics_histogram("secs.ii.decode_one.consumed_bytes",
+                                      static_cast<std::uint64_t>(consumed));
         return {};
     } catch (const std::bad_alloc &) {
         consumed = 0;
+        secs::core::metrics_counter("secs.ii.decode_one.errors", 1);
         return make_error_code(errc::out_of_memory);
     } catch (...) {
         consumed = 0;
+        secs::core::metrics_counter("secs.ii.decode_one.errors", 1);
         return make_error_code(errc::invalid_header);
     }
 }

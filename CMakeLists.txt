@@ -14,6 +14,7 @@ endif()
 option(SECS_ENABLE_TESTS "Build unit tests" ${SECS_PROJECT_IS_TOP_LEVEL})
 option(SECS_ENABLE_INTEGRATION_TESTS "Build integration tests (HSMS+SECS-I connectivity)" OFF)
 option(SECS_ENABLE_COVERAGE "Enable coverage helper targets/flags" OFF)
+option(SECS_ENABLE_FUZZING "Build fuzz targets (libFuzzer)" OFF)
 option(SECS_BUILD_EXAMPLES "Build example programs" ${SECS_PROJECT_IS_TOP_LEVEL})
 option(SECS_BUILD_BENCHMARKS "Build performance benchmarks" OFF)
 option(SECS_ENABLE_WERROR "Treat warnings as errors" ${SECS_PROJECT_IS_TOP_LEVEL})
@@ -43,6 +44,7 @@ add_library(secs_core
   src/core/event.cpp
   src/core/error.cpp
   src/core/log.cpp
+  src/core/metrics.cpp
 )
 add_library(secs::core ALIAS secs_core)
 set_target_properties(secs_core PROPERTIES EXPORT_NAME core)
@@ -185,7 +187,12 @@ target_link_libraries(secs_utils PUBLIC secs_core secs_ii secs_hsms secs_secs1)
 target_link_libraries(secs_protocol PUBLIC secs_utils)
 
 add_library(secs_c_api
-  src/c_api.cpp
+  src/c_api/base.cpp
+  src/c_api/context.cpp
+  src/c_api/secs2.cpp
+  src/c_api/sml.cpp
+  src/c_api/hsms.cpp
+  src/c_api/protocol.cpp
 )
 add_library(secs::c_api ALIAS secs_c_api)
 set_target_properties(secs_c_api PROPERTIES EXPORT_NAME c_api)
@@ -195,6 +202,8 @@ target_include_directories(secs_c_api
   PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+  PRIVATE
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
 )
 
 target_link_libraries(secs_c_api
@@ -278,6 +287,10 @@ endif()
 
 if(SECS_BUILD_BENCHMARKS)
   add_subdirectory(benchmarks)
+endif()
+
+if(SECS_ENABLE_FUZZING)
+  add_subdirectory(fuzz)
 endif()
 
 if(SECS_ENABLE_INSTALL)

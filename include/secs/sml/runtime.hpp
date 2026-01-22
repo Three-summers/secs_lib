@@ -1,6 +1,7 @@
 #pragma once
 
 #include "secs/core/error.hpp"
+#include "secs/core/metrics.hpp"
 #include "secs/sml/ast.hpp"
 #include "secs/sml/lexer.hpp"
 #include "secs/sml/parser.hpp"
@@ -263,6 +264,17 @@ private:
  * @brief 便捷函数：解析 SML 源文本
  */
 [[nodiscard]] inline ParseResult parse_sml(std::string_view source) noexcept {
+    static constexpr const char *kCalls = "secs.sml.parse.calls";
+    static constexpr const char *kOk = "secs.sml.parse.ok";
+    static constexpr const char *kErrors = "secs.sml.parse.errors";
+    static constexpr const char *kInBytes = "secs.sml.parse.in_bytes";
+    static constexpr const char *kLatencyMs = "secs.sml.parse.latency_ms";
+
+    secs::core::metrics_counter(kCalls, 1);
+    secs::core::metrics_histogram(kInBytes,
+                                  static_cast<std::uint64_t>(source.size()));
+    const auto start = std::chrono::steady_clock::now();
+
     try {
         Lexer lexer(source);
         auto lex_result = lexer.tokenize();
@@ -272,20 +284,35 @@ private:
             result.error_line = lex_result.error_line;
             result.error_column = lex_result.error_column;
             result.error_message = std::move(lex_result.error_message);
+            secs::core::metrics_counter(kErrors, 1);
             return result;
         }
 
         Parser parser(std::move(lex_result.tokens));
-        return parser.parse();
+        auto result = parser.parse();
+        if (result.ec) {
+            secs::core::metrics_counter(kErrors, 1);
+        } else {
+            secs::core::metrics_counter(kOk, 1);
+        }
+        secs::core::metrics_histogram(
+            kLatencyMs,
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - start)
+                    .count()));
+        return result;
     } catch (const std::bad_alloc &) {
         ParseResult result;
         result.ec = secs::core::make_error_code(secs::core::errc::out_of_memory);
         result.error_message = "out of memory";
+        secs::core::metrics_counter(kErrors, 1);
         return result;
     } catch (...) {
         ParseResult result;
         result.ec = secs::core::make_error_code(secs::core::errc::invalid_argument);
         result.error_message = "unexpected exception";
+        secs::core::metrics_counter(kErrors, 1);
         return result;
     }
 }
