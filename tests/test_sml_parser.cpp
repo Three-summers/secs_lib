@@ -12,6 +12,7 @@
 
 #include "test_main.hpp"
 
+#include <cmath>
 #include <string_view>
 #include <variant>
 
@@ -132,6 +133,21 @@ void test_lexer_capture_identifier() {
     TEST_EXPECT(found_capture);
 }
 
+void test_lexer_scientific_notation_without_decimal_is_float() {
+    // 语法约定：支持科学计数法（例如 1e-10 / -2E+3），且应被识别为 Float token。
+    Lexer lexer("<F8 1e-10 -2E+3>");
+    auto result = lexer.tokenize();
+
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.tokens.size(), 6u); // <, F8, 1e-10, -2E+3, >, EOF
+
+    TEST_EXPECT(result.tokens[1].is(TokenType::KwF8));
+    TEST_EXPECT(result.tokens[2].is(TokenType::Float));
+    TEST_EXPECT_EQ(result.tokens[2].value, std::string("1e-10"));
+    TEST_EXPECT(result.tokens[3].is(TokenType::Float));
+    TEST_EXPECT_EQ(result.tokens[3].value, std::string("-2E+3"));
+}
+
 // ============================================================================
 // Parser 测试
 // ============================================================================
@@ -146,6 +162,37 @@ void test_parser_simple_message() {
     TEST_EXPECT(msg.name.empty());
     TEST_EXPECT_EQ(msg.stream, 1u);
     TEST_EXPECT_EQ(msg.function, 1u);
+    TEST_EXPECT(msg.w_bit);
+}
+
+void test_parser_message_without_body_parses_and_uses_empty_list() {
+    // 允许只定义头部（无消息体）。此时 item 为默认空 List。
+    auto result = parse_sml("ping: S1F1.");
+
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.messages.size(), 1u);
+
+    const auto &msg = result.document.messages[0];
+    TEST_EXPECT_EQ(msg.name, std::string("ping"));
+    TEST_EXPECT_EQ(msg.stream, 1u);
+    TEST_EXPECT_EQ(msg.function, 1u);
+    TEST_EXPECT(!msg.w_bit);
+
+    const auto *list = msg.item.get_if<TplList>();
+    TEST_EXPECT(list != nullptr);
+    TEST_EXPECT_EQ(list->size(), 0u);
+}
+
+void test_parser_message_with_w_bit_without_body_parses() {
+    auto result = parse_sml("S2F41 W.");
+
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.messages.size(), 1u);
+
+    const auto &msg = result.document.messages[0];
+    TEST_EXPECT(msg.name.empty());
+    TEST_EXPECT_EQ(msg.stream, 2u);
+    TEST_EXPECT_EQ(msg.function, 41u);
     TEST_EXPECT(msg.w_bit);
 }
 
@@ -377,6 +424,108 @@ void test_parser_condition_allows_list_index_and_pattern() {
     TEST_EXPECT(cond.list_index.has_value());
     TEST_EXPECT(cond.pattern.has_value());
     TEST_EXPECT(!cond.expected.has_value());
+}
+
+void test_parser_condition_allows_deep_list_path_and_pattern() {
+    auto result = parse_sml(R"(
+    if (S6F11[1][0] <U4 $X>) r0.
+  )");
+
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.conditions.size(), 1u);
+
+    const auto &cond = result.document.conditions[0].condition;
+    TEST_EXPECT_EQ(cond.list_path.size(), 2u);
+    TEST_EXPECT_EQ(cond.list_path[0], 1u);
+    TEST_EXPECT_EQ(cond.list_path[1], 0u);
+    TEST_EXPECT(!cond.list_index.has_value()); // 深层路径下不再同步到 list_index
+    TEST_EXPECT(cond.pattern.has_value());
+
+    const auto *u4 = cond.pattern->get_if<PatU4>();
+    TEST_EXPECT(u4 != nullptr);
+    TEST_EXPECT(u4->capture.has_value());
+    TEST_EXPECT_EQ(u4->capture->name, std::string("X"));
+}
+
+void test_parser_capture_pattern_supports_more_item_types() {
+    // 覆盖更多 PatternItem 分支：A/B/Boolean/U*/I*/F*
+    auto result = parse_sml(R"(
+    if (S6F11 <L[6]
+        <A $A>
+        <B $B>
+        <Boolean $BOOL>
+        <U4 $U4>
+        <I2 $I2>
+        <F8 $F8>
+    >) r0.
+  )");
+
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.conditions.size(), 1u);
+
+    const auto &cond = result.document.conditions[0].condition;
+    TEST_EXPECT(cond.pattern.has_value());
+    const auto *pl = cond.pattern->get_if<PatL>();
+    TEST_EXPECT(pl != nullptr);
+    TEST_EXPECT(pl->size_hint.has_value());
+    TEST_EXPECT_EQ(*pl->size_hint, 6u);
+    TEST_EXPECT_EQ(pl->items.size(), 6u);
+
+    {
+        const auto *pa = pl->items[0].get_if<PatASCII>();
+        TEST_EXPECT(pa != nullptr);
+        TEST_EXPECT(pa->capture.has_value());
+        TEST_EXPECT_EQ(pa->capture->name, std::string("A"));
+    }
+    {
+        const auto *pb = pl->items[1].get_if<PatBinary>();
+        TEST_EXPECT(pb != nullptr);
+        TEST_EXPECT(pb->capture.has_value());
+        TEST_EXPECT_EQ(pb->capture->name, std::string("B"));
+    }
+    {
+        const auto *pbool = pl->items[2].get_if<PatBoolean>();
+        TEST_EXPECT(pbool != nullptr);
+        TEST_EXPECT(pbool->capture.has_value());
+        TEST_EXPECT_EQ(pbool->capture->name, std::string("BOOL"));
+    }
+    {
+        const auto *pu4 = pl->items[3].get_if<PatU4>();
+        TEST_EXPECT(pu4 != nullptr);
+        TEST_EXPECT(pu4->capture.has_value());
+        TEST_EXPECT_EQ(pu4->capture->name, std::string("U4"));
+    }
+    {
+        const auto *pi2 = pl->items[4].get_if<PatI2>();
+        TEST_EXPECT(pi2 != nullptr);
+        TEST_EXPECT(pi2->capture.has_value());
+        TEST_EXPECT_EQ(pi2->capture->name, std::string("I2"));
+    }
+    {
+        const auto *pf8 = pl->items[5].get_if<PatF8>();
+        TEST_EXPECT(pf8 != nullptr);
+        TEST_EXPECT(pf8->capture.has_value());
+        TEST_EXPECT_EQ(pf8->capture->name, std::string("F8"));
+    }
+}
+
+void test_parser_capture_pattern_allows_list_capture_with_size_hint() {
+    auto result = parse_sml(R"(
+    if (S6F11 <L[2] $RPTLIST>) r0.
+  )");
+
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.conditions.size(), 1u);
+
+    const auto &cond = result.document.conditions[0].condition;
+    TEST_EXPECT(cond.pattern.has_value());
+    const auto *pl = cond.pattern->get_if<PatL>();
+    TEST_EXPECT(pl != nullptr);
+    TEST_EXPECT(pl->size_hint.has_value());
+    TEST_EXPECT_EQ(*pl->size_hint, 2u);
+    TEST_EXPECT(pl->capture.has_value());
+    TEST_EXPECT_EQ(pl->capture->name, std::string("RPTLIST"));
+    TEST_EXPECT(pl->items.empty());
 }
 
 void test_parser_capture_pattern_rejects_list_size_hint_mismatch() {
@@ -1380,6 +1529,22 @@ void test_parse_sml_exercises_all_item_types() {
     TEST_EXPECT_EQ(*rsp, std::string("rsp"));
 }
 
+void test_parse_sml_scientific_notation_without_decimal_parses_as_single_float() {
+    // 语法约定：支持 1e-10 形式；解析后应为单个浮点值，而不是被拆成多个 token。
+    auto result = parse_sml("m: S1F1 <F8 1e-10>.");
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.messages.size(), 1u);
+
+    const auto &msg = result.document.messages[0];
+    const auto *f8 = msg.item.get_if<TplF8>();
+    TEST_EXPECT(f8 != nullptr);
+    TEST_EXPECT_EQ(f8->values.size(), 1u);
+
+    const auto *v = std::get_if<double>(&f8->values[0]);
+    TEST_EXPECT(v != nullptr);
+    TEST_EXPECT(std::fabs(*v - 1e-10) < 1e-12);
+}
+
 void test_parser_more_syntax_error_branches() {
     // 1) 非法起始 Token：触发 “expected message definition”
     {
@@ -1832,6 +1997,7 @@ int main() {
     test_lexer_basic_tokens();
     test_lexer_string();
     test_lexer_numbers();
+    test_lexer_scientific_notation_without_decimal_is_float();
     test_lexer_comments();
     test_lexer_keywords();
     test_lexer_capture_identifier();
@@ -1844,6 +2010,8 @@ int main() {
 
     // Parser 测试
     test_parser_simple_message();
+    test_parser_message_without_body_parses_and_uses_empty_list();
+    test_parser_message_with_w_bit_without_body_parses();
     test_parser_named_message();
     test_parser_nested_list();
     test_parser_if_rule();
@@ -1855,6 +2023,9 @@ int main() {
     test_parser_populates_condition_rule_spans();
     test_parser_populates_capture_var_source_span();
     test_parser_condition_allows_list_index_and_pattern();
+    test_parser_condition_allows_deep_list_path_and_pattern();
+    test_parser_capture_pattern_supports_more_item_types();
+    test_parser_capture_pattern_allows_list_capture_with_size_hint();
     test_parser_capture_pattern_rejects_list_size_hint_mismatch();
     test_parser_capture_pattern_rejects_capture_with_extra_values();
     test_parser_capture_pattern_rejects_identifier_as_number();
@@ -1897,6 +2068,7 @@ int main() {
     test_parser_every_interval_out_of_range_is_error();
     test_parser_if_empty_condition_is_error();
     test_parse_sml_exercises_all_item_types();
+    test_parse_sml_scientific_notation_without_decimal_parses_as_single_float();
     test_parser_more_syntax_error_branches();
     test_parser_if_every_error_branches();
     test_parser_item_and_condition_error_branches();

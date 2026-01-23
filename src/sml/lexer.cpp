@@ -325,36 +325,46 @@ Token Lexer::scan_number() noexcept {
         return make_token(TokenType::Integer, std::string(text));
     }
 
-    // 整数部分
+    // 十进制数字：
+    // - 支持整数：123
+    // - 支持小数：1.23（要求 '.' 后至少 1 位数字，避免吞掉 "S1F1." 的 '.'）
+    // - 支持科学计数法：1e-10 / 1.0e-3（注意：不要求必须有小数点）
+    bool saw_digits = false;
     while (!at_end() && std::isdigit(static_cast<unsigned char>(peek()))) {
+        saw_digits = true;
         advance();
     }
 
-    // 判断是否为浮点数：要求 '.' 后至少有一位数字，避免把 "S1F1." 的 '.'
-    // 误吞成小数点
-    if (peek() == '.' &&
-        std::isdigit(static_cast<unsigned char>(peek_next()))) {
+    bool is_float = false;
+
+    // 小数部分
+    if (peek() == '.' && std::isdigit(static_cast<unsigned char>(peek_next()))) {
+        is_float = true;
         advance(); // .
         while (!at_end() && std::isdigit(static_cast<unsigned char>(peek()))) {
             advance();
         }
-        // 指数部分：e/E[+/-]后跟数字
-        if (peek() == 'e' || peek() == 'E') {
+    }
+
+    // 指数部分：e/E[+/-]digits（允许没有小数点，例如 1e-10）
+    if ((peek() == 'e' || peek() == 'E') && saw_digits) {
+        is_float = true;
+        advance(); // e/E
+        if (peek() == '+' || peek() == '-') {
             advance();
-            if (peek() == '+' || peek() == '-') {
-                advance();
-            }
-            while (!at_end() &&
-                   std::isdigit(static_cast<unsigned char>(peek()))) {
-                advance();
-            }
         }
-        std::string_view text = source_.substr(start, current_ - start);
-        return make_token(TokenType::Float, std::string(text));
+        if (!std::isdigit(static_cast<unsigned char>(peek()))) {
+            return make_error(lexer_errc::invalid_character,
+                              "invalid exponent in float literal");
+        }
+        while (!at_end() && std::isdigit(static_cast<unsigned char>(peek()))) {
+            advance();
+        }
     }
 
     std::string_view text = source_.substr(start, current_ - start);
-    return make_token(TokenType::Integer, std::string(text));
+    return make_token(is_float ? TokenType::Float : TokenType::Integer,
+                      std::string(text));
 }
 
 Token Lexer::make_token(TokenType type) const noexcept {
