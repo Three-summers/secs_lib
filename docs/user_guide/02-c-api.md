@@ -1,6 +1,6 @@
 # C API 使用指南
 
-> 文档更新：2026-01-19  
+> 文档更新：2026-01-23（Codex）  
 > 目标读者：纯 C 工程或使用 FFI 调用的开发者
 
 C API 同样遵循双轨制设计：**编程模式** (Code-First) 和 **SMLX 模式** (Rule-Based)。合理选择能极大降低 C 语言开发的复杂度。
@@ -16,6 +16,69 @@ SECS-I（半双工）在 C API 侧的关键点：
 
 - client/host：直接调用 `secs_protocol_session_request()`（内部会驱动收发）
 - server/equipment：主循环调用 `secs_protocol_session_poll_once()` 驱动入站处理与回包
+
+---
+
+## 上下文与线程模型（阻塞式 API）
+
+C API 的“阻塞式”网络/会话 API 依赖 `secs_context_t`（内部运行 `asio::io_context`）：
+
+- 默认启动 **1 个 io 线程**；可通过 `secs_context_create_with_options()` 配置 `io_threads`。
+- 阻塞式 API 禁止在 io 线程调用，否则会死锁；库会返回 `SECS_C_API_WRONG_THREAD`。
+
+```c
+secs_context_t *ctx = NULL;
+
+secs_context_options_t opt;
+secs_context_options_init_default(&opt);
+opt.io_threads = 2; /* 可选：>1 表示多 io 线程 */
+
+secs_error_t err = secs_context_create_with_options(&ctx, &opt);
+if (!secs_error_is_ok(err)) {
+    /* TODO: 处理错误 */
+}
+
+/* ... 使用 ctx ... */
+
+secs_context_destroy(ctx);
+```
+
+## 可观测性（metrics hook）
+
+库内关键路径（SECS-II 编解码、HSMS frame、protocol request、C API run_blocking、SML parse 等）
+提供轻量指标 hook，可对接 Prometheus/OpenTelemetry/自研 metrics。
+
+- `secs_metrics_set_hook()` 是**进程级全局**设置（默认 no-op）。
+- 回调可能在多个线程/协程中触发：必须线程安全、尽量不阻塞、不抛异常。
+
+```c
+static void on_counter(void *ud, const char *name, uint64_t delta) {
+    (void)ud;
+    (void)name;
+    (void)delta;
+    /* TODO: 计数器累加 */
+}
+
+static void on_histogram(void *ud, const char *name, uint64_t value) {
+    (void)ud;
+    (void)name;
+    (void)value;
+    /* TODO: 直方图/分位数采样 */
+}
+
+void enable_metrics(void) {
+    secs_metrics_hook_t hook;
+    hook.counter = &on_counter;
+    hook.gauge = NULL;
+    hook.histogram = &on_histogram;
+    hook.user_data = NULL;
+    secs_metrics_set_hook(&hook);
+}
+
+void disable_metrics(void) { secs_metrics_set_hook(NULL); }
+```
+
+指标名与约定见 `docs/architecture/01-core-module.md`（Metrics 小节）。
 
 ---
 
@@ -252,3 +315,12 @@ if (rsp_name) {
 2.  **库分配字符串**：`secs_error_message`, `match_response` 返回的 char* 必须用 `secs_free`。
 3.  **编码输出**：在“普通调用场景”下（例如你主动发起 request），`secs_ii_encode` 返回的字节数组必须用 `secs_free`；在 protocol handler 回调里则由框架负责释放（回调里不要释放）。
 4.  **Handler 输出**：赋值给 `*out_body` 的指针必须是 `secs_malloc` 分配的（或由库函数如 `secs_ii_encode` / `secs_sml_runtime_encode_message_body` 分配的）。严禁使用系统 `malloc`。
+
+---
+
+## 测试与 fuzz（库自带）
+
+- 单元测试：`ctest --test-dir build --output-on-failure`
+- 协议编解码确定性 fuzz/差分：`ctest --test-dir build -R 'hsms_codec_fuzz|sml_fuzz' --output-on-failure`
+- 指标 hook 冒烟：`ctest --test-dir build -R metrics_hook --output-on-failure`
+- 可选：libFuzzer targets（见 `README.md` 的 “可选：fuzz（libFuzzer）”）

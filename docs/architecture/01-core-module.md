@@ -1,6 +1,6 @@
 # Core 模块详细实现原理
 
-> 文档更新：2026-01-19（Codex）  
+> 文档更新：2026-01-23（Codex）  
 > 对应实现：`main`（CMake：`project(secs VERSION 0.1.0)`）
 
 ## 1. 模块概述
@@ -11,6 +11,8 @@
 - **缓冲区管理**：`FixedBuffer`（预分配 + 可扩容）
 - **错误处理**：`errc` 枚举与 `std::error_code` 集成
 - **同步原语**：`Event`（协程可等待事件）
+- **日志封装**：`log`（隔离 spdlog，提供统一入口）
+- **指标 hook**：`metrics`（运行时指标回调注入，默认 no-op）
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -21,8 +23,12 @@
 │  │   common    │  │   buffer    │  │    error    │  │   event    │ │
 │  │  (types)    │  │ FixedBuffer │  │    errc     │  │   Event    │ │
 │  └─────────────┘  └─────────────┘  └─────────────┘  └────────────┘ │
+│  ┌─────────────┐  ┌─────────────┐                                  │
+│  │     log     │  │   metrics   │                                  │
+│  │   spdlog    │  │   hooks     │                                  │
+│  └─────────────┘  └─────────────┘                                  │
 │                                                                     │
-│  提供：byte/span、读写缓冲区、统一错误码、协程同步原语              │
+│  提供：byte/span、读写缓冲区、统一错误码、协程同步原语、日志与指标 │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -359,7 +365,40 @@ enum class errc : int {
 
 ---
 
-## 6. 模块依赖关系
+## 6. Metrics（运行时指标 hook）
+
+`secs::core::metrics` 提供一个轻量、可注入的全局指标 hook，用于把库内关键事件/水位/延迟
+上报到业务侧（例如 Prometheus/OpenTelemetry/自研 metrics）。
+
+设计目标：
+
+- **默认无成本**：未设置 hook 时为 no-op（一次原子 load + 空指针分支）。
+- **线程安全**：hooks 以“原子快照”方式读取，避免半更新。
+- **低耦合**：不引入第三方依赖，业务侧自行适配 exporter。
+
+使用约束：
+
+- 回调可能在多个线程/协程中被调用，必须线程安全且尽量不要阻塞。
+- 回调应做到“不抛异常”；库内部会 best-effort 吞掉异常，避免影响业务路径。
+
+接口（见 `include/secs/core/metrics.hpp`）：
+
+- `secs::core::set_metrics_hooks(MetricsHooks hooks)`
+- `secs::core::metrics_counter(name, delta)`
+- `secs::core::metrics_gauge(name, value)`
+- `secs::core::metrics_histogram(name, value)`
+
+指标命名约定（示例，非穷举）：
+
+- `secs.ii.decode_one.calls / ok / errors`，`secs.ii.decode_one.in_bytes / consumed_bytes`
+- `secs.hsms.decode_frame.calls / ok / errors`，`secs.hsms.decode_payload.in_bytes / body_bytes`
+- `secs.protocol.request.calls / timeouts / latency_ms`，`secs.protocol.pending_requests`（gauge）
+- `secs.sml.parse.calls / latency_ms`
+- `secs.c_api.run_blocking.wrong_thread / wait_ms`
+
+---
+
+## 7. 模块依赖关系
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -398,16 +437,18 @@ enum class errc : int {
 
 ---
 
-## 7. 源文件清单
+## 8. 源文件清单
 
 | 文件 | 行数 | 说明 |
 |------|------|------|
 | `include/secs/core/common.hpp` | 24 | 基础类型定义 |
 | `include/secs/core/buffer.hpp` | 69 | FixedBuffer 接口 |
 | `include/secs/core/error.hpp` | 35 | errc 枚举与 error_code 集成 |
-| `include/secs/core/event.hpp` | 63 | Event 协程同步原语接口 |
-| `include/secs/core/log.hpp` | 28 | 日志封装接口（spdlog 隔离） |
+| `include/secs/core/event.hpp` | 55 | Event 协程同步原语接口 |
+| `include/secs/core/log.hpp` | 27 | 日志封装接口（spdlog 隔离） |
+| `include/secs/core/metrics.hpp` | 43 | 指标 hook 接口（回调注入） |
 | `src/core/buffer.cpp` | 256 | FixedBuffer 实现 |
 | `src/core/error.cpp` | 54 | error_category 实现 |
-| `src/core/event.cpp` | 115 | Event 实现 |
-| `src/core/log.cpp` | 59 | 日志封装实现 |
+| `src/core/event.cpp` | 240 | Event 实现 |
+| `src/core/log.cpp` | 116 | 日志封装实现 |
+| `src/core/metrics.cpp` | 68 | 指标 hook 实现（原子快照） |

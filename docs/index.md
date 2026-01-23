@@ -1,6 +1,6 @@
 # 文档导航
 
-> 更新时间：2026-01-19  
+> 更新时间：2026-01-23（Codex）  
 > 维护者：Codex  
 > 适用版本：`main`（CMake：`project(secs VERSION 0.1.0)`）
 
@@ -47,4 +47,8 @@
 
 ## 性能与验证
 
+- 单元测试：`ctest --test-dir build --output-on-failure`
+- 协议编解码确定性 fuzz/差分：`ctest --test-dir build -R 'hsms_codec_fuzz|sml_fuzz' --output-on-failure`
+- 可观测性（metrics hook）：见 `architecture/01-core-module.md`（Metrics 小节）
+- 可选：libFuzzer targets：见 `../README.md` 的 “可选：fuzz（libFuzzer）”
 - 性能基准：[benchmarks/README.md](../benchmarks/README.md)

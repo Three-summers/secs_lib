@@ -4,6 +4,8 @@
 > 审查者：Codex（按 Google Engineering Practices / Airbnb Quality Bar）  
 > 范围：仓库整体（C++20 + standalone Asio 协程；SECS-I/SECS-II/HSMS-SS；C API；构建/测试/文档）
 
+> 跟进更新：2026-01-23（Codex）：第 5 条行动项（C API 拆分 + 编解码 fuzz/差分测试 + metrics hook）已在提交 `6581d16` 落地。
+
 ## 总体评价（一句话总结 + 评分 1-10分）
 
 分层与文档/测试做得很扎实，但 `hsms::Session` 的并发模型与 `SystemBytes` 唯一性存在生产级“隐性炸点”，需要先收敛这些基础风险再谈上线。**6/10**
@@ -44,7 +46,7 @@
   潜在影响：同一版本号构建出不同产物；供应链事件时难以快速止血与追溯。  
   建议修复方案：默认 pin 到 commit（或至少支持/建议 pin commit），并在文档里给出“升级依赖流程”。
 
-- [`src/c_api.cpp`] 单文件 175k+ 的 C API 实现是长期维护风险  
+- [`src/c_api.cpp`] 单文件 175k+ 的 C API 实现是长期维护风险（已在 `6581d16` 完成拆分为 `src/c_api/*.cpp` + `src/c_api/internal.hpp`）  
   原因：编译时间、增量构建、review/定位、符号粒度都会被拖垮。  
   潜在影响：修 bug/加特性速度下降，误改概率上升；新成员上手成本高。  
   建议修复方案：按域拆分为多 TU（例如 `c_api_error.cc/c_api_ii.cc/c_api_sml.cc/c_api_hsms.cc/c_api_protocol.cc`），共享 internal 放 `src/c_api/internal.hpp`，对外 ABI 不变。
@@ -62,8 +64,8 @@
 ## 次要问题 / 建议优化（Nice to Have）
 
 - HSMS/SECS 明文且无认证是行业现实，但建议在文档里明确部署边界与威胁模型（网段隔离、ACL、只信任内网设备），避免用户误以为库本身提供安全通道。  
-- 可观测性：已提供 `ControlEvent` 与 dump sink（很好），建议补轻量 metrics hook（重连次数、T3/T6 超时、入站队列水位、payload 分布），否则线上只能靠日志猜。  
-- 测试：单测覆盖不错，建议补“编解码 fuzz / 差分测试”（重点：`hsms::decode_payload`、`ii::decode_one`、SML parser），这是协议库 ROI 极高的质量投入。
+- 可观测性：已提供 `ControlEvent` 与 dump sink（很好），建议补轻量 metrics hook（重连次数、T3/T6 超时、入站队列水位、payload 分布），否则线上只能靠日志猜。（已在 `6581d16` 落地：`secs::core::metrics` + `secs_metrics_set_hook`）  
+- 测试：单测覆盖不错，建议补“编解码 fuzz / 差分测试”（重点：`hsms::decode_payload`、`ii::decode_one`、SML parser），这是协议库 ROI 极高的质量投入。（已在 `6581d16` 落地：`fuzz/` + `test_hsms_codec_fuzz`/`test_sml_fuzz`）  
 
 ## 优点（做得好的地方，具体指出）
 
@@ -78,5 +80,4 @@
 2. 明确并强制 `hsms::Session` 的线程/执行器模型：内部 `strand` 化 + 所有 public API 收敛到同一 executor（尤其 `stop()`）。  
 3. 重构日志：移除对 spdlog 全局级别的修改，改为库内专属 logger + 可注入 sink/level。  
 4. 收紧供应链与审计默认值：FetchContent pin commit、不要默认关闭 NuGet 审计（至少加显式开关和醒目注释）。  
-5. 拆分 `src/c_api.cpp`，并补协议编解码 fuzz/差分测试与关键运行时指标 hook（把“能用”推进到“可长期维护与可运营”）。
-
+5. （已在 `6581d16` 完成）拆分 `src/c_api.cpp`，并补协议编解码 fuzz/差分测试与关键运行时指标 hook（把“能用”推进到“可长期维护与可运营”）。

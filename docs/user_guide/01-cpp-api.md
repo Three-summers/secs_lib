@@ -1,6 +1,6 @@
 # C++ API 使用指南
 
-> 文档更新：2026-01-19
+> 文档更新：2026-01-23（Codex）
 > 目标读者：需要集成 secs_lib 的 C++ 开发者
 
 本库提供两种截然不同的开发模式，根据业务场景选择：
@@ -9,6 +9,42 @@
 | :--- | :--- | :--- |
 | **路线一：编程模式** | 复杂业务逻辑、数据库交互、设备控制 | **Code-First**，类型安全，逻辑在 C++ 代码中 |
 | **路线二：SMLX 模式** | 仿真器、快速原型、频繁变动的简单报文 | **Rule-Based**，逻辑在 SML 文件中，支持热加载 |
+
+---
+
+## 可观测性（metrics hook）
+
+库内关键路径提供轻量指标 hook（默认 no-op），便于对接 Prometheus/OpenTelemetry/自研 metrics。
+
+- 设置接口：`secs::core::set_metrics_hooks(secs::core::MetricsHooks{...})`（进程级全局）
+- 回调可能在多个线程/协程中触发：必须线程安全、尽量不阻塞、不抛异常
+
+最小示例：
+
+```cpp
+#include <secs/core/metrics.hpp>
+
+static void on_counter(void*, const char* name, std::uint64_t delta) {
+    (void)name;
+    (void)delta;
+}
+
+static void on_histogram(void*, const char* name, std::uint64_t value) {
+    (void)name;
+    (void)value;
+}
+
+void enable_metrics() {
+    secs::core::set_metrics_hooks(secs::core::MetricsHooks{
+        /*counter=*/&on_counter,
+        /*gauge=*/nullptr,
+        /*histogram=*/&on_histogram,
+        /*user_data=*/nullptr,
+    });
+}
+```
+
+指标名与约定见 `docs/architecture/01-core-module.md`（Metrics 小节）。
 
 ---
 

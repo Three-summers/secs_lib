@@ -1,6 +1,6 @@
 # C_API 模块详细实现原理
 
-> 文档更新：2026-01-19（Codex）  
+> 文档更新：2026-01-23（Codex）  
 > 对应实现：`main`（CMake：`project(secs VERSION 0.1.0)`）
 
 ## 1. 模块概述
@@ -29,7 +29,7 @@
 │  ═══════════════════════════════╪═══════════════════════════════════   │
 │                                 │                                       │
 │  ┌──────────────────────────────┴──────────────────────────────────┐   │
-│  │                     c_api.cpp 实现层                             │   │
+│  │                   src/c_api/*.cpp 实现层                         │   │
 │  │                                                                  │   │
 │  │  ┌────────────────┐  ┌────────────────┐  ┌──────────────────┐   │   │
 │  │  │ guard_error()  │  │ run_blocking() │  │ secs_error_t     │   │   │
@@ -100,7 +100,7 @@
 
 ## 3. 不透明句柄定义
 
-### 3.1 句柄结构（c_api.cpp 内部定义）
+### 3.1 句柄结构（src/c_api/internal.hpp 内部定义）
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -110,8 +110,8 @@
 │  struct secs_context {                                                  │
 │      asio::io_context ioc;                                              │
 │      asio::executor_work_guard<...> work;   // 保持 ioc.run() 不退出    │
-│      std::thread io_thread;                  // 单一 io 线程            │
-│      std::thread::id io_thread_id;           // 用于检测 WRONG_THREAD   │
+│      std::vector<std::thread> io_threads;    // io 线程（N 个，默认 1） │
+│      std::vector<std::thread::id> io_thread_ids; // WRONG_THREAD 检测  │
 │  };                                                                     │
 │                                                                         │
 │  struct secs_ii_item {                                                  │
@@ -887,8 +887,14 @@ typedef struct secs_error {
 
 | 文件 | 行数 | 说明 |
 |------|------|------|
-| `include/secs/c_api.h` | 1396 | C 语言头文件（接口声明） |
-| `src/c_api.cpp` | 4898 | C API 实现 |
+| `include/secs/c_api.h` | 1452 | C 语言头文件（接口声明） |
+| `src/c_api/internal.hpp` | 643 | C API 内部定义与共享辅助函数 |
+| `src/c_api/base.cpp` | 90 | 内存/错误/版本/日志/metrics hook |
+| `src/c_api/context.cpp` | 99 | 上下文创建/销毁（io 线程） |
+| `src/c_api/secs2.cpp` | 1552 | SECS-II：Item/codec/builder/path helpers |
+| `src/c_api/sml.cpp` | 860 | SML：Runtime/Render/encode/match helpers |
+| `src/c_api/hsms.cpp` | 489 | HSMS：connection/session 封装 |
+| `src/c_api/protocol.cpp` | 1162 | Protocol：session/handler/decoded/CEID dispatcher |
 
 ---
 

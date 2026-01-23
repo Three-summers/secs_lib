@@ -3,7 +3,7 @@
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![CMake](https://img.shields.io/badge/CMake-3.20+-green.svg)](https://cmake.org/)
 
-> 文档更新：2026-01-19（Codex）
+> 文档更新：2026-01-23（Codex）
 
 `secs_lib` 是一个基于 C++20 与 standalone Asio 协程的 SECS 协议库，实现：
 
@@ -144,6 +144,7 @@ target_link_libraries(my_app PRIVATE secs::protocol)
 
 - `SECS_ENABLE_TESTS`：单元测试（默认：顶层工程 ON，作为子项目 OFF）
 - `SECS_ENABLE_INTEGRATION_TESTS`：联调测试（默认 OFF）
+- `SECS_ENABLE_FUZZING`：fuzz targets（libFuzzer，可选；默认 OFF）
 - `SECS_BUILD_EXAMPLES`：示例（默认：顶层工程 ON，作为子项目 OFF）
 - `SECS_BUILD_BENCHMARKS`：性能基准（默认 OFF）
 - `SECS_ENABLE_COVERAGE`：覆盖率辅助目标（默认 OFF）
@@ -162,6 +163,24 @@ target_link_libraries(my_app PRIVATE secs::protocol)
 cmake -S . -B build -DSECS_ENABLE_TESTS=ON -DSECS_BUILD_EXAMPLES=OFF
 cmake --build build -j
 ctest --test-dir build --output-on-failure
+```
+
+可选：只跑协议编解码确定性 fuzz/差分 + metrics hook 冒烟（仍走 ctest）：
+
+```bash
+ctest --test-dir build -R 'hsms_codec_fuzz|sml_fuzz|metrics_hook' --output-on-failure
+```
+
+可选：fuzz（libFuzzer）
+
+说明：需要 Clang；构建时开启 sanitizers（ASan/UBSan）。
+
+```bash
+cmake -S . -B build_fuzz -DCMAKE_CXX_COMPILER=clang++ -DSECS_ENABLE_FUZZING=ON -DSECS_BUILD_EXAMPLES=OFF
+cmake --build build_fuzz -j
+./build_fuzz/fuzz/fuzz_ii_decode_one -runs=10000
+./build_fuzz/fuzz/fuzz_hsms_decode_payload -runs=10000
+./build_fuzz/fuzz/fuzz_sml_parse -runs=10000
 ```
 
 联调测试说明与运行方式见 `integration_tests/README.md`。

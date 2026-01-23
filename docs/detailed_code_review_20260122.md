@@ -4,6 +4,8 @@
 **审查者**：Principal Software Engineer / Staff Engineer  
 **评分**：**8.5 / 10**
 
+**跟进更新**：2026-01-23（Codex）：已在提交 `6581d16` 完成 C API 拆分、关键路径 metrics hook、以及协议编解码 fuzz/差分测试的落地与单测覆盖。
+
 ## 总体评价
 
 这是一个**架构清晰、现代（C++20）、封装良好**的工业级协议库实现。C API 设计尤为出色，展现了极高的 ABI 稳定性意识。核心逻辑利用协程（Coroutine）极大简化了异步状态机复杂度，但部分组件（如 `hsms::Session`）在多线程环境下的安全性依赖于隐式约定，存在误用风险。
@@ -15,7 +17,7 @@
 ### 1. `hsms::Session` 缺乏线程安全保护
 - **位置**：`src/hsms/session.cpp`
 - **严重程度**：**High**
-- **原因**：`hsms::Session` 内部维护了 `pending_`（`std::unordered_map`）和 `state_` 等关键状态。虽然 C API 通过 `secs_context`（单 IO 线程）规避了此问题，但作为 C++ 库直接使用时，其 `async_send`、`async_open_active` 等 public 方法未像 `protocol::Session` 那样强制将执行流 `co_spawn/dispatch` 到绑定的 `executor_`（Strand）。若 C++ 用户在非 IO 线程直接调用 `session->async_send(...)`，将导致 `pending_` 容器的数据竞争（Data Race），引发未定义行为或崩溃。
+- **原因**：`hsms::Session` 内部维护了 `pending_`（`std::unordered_map`）和 `state_` 等关键状态。虽然 C API 通过 `secs_context`（默认 1 个 io 线程；可配置）规避了此问题，但作为 C++ 库直接使用时，其 `async_send`、`async_open_active` 等 public 方法未像 `protocol::Session` 那样强制将执行流 `co_spawn/dispatch` 到绑定的 `executor_`（Strand）。若 C++ 用户在非 IO 线程直接调用 `session->async_send(...)`，将导致 `pending_` 容器的数据竞争（Data Race），引发未定义行为或崩溃。
 - **建议修复方案**：参考 `protocol::Session` 的实现，在所有 public `async_*` 方法入口处检查 `asio::this_coro::executor`，若当前不在绑定的 Strand 中，则自动 `co_spawn` 或 `dispatch` 到正确的 Executor 上执行。
 
 ### 2. TCP 发送并发风险
@@ -42,7 +44,7 @@
 - **建议修复方案**：引入更平缓的增长策略（例如超过 4MB 后按 1MB 递增），或者允许用户配置 `GrowthStrategy`。
 
 ### 2. `is_io_thread` 线性搜索性能隐患
-- **位置**：`src/c_api.cpp`
+- **位置**：`src/c_api/internal.hpp`
 - **严重程度**：**Medium**
 - **原因**：在 `run_blocking` 中，每次调用都会遍历 `ctx->io_thread_ids`，这是一个 O(N) 操作且位于热路径上。
 - **建议修复方案**：利用 `thread_local` 变量存储一个 `is_secs_io_thread` 标记，避免每次都获取 `thread_id` 并遍历 vector。
@@ -65,7 +67,7 @@
 
 - **应用层心跳（Heartbeat）**：建议增加一个 `IdleTimer`，在连接空闲超过 N 秒后主动发送 Linktest。
 - **敏感数据脱敏**：建议 `DumpOptions` 增加选项以掩盖特定 Stream/Function 的内容。
-- **C API 拆分**：`src/c_api.cpp` 文件过大，建议按功能拆分为多个文件以利于维护。
+- **C API 拆分**：已完成（提交 `6581d16`）：拆分为 `src/c_api/*.cpp` + `src/c_api/internal.hpp`，降低增量构建与 review 成本。
 
 ---
 
