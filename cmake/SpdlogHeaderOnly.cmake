@@ -143,6 +143,9 @@ function(secs_ensure_spdlog_target)
   target_compile_definitions(secs_spdlog INTERFACE
     SPDLOG_NO_EXCEPTIONS
     SPDLOG_ACTIVE_LEVEL=${SECS_SPDLOG_ACTIVE_LEVEL}
+    # 兼容较新的 Clang：关闭 fmt 的 consteval format-string 检查，避免编译期常量表达式失败。
+    # 该宏在 fmt 的 bundled/core.h 内为可覆盖项（#ifndef FMT_CONSTEVAL）。
+    FMT_CONSTEVAL=
   )
 endfunction()
 

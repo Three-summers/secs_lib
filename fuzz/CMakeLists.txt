@@ -26,3 +26,8 @@ target_link_libraries(fuzz_hsms_decode_payload PRIVATE secs_hsms)
 secs_add_fuzzer(fuzz_sml_parse fuzz_sml_parse.cpp)
 target_link_libraries(fuzz_sml_parse PRIVATE secs_sml)
 
+secs_add_fuzzer(fuzz_tools_jsonl_parse fuzz_tools_jsonl_parse.cpp)
+target_link_libraries(fuzz_tools_jsonl_parse PRIVATE secs_tools)
+
+secs_add_fuzzer(fuzz_tools_sml_check fuzz_tools_sml_check.cpp)
+target_link_libraries(fuzz_tools_sml_check PRIVATE secs_tools)

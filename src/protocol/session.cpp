@@ -699,7 +699,12 @@ Session::async_send_message_(const DataMessage &msg) {
         if (options_.dump.enable && options_.dump.dump_tx) {
             emit_dump_(options_.dump, dump_hsms_(DumpDirection::tx, wire, options_.dump));
         }
-        co_return co_await hsms_->async_send(wire);
+        auto ec = co_await hsms_->async_send(wire);
+        if (!ec && options_.tap.enable && options_.tap.tap_tx &&
+            options_.tap.on_message) {
+            options_.tap.on_message(options_.tap.on_message_user, msg, true);
+        }
+        co_return ec;
     }
 
     if (!secs1_) {
@@ -723,8 +728,13 @@ Session::async_send_message_(const DataMessage &msg) {
                               secs::core::bytes_view{msg.body.data(), msg.body.size()},
                               options_.dump));
     }
-    co_return co_await secs1_->async_send(
+    auto ec = co_await secs1_->async_send(
         h, secs::core::bytes_view{msg.body.data(), msg.body.size()});
+    if (!ec && options_.tap.enable && options_.tap.tap_tx &&
+        options_.tap.on_message) {
+        options_.tap.on_message(options_.tap.on_message_user, msg, true);
+    }
+    co_return ec;
 }
 
 asio::awaitable<std::pair<std::error_code, DataMessage>>
@@ -755,6 +765,9 @@ Session::async_receive_message_(std::optional<secs::core::duration> timeout) {
         out.w_bit = msg.w_bit();
         out.system_bytes = msg.header.system_bytes;
         out.body = std::move(msg.body);
+        if (options_.tap.enable && options_.tap.tap_rx && options_.tap.on_message) {
+            options_.tap.on_message(options_.tap.on_message_user, out, false);
+        }
         co_return std::pair{std::error_code{}, std::move(out)};
     }
 
@@ -782,6 +795,9 @@ Session::async_receive_message_(std::optional<secs::core::duration> timeout) {
     out.w_bit = msg.header.wait_bit;
     out.system_bytes = msg.header.system_bytes;
     out.body = std::move(msg.body);
+    if (options_.tap.enable && options_.tap.tap_rx && options_.tap.on_message) {
+        options_.tap.on_message(options_.tap.on_message_user, out, false);
+    }
     co_return std::pair{std::error_code{}, std::move(out)};
 }
 

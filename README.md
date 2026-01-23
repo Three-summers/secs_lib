@@ -52,6 +52,7 @@
 | protocol | `secs::protocol` | 统一会话、Router、SystemBytes、请求-响应匹配 |
 | sml | `secs::sml` | SML 解析与运行时、SMLX 渲染/匹配 |
 | utils | `secs::utils` | dump/hex/辅助工具（调试与示例常用） |
+| tools | `secs::tools` | 录制/回放等工具库（JSONL recorder/player） |
 | c_api | `secs::c_api` | C ABI（供纯 C/FFI 调用） |
 
 ---
@@ -146,6 +147,7 @@ target_link_libraries(my_app PRIVATE secs::protocol)
 - `SECS_ENABLE_INTEGRATION_TESTS`：联调测试（默认 OFF）
 - `SECS_ENABLE_FUZZING`：fuzz targets（libFuzzer，可选；默认 OFF）
 - `SECS_BUILD_EXAMPLES`：示例（默认：顶层工程 ON，作为子项目 OFF）
+- `SECS_BUILD_TOOLS`：CLI 工具（默认：顶层工程 ON，作为子项目 OFF）
 - `SECS_BUILD_BENCHMARKS`：性能基准（默认 OFF）
 - `SECS_ENABLE_COVERAGE`：覆盖率辅助目标（默认 OFF）
 - `SECS_ENABLE_WERROR`：警告视为错误（默认：顶层工程 ON，作为子项目 OFF）
@@ -181,9 +183,32 @@ cmake --build build_fuzz -j
 ./build_fuzz/fuzz/fuzz_ii_decode_one -runs=10000
 ./build_fuzz/fuzz/fuzz_hsms_decode_payload -runs=10000
 ./build_fuzz/fuzz/fuzz_sml_parse -runs=10000
+./build_fuzz/fuzz/fuzz_tools_jsonl_parse -runs=10000
+./build_fuzz/fuzz/fuzz_tools_sml_check -runs=10000
+```
+
+如遇到某些容器环境下 LSAN 受限（ptrace）导致的 fatal，可临时关闭 leak 检测：
+
+```bash
+ASAN_OPTIONS=detect_leaks=0 ./build_fuzz/fuzz/fuzz_tools_jsonl_parse -runs=10000
 ```
 
 联调测试说明与运行方式见 `integration_tests/README.md`。
+
+---
+
+## CLI 工具
+
+构建：
+
+```bash
+cmake -S . -B build -DSECS_BUILD_TOOLS=ON
+cmake --build build --target secs-sml-check secs-recorder secs-player -j
+```
+
+- `secs-sml-check <file.sml>`：检查 SML 语法与引用一致性（支持 `--format json/--verbose/--stats`）
+- `secs-recorder --listen 0.0.0.0:5000 --forward 192.168.1.100:5000 --output capture.jsonl`：HSMS 透明代理 + 录制 data message（JSONL）
+- `secs-player --input capture.jsonl --connect 127.0.0.1:5000 --session-id 0x0001`：连接 HSMS 并按 JSONL 回放/校验
 
 ---
 

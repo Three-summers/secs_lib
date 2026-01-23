@@ -81,6 +81,28 @@ struct SessionOptions final {
     };
 
     DumpOptions dump{};
+
+    /**
+     * @brief 结构化消息观测（录制/统计用途）。
+     *
+     * 说明：
+     * - 与 dump 不同：dump 输出的是“格式化字符串”；tap 输出的是结构化 DataMessage；
+     * - 回调在“协议层收发成功后”触发（发送成功 / 接收成功）；
+     * - 回调建议保持轻量、无阻塞；如需 IO（写文件等），建议内部自行做缓冲或异步化；
+     * - 回调参数 msg 为引用，仅在回调调用期间有效（请勿保存引用/指针）。
+     */
+    struct TapOptions final {
+        bool enable{false};
+        bool tap_tx{true};
+        bool tap_rx{true};
+
+        using TapFn =
+            void (*)(void *user, const DataMessage &msg, bool is_tx) noexcept;
+        TapFn on_message{nullptr};
+        void *on_message_user{nullptr};
+    };
+
+    TapOptions tap{};
 };
 
 /**

@@ -16,6 +16,7 @@ option(SECS_ENABLE_INTEGRATION_TESTS "Build integration tests (HSMS+SECS-I conne
 option(SECS_ENABLE_COVERAGE "Enable coverage helper targets/flags" OFF)
 option(SECS_ENABLE_FUZZING "Build fuzz targets (libFuzzer)" OFF)
 option(SECS_BUILD_EXAMPLES "Build example programs" ${SECS_PROJECT_IS_TOP_LEVEL})
+option(SECS_BUILD_TOOLS "Build CLI tools" ${SECS_PROJECT_IS_TOP_LEVEL})
 option(SECS_BUILD_BENCHMARKS "Build performance benchmarks" OFF)
 option(SECS_ENABLE_WERROR "Treat warnings as errors" ${SECS_PROJECT_IS_TOP_LEVEL})
 
@@ -212,6 +213,24 @@ target_link_libraries(secs_c_api
     secs_sml
 )
 
+add_library(secs_tools
+  src/tools/recording.cpp
+  src/tools/sml_check.cpp
+)
+add_library(secs::tools ALIAS secs_tools)
+set_target_properties(secs_tools PROPERTIES EXPORT_NAME tools)
+target_compile_features(secs_tools PUBLIC cxx_std_20)
+
+target_include_directories(secs_tools
+  PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+  PRIVATE
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
+)
+
+target_link_libraries(secs_tools PUBLIC secs_protocol secs_utils secs_sml)
+
 set(_secs_lib_targets
   secs_core
   secs_secs1
@@ -220,6 +239,7 @@ set(_secs_lib_targets
   secs_protocol
   secs_sml
   secs_utils
+  secs_tools
   secs_c_api
 )
 
@@ -262,11 +282,16 @@ if(SECS_ENABLE_COVERAGE)
   secs_enable_coverage_compile(secs_protocol)
   secs_enable_coverage_compile(secs_sml)
   secs_enable_coverage_compile(secs_utils)
+  secs_enable_coverage_compile(secs_tools)
   secs_enable_coverage_compile(secs_c_api)
 endif()
 
 if(SECS_ENABLE_TESTS OR SECS_ENABLE_INTEGRATION_TESTS)
   enable_testing()
+endif()
+
+if(SECS_BUILD_TOOLS)
+  add_subdirectory(tools)
 endif()
 
 if(SECS_ENABLE_TESTS)
@@ -321,6 +346,7 @@ if(SECS_ENABLE_INSTALL)
       secs_protocol
       secs_sml
       secs_utils
+      secs_tools
       secs_c_api
     EXPORT secsTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}

@@ -13,6 +13,20 @@
 namespace secs::sml {
 
 /**
+ * @brief 源码位置（用于诊断输出：行/列/caret）
+ *
+ * 约定：
+ * - line/column 为 1-based（与 Lexer/Token 一致）；
+ * - length 为 token 在源码中的字符长度（用于打印 ^^^^^）。未填充时为 0。
+ */
+struct SourceSpan final {
+    std::uint32_t line{0};
+    std::uint32_t column{0};
+    std::uint32_t length{0};
+    friend bool operator==(const SourceSpan &, const SourceSpan &) = default;
+};
+
+/**
  * @brief 占位符引用（用于 SMLX 模板渲染）
  *
  * 说明：
@@ -21,6 +35,7 @@ namespace secs::sml {
  */
 struct VarRef final {
     std::string name;
+    SourceSpan span{};
     friend bool operator==(const VarRef &, const VarRef &) = default;
 };
 
@@ -162,6 +177,7 @@ private:
  */
 struct CaptureVar final {
     std::string name;
+    SourceSpan span{};
     friend bool operator==(const CaptureVar &, const CaptureVar &) = default;
 };
 
@@ -333,6 +349,7 @@ struct MessageDef {
  */
 struct Condition {
     std::string message_name;         // 触发消息名或 SxFy
+    SourceSpan message_span{};        // message_name 的 token 位置（用于语义诊断）
     // 可选索引（从 1 开始）：
     // - 采用 SECS-II Item 的先序遍历编号（包含根节点）。
     // - 若消息体为 <L ...>，则根 List 的编号为 1，第一个子元素编号为 2。
@@ -355,6 +372,7 @@ struct Condition {
 struct ConditionRule {
     Condition condition;
     std::string response_name; // 响应消息名
+    SourceSpan response_span{}; // response_name 的 token 位置（用于语义诊断）
 };
 
 /**
@@ -365,6 +383,7 @@ struct ConditionRule {
 struct TimerRule {
     std::uint32_t interval_seconds{0};
     std::string message_name;
+    SourceSpan message_span{}; // message_name 的 token 位置（用于语义诊断）
 };
 
 /**

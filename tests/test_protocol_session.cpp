@@ -1823,6 +1823,188 @@ void test_protocol_runtime_dump_hsms_and_secs1() {
     }
 }
 
+struct TapCounters final {
+    std::atomic<std::size_t> tx{0};
+    std::atomic<std::size_t> rx{0};
+};
+
+static void tap_count_cb(void *user, const DataMessage &, bool is_tx) noexcept {
+    auto *c = static_cast<TapCounters *>(user);
+    if (!c) {
+        return;
+    }
+    if (is_tx) {
+        c->tx.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        c->rx.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void test_protocol_tap_emits_tx_and_rx() {
+    asio::io_context ioc;
+    const std::uint16_t session_id = 0x1011;
+
+    secs::core::Event server_opened{};
+    secs::core::Event client_opened{};
+
+    secs::hsms::Session server(ioc.get_executor(),
+                               secs::hsms::SessionOptions{
+                                   .session_id = session_id,
+                                   .t3 = 200ms,
+                                   .t5 = 10ms,
+                                   .t6 = 50ms,
+                                   .t7 = 50ms,
+                                   .t8 = 0ms,
+                                   .linktest_interval = 0ms,
+                                   .auto_reconnect = false,
+                               });
+
+    secs::hsms::Session client(ioc.get_executor(),
+                               secs::hsms::SessionOptions{
+                                   .session_id = session_id,
+                                   .t3 = 200ms,
+                                   .t5 = 10ms,
+                                   .t6 = 50ms,
+                                   .t7 = 50ms,
+                                   .t8 = 0ms,
+                                   .linktest_interval = 0ms,
+                                   .auto_reconnect = false,
+                               });
+
+    TapCounters host_counts{};
+    TapCounters eq_counts{};
+
+    SessionOptions host_opt{};
+    host_opt.t3 = 200ms;
+    host_opt.poll_interval = 1ms;
+    host_opt.tap.enable = true;
+    host_opt.tap.tap_tx = true;
+    host_opt.tap.tap_rx = true;
+    host_opt.tap.on_message = tap_count_cb;
+    host_opt.tap.on_message_user = &host_counts;
+
+    SessionOptions eq_opt = host_opt;
+    eq_opt.tap.on_message_user = &eq_counts;
+
+    Session proto_server(server, session_id, eq_opt);
+    Session proto_client(client, session_id, host_opt);
+
+    // 设备侧收到 S1F1(W=1) 回 S1F2，保证产生一次 RX（请求）+ 一次 TX（应答）。
+    proto_server.router().set(
+        1,
+        1,
+        [](const DataMessage &msg)
+            -> asio::awaitable<secs::protocol::HandlerResult> {
+            co_return secs::protocol::HandlerResult{std::error_code{}, msg.body};
+        });
+
+    auto duplex = make_memory_duplex(ioc.get_executor());
+    Connection server_conn(std::move(duplex.server_stream));
+    Connection client_conn(std::move(duplex.client_stream));
+
+    asio::co_spawn(
+        ioc,
+        [&, server_conn = std::move(server_conn)]() mutable
+        -> asio::awaitable<void> {
+            auto ec =
+                co_await server.async_open_passive(std::move(server_conn));
+            TEST_EXPECT_OK(ec);
+            server_opened.set();
+        },
+        asio::detached);
+
+    asio::co_spawn(
+        ioc,
+        [&, client_conn = std::move(client_conn)]() mutable
+        -> asio::awaitable<void> {
+            auto ec = co_await client.async_open_active(std::move(client_conn));
+            TEST_EXPECT_OK(ec);
+            client_opened.set();
+        },
+        asio::detached);
+
+    std::atomic<bool> done{false};
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            TEST_EXPECT_OK(co_await server_opened.async_wait(200ms));
+            TEST_EXPECT_OK(co_await client_opened.async_wait(200ms));
+
+            asio::co_spawn(ioc, proto_server.async_run(), asio::detached);
+            asio::co_spawn(ioc, proto_client.async_run(), asio::detached);
+
+            auto [ec, rsp] = co_await proto_client.async_request(
+                1, 1, as_bytes("tap"), 200ms);
+            TEST_EXPECT_OK(ec);
+            TEST_EXPECT_EQ(rsp.stream, 1);
+            TEST_EXPECT_EQ(rsp.function, 2);
+
+            proto_server.stop();
+            proto_client.stop();
+            client.stop();
+            server.stop();
+            done = true;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(done);
+
+    // TX/RX 计数：每侧应各出现一次发送与一次接收。
+    TEST_EXPECT_EQ(host_counts.tx.load(), 1u);
+    TEST_EXPECT_EQ(host_counts.rx.load(), 1u);
+    TEST_EXPECT_EQ(eq_counts.tx.load(), 1u);
+    TEST_EXPECT_EQ(eq_counts.rx.load(), 1u);
+}
+
+void test_protocol_tap_not_called_on_send_failure() {
+    asio::io_context ioc;
+    const std::uint16_t session_id = 0x1011;
+
+    secs::hsms::Session hsms(ioc.get_executor(),
+                             secs::hsms::SessionOptions{
+                                 .session_id = session_id,
+                                 .t3 = 200ms,
+                                 .t5 = 10ms,
+                                 .t6 = 50ms,
+                                 .t7 = 50ms,
+                                 .t8 = 0ms,
+                                 .linktest_interval = 0ms,
+                                 .auto_reconnect = false,
+                             });
+
+    TapCounters counts{};
+
+    SessionOptions opt{};
+    opt.t3 = 200ms;
+    opt.poll_interval = 1ms;
+    opt.tap.enable = true;
+    opt.tap.tap_tx = true;
+    opt.tap.tap_rx = true;
+    opt.tap.on_message = tap_count_cb;
+    opt.tap.on_message_user = &counts;
+
+    Session proto(hsms, session_id, opt);
+
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            auto ec = co_await proto.async_send(1, 1, as_bytes("fail"));
+            TEST_EXPECT(static_cast<bool>(ec));
+            TEST_EXPECT_EQ(ec, make_error_code(errc::invalid_argument));
+
+            proto.stop();
+            hsms.stop();
+            ioc.stop();
+        },
+        asio::detached);
+
+    ioc.run();
+
+    TEST_EXPECT_EQ(counts.tx.load(), 0u);
+    TEST_EXPECT_EQ(counts.rx.load(), 0u);
+}
+
 } // namespace
 
 int main() {
@@ -1843,6 +2025,8 @@ int main() {
     test_secs1_protocol_reverse_bit_respects_options();
     test_secs1_protocol_equipment_can_initiate_primary();
     test_protocol_runtime_dump_hsms_and_secs1();
+    test_protocol_tap_emits_tx_and_rx();
+    test_protocol_tap_not_called_on_send_failure();
     test_session_invalid_arguments();
     return secs::tests::run_and_report();
 }

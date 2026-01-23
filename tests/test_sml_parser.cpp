@@ -300,6 +300,70 @@ void test_parser_capture_pattern_parses_pattern_ast() {
     }
 }
 
+void test_parser_populates_varref_source_span() {
+    auto result = parse_sml("m: S1F1 <U4 DATAID>.");
+
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.messages.size(), 1u);
+
+    const auto &msg = result.document.messages[0];
+    const auto *u4 = msg.item.get_if<TplU4>();
+    TEST_EXPECT(u4 != nullptr);
+    TEST_EXPECT_EQ(u4->values.size(), 1u);
+
+    const auto *ref = std::get_if<VarRef>(&u4->values[0]);
+    TEST_EXPECT(ref != nullptr);
+    TEST_EXPECT_EQ(ref->name, std::string("DATAID"));
+    TEST_EXPECT_EQ(ref->span.line, 1u);
+    TEST_EXPECT_EQ(ref->span.column, 13u);
+    TEST_EXPECT_EQ(ref->span.length, 6u);
+}
+
+void test_parser_populates_condition_rule_spans() {
+    const char *sml =
+        "reply: S1F2 <L>.\n"
+        "if (S1F1) reply.\n"
+        "every 10 send reply.\n";
+
+    auto result = parse_sml(sml);
+
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.conditions.size(), 1u);
+    TEST_EXPECT_EQ(result.document.timers.size(), 1u);
+
+    const auto &rule = result.document.conditions[0];
+    TEST_EXPECT_EQ(rule.condition.message_span.line, 2u);
+    TEST_EXPECT_EQ(rule.condition.message_span.column, 5u);
+    TEST_EXPECT_EQ(rule.condition.message_span.length, 4u);
+
+    TEST_EXPECT_EQ(rule.response_span.line, 2u);
+    TEST_EXPECT_EQ(rule.response_span.column, 11u);
+    TEST_EXPECT_EQ(rule.response_span.length, 5u);
+
+    const auto &timer = result.document.timers[0];
+    TEST_EXPECT_EQ(timer.message_span.line, 3u);
+    TEST_EXPECT_EQ(timer.message_span.column, 15u);
+    TEST_EXPECT_EQ(timer.message_span.length, 5u);
+}
+
+void test_parser_populates_capture_var_source_span() {
+    auto result = parse_sml("if (S6F11 <U4 $DATAID>) r0.");
+
+    TEST_EXPECT_OK(result.ec);
+    TEST_EXPECT_EQ(result.document.conditions.size(), 1u);
+
+    const auto &cond = result.document.conditions[0].condition;
+    TEST_EXPECT(cond.pattern.has_value());
+
+    const auto *pu4 = cond.pattern->get_if<PatU4>();
+    TEST_EXPECT(pu4 != nullptr);
+    TEST_EXPECT(pu4->capture.has_value());
+    TEST_EXPECT_EQ(pu4->capture->name, std::string("DATAID"));
+    TEST_EXPECT_EQ(pu4->capture->span.line, 1u);
+    TEST_EXPECT_EQ(pu4->capture->span.column, 15u);
+    TEST_EXPECT_EQ(pu4->capture->span.length, 7u);
+}
+
 void test_parser_condition_allows_list_index_and_pattern() {
     auto result = parse_sml(R"(
     if (S2F21[0] <U2 $X>) r0.
@@ -1787,6 +1851,9 @@ int main() {
     test_parser_deep_path_indexing_sets_list_path();
     test_parser_single_list_index_sets_list_index_and_list_path();
     test_parser_capture_pattern_parses_pattern_ast();
+    test_parser_populates_varref_source_span();
+    test_parser_populates_condition_rule_spans();
+    test_parser_populates_capture_var_source_span();
     test_parser_condition_allows_list_index_and_pattern();
     test_parser_capture_pattern_rejects_list_size_hint_mismatch();
     test_parser_capture_pattern_rejects_capture_with_extra_values();

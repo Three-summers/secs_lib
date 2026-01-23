@@ -327,7 +327,15 @@ bool Parser::parse_if_rule() noexcept {
 
     ConditionRule rule;
     rule.condition = std::move(*cond);
-    rule.response_name = advance().value;
+    {
+        const auto &tok = advance();
+        rule.response_name = tok.value;
+        rule.response_span = SourceSpan{
+            tok.line,
+            tok.column,
+            static_cast<std::uint32_t>(tok.value.size()),
+        };
+    }
 
     if (!match(TokenType::Dot)) {
         error("expected '.' at end of if rule");
@@ -367,7 +375,15 @@ bool Parser::parse_every_rule() noexcept {
         return false;
     }
 
-    rule.message_name = advance().value;
+    {
+        const auto &tok = advance();
+        rule.message_name = tok.value;
+        rule.message_span = SourceSpan{
+            tok.line,
+            tok.column,
+            static_cast<std::uint32_t>(tok.value.size()),
+        };
+    }
 
     if (!match(TokenType::Dot)) {
         error("expected '.' at end of every rule");
@@ -469,7 +485,15 @@ std::optional<TemplateItem> Parser::parse_ascii() noexcept {
         return TemplateItem(std::move(a));
     }
     if (check(TokenType::Identifier)) {
-        a.value = VarRef{advance().value};
+        const auto &tok = advance();
+        a.value = VarRef{
+            tok.value,
+            SourceSpan{
+                tok.line,
+                tok.column,
+                static_cast<std::uint32_t>(tok.value.size()),
+            },
+        };
         return TemplateItem(std::move(a));
     }
 
@@ -484,7 +508,15 @@ std::optional<TemplateItem> Parser::parse_binary() noexcept {
     TplBinary b;
     while (check(TokenType::Integer) || check(TokenType::Identifier)) {
         if (check(TokenType::Identifier)) {
-            b.values.emplace_back(VarRef{advance().value});
+            const auto &tok = advance();
+            b.values.emplace_back(VarRef{
+                tok.value,
+                SourceSpan{
+                    tok.line,
+                    tok.column,
+                    static_cast<std::uint32_t>(tok.value.size()),
+                },
+            });
             continue;
         }
 
@@ -506,7 +538,15 @@ std::optional<TemplateItem> Parser::parse_boolean() noexcept {
     TplBoolean b;
     while (check(TokenType::Integer) || check(TokenType::Identifier)) {
         if (check(TokenType::Identifier)) {
-            b.values.emplace_back(VarRef{advance().value});
+            const auto &tok = advance();
+            b.values.emplace_back(VarRef{
+                tok.value,
+                SourceSpan{
+                    tok.line,
+                    tok.column,
+                    static_cast<std::uint32_t>(tok.value.size()),
+                },
+            });
             continue;
         }
 
@@ -529,7 +569,15 @@ std::optional<TemplateItem> Parser::parse_unsigned(TokenType type) noexcept {
         TplU1 v;
         while (check(TokenType::Integer) || check(TokenType::Identifier)) {
             if (check(TokenType::Identifier)) {
-                v.values.emplace_back(VarRef{advance().value});
+                const auto &tok = advance();
+                v.values.emplace_back(VarRef{
+                    tok.value,
+                    SourceSpan{
+                        tok.line,
+                        tok.column,
+                        static_cast<std::uint32_t>(tok.value.size()),
+                    },
+                });
                 continue;
             }
 
@@ -547,7 +595,15 @@ std::optional<TemplateItem> Parser::parse_unsigned(TokenType type) noexcept {
         TplU2 v;
         while (check(TokenType::Integer) || check(TokenType::Identifier)) {
             if (check(TokenType::Identifier)) {
-                v.values.emplace_back(VarRef{advance().value});
+                const auto &tok = advance();
+                v.values.emplace_back(VarRef{
+                    tok.value,
+                    SourceSpan{
+                        tok.line,
+                        tok.column,
+                        static_cast<std::uint32_t>(tok.value.size()),
+                    },
+                });
                 continue;
             }
 
@@ -565,7 +621,15 @@ std::optional<TemplateItem> Parser::parse_unsigned(TokenType type) noexcept {
         TplU4 v;
         while (check(TokenType::Integer) || check(TokenType::Identifier)) {
             if (check(TokenType::Identifier)) {
-                v.values.emplace_back(VarRef{advance().value});
+                const auto &tok = advance();
+                v.values.emplace_back(VarRef{
+                    tok.value,
+                    SourceSpan{
+                        tok.line,
+                        tok.column,
+                        static_cast<std::uint32_t>(tok.value.size()),
+                    },
+                });
                 continue;
             }
 
@@ -583,7 +647,15 @@ std::optional<TemplateItem> Parser::parse_unsigned(TokenType type) noexcept {
         TplU8 v;
         while (check(TokenType::Integer) || check(TokenType::Identifier)) {
             if (check(TokenType::Identifier)) {
-                v.values.emplace_back(VarRef{advance().value});
+                const auto &tok = advance();
+                v.values.emplace_back(VarRef{
+                    tok.value,
+                    SourceSpan{
+                        tok.line,
+                        tok.column,
+                        static_cast<std::uint32_t>(tok.value.size()),
+                    },
+                });
                 continue;
             }
 
@@ -609,7 +681,15 @@ std::optional<TemplateItem> Parser::parse_signed(TokenType type) noexcept {
         TplI1 v;
         while (check(TokenType::Integer) || check(TokenType::Identifier)) {
             if (check(TokenType::Identifier)) {
-                v.values.emplace_back(VarRef{advance().value});
+                const auto &tok = advance();
+                v.values.emplace_back(VarRef{
+                    tok.value,
+                    SourceSpan{
+                        tok.line,
+                        tok.column,
+                        static_cast<std::uint32_t>(tok.value.size()),
+                    },
+                });
                 continue;
             }
 
@@ -628,7 +708,15 @@ std::optional<TemplateItem> Parser::parse_signed(TokenType type) noexcept {
         TplI2 v;
         while (check(TokenType::Integer) || check(TokenType::Identifier)) {
             if (check(TokenType::Identifier)) {
-                v.values.emplace_back(VarRef{advance().value});
+                const auto &tok = advance();
+                v.values.emplace_back(VarRef{
+                    tok.value,
+                    SourceSpan{
+                        tok.line,
+                        tok.column,
+                        static_cast<std::uint32_t>(tok.value.size()),
+                    },
+                });
                 continue;
             }
 
@@ -647,7 +735,15 @@ std::optional<TemplateItem> Parser::parse_signed(TokenType type) noexcept {
         TplI4 v;
         while (check(TokenType::Integer) || check(TokenType::Identifier)) {
             if (check(TokenType::Identifier)) {
-                v.values.emplace_back(VarRef{advance().value});
+                const auto &tok = advance();
+                v.values.emplace_back(VarRef{
+                    tok.value,
+                    SourceSpan{
+                        tok.line,
+                        tok.column,
+                        static_cast<std::uint32_t>(tok.value.size()),
+                    },
+                });
                 continue;
             }
 
@@ -666,7 +762,15 @@ std::optional<TemplateItem> Parser::parse_signed(TokenType type) noexcept {
         TplI8 v;
         while (check(TokenType::Integer) || check(TokenType::Identifier)) {
             if (check(TokenType::Identifier)) {
-                v.values.emplace_back(VarRef{advance().value});
+                const auto &tok = advance();
+                v.values.emplace_back(VarRef{
+                    tok.value,
+                    SourceSpan{
+                        tok.line,
+                        tok.column,
+                        static_cast<std::uint32_t>(tok.value.size()),
+                    },
+                });
                 continue;
             }
 
@@ -692,7 +796,15 @@ std::optional<TemplateItem> Parser::parse_float(TokenType type) noexcept {
         while (check(TokenType::Float) || check(TokenType::Integer) ||
                check(TokenType::Identifier)) {
             if (check(TokenType::Identifier)) {
-                v.values.emplace_back(VarRef{advance().value});
+                const auto &tok = advance();
+                v.values.emplace_back(VarRef{
+                    tok.value,
+                    SourceSpan{
+                        tok.line,
+                        tok.column,
+                        static_cast<std::uint32_t>(tok.value.size()),
+                    },
+                });
                 continue;
             }
             v.values.emplace_back(
@@ -704,7 +816,15 @@ std::optional<TemplateItem> Parser::parse_float(TokenType type) noexcept {
         while (check(TokenType::Float) || check(TokenType::Integer) ||
                check(TokenType::Identifier)) {
             if (check(TokenType::Identifier)) {
-                v.values.emplace_back(VarRef{advance().value});
+                const auto &tok = advance();
+                v.values.emplace_back(VarRef{
+                    tok.value,
+                    SourceSpan{
+                        tok.line,
+                        tok.column,
+                        static_cast<std::uint32_t>(tok.value.size()),
+                    },
+                });
                 continue;
             }
             v.values.emplace_back(parse_float_value(advance().value));
@@ -772,11 +892,18 @@ static bool is_capture_ident(std::string_view s) noexcept {
     return s.size() >= 2 && s.front() == '$';
 }
 
-static std::optional<CaptureVar> to_capture_var(std::string_view s) noexcept {
-    if (!is_capture_ident(s)) {
+static std::optional<CaptureVar> to_capture_var(const Token &tok) noexcept {
+    if (!is_capture_ident(tok.value)) {
         return std::nullopt;
     }
-    return CaptureVar{std::string{s.substr(1)}};
+    CaptureVar cap;
+    cap.name = tok.value.substr(1);
+    cap.span = SourceSpan{
+        tok.line,
+        tok.column,
+        static_cast<std::uint32_t>(tok.value.size()),
+    };
+    return cap;
 }
 
 std::optional<PatternItem> Parser::parse_pattern_list() noexcept {
@@ -805,7 +932,7 @@ std::optional<PatternItem> Parser::parse_pattern_list() noexcept {
 
     // 支持：<L $NAME> 捕获整个 List Item（children 可为空；size_hint 可选）
     if (check(TokenType::Identifier) && is_capture_ident(peek().value)) {
-        l.capture = to_capture_var(peek().value);
+        l.capture = to_capture_var(peek());
         advance();
         return PatternItem(std::move(l));
     }
@@ -843,7 +970,7 @@ std::optional<PatternItem> Parser::parse_pattern_ascii() noexcept {
                   "ASCII pattern expects string literal or capture variable ($NAME)");
             return std::nullopt;
         }
-        a.capture = to_capture_var(peek().value);
+        a.capture = to_capture_var(peek());
         advance();
         return PatternItem(std::move(a));
     }
@@ -858,7 +985,7 @@ std::optional<PatternItem> Parser::parse_pattern_binary() noexcept {
 
     PatBinary b;
     if (check(TokenType::Identifier) && is_capture_ident(peek().value)) {
-        b.capture = to_capture_var(peek().value);
+        b.capture = to_capture_var(peek());
         advance();
         if (check(TokenType::Integer) || check(TokenType::Identifier)) {
             error(parser_errc::unexpected_token,
@@ -891,7 +1018,7 @@ std::optional<PatternItem> Parser::parse_pattern_boolean() noexcept {
 
     PatBoolean b;
     if (check(TokenType::Identifier) && is_capture_ident(peek().value)) {
-        b.capture = to_capture_var(peek().value);
+        b.capture = to_capture_var(peek());
         advance();
         if (check(TokenType::Integer) || check(TokenType::Identifier)) {
             error(parser_errc::unexpected_token,
@@ -925,7 +1052,7 @@ std::optional<PatternItem> Parser::parse_pattern_unsigned(TokenType type) noexce
         if (!check(TokenType::Identifier) || !is_capture_ident(peek().value)) {
             return std::nullopt;
         }
-        auto cap = to_capture_var(peek().value);
+        auto cap = to_capture_var(peek());
         advance();
         if (check(TokenType::Integer) || check(TokenType::Identifier)) {
             error(parser_errc::unexpected_token,
@@ -1035,7 +1162,7 @@ std::optional<PatternItem> Parser::parse_pattern_signed(TokenType type) noexcept
         if (!check(TokenType::Identifier) || !is_capture_ident(peek().value)) {
             return std::nullopt;
         }
-        auto cap = to_capture_var(peek().value);
+        auto cap = to_capture_var(peek());
         advance();
         if (check(TokenType::Integer) || check(TokenType::Identifier)) {
             error(parser_errc::unexpected_token,
@@ -1148,7 +1275,7 @@ std::optional<PatternItem> Parser::parse_pattern_float(TokenType type) noexcept 
         if (!check(TokenType::Identifier) || !is_capture_ident(peek().value)) {
             return std::nullopt;
         }
-        auto cap = to_capture_var(peek().value);
+        auto cap = to_capture_var(peek());
         advance();
         if (check(TokenType::Float) || check(TokenType::Integer) ||
             check(TokenType::Identifier)) {
@@ -1206,7 +1333,15 @@ std::optional<Condition> Parser::parse_condition() noexcept {
         return std::nullopt;
     }
 
-    cond.message_name = advance().value;
+    {
+        const auto &tok = advance();
+        cond.message_name = tok.value;
+        cond.message_span = SourceSpan{
+            tok.line,
+            tok.column,
+            static_cast<std::uint32_t>(tok.value.size()),
+        };
+    }
 
     enum class IndexKind : std::uint8_t { none, preorder, list_path };
     IndexKind index_kind = IndexKind::none;

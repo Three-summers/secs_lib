@@ -80,6 +80,14 @@ add_executable(test_utils_helpers test_utils_helpers.cpp)
 target_link_libraries(test_utils_helpers PRIVATE secs_protocol)
 add_test(NAME utils_helpers COMMAND test_utils_helpers)
 
+add_executable(test_tools_recording test_tools_recording.cpp)
+target_link_libraries(test_tools_recording PRIVATE secs_tools)
+add_test(NAME tools_recording COMMAND test_tools_recording)
+
+add_executable(test_tools_sml_check test_tools_sml_check.cpp)
+target_link_libraries(test_tools_sml_check PRIVATE secs_tools)
+add_test(NAME tools_sml_check COMMAND test_tools_sml_check)
+
 add_executable(test_ceid_layer test_ceid_layer.cpp)
 target_link_libraries(test_ceid_layer PRIVATE secs_protocol)
 add_test(NAME ceid_layer COMMAND test_ceid_layer)
@@ -95,6 +103,36 @@ if(UNIX AND SECS_BUILD_EXAMPLES)
   add_executable(test_hsms_pipe_examples test_hsms_pipe_examples.cpp)
   add_test(NAME hsms_pipe_examples COMMAND test_hsms_pipe_examples)
   set_tests_properties(hsms_pipe_examples PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+if(TARGET secs-sml-check)
+  add_test(NAME sml_check_cli_sample
+    COMMAND $<TARGET_FILE:secs-sml-check> --stats ${PROJECT_SOURCE_DIR}/docs/sml_sample/sample.sml
+  )
+  set_tests_properties(sml_check_cli_sample PROPERTIES
+    PASS_REGULAR_EXPRESSION "No syntax errors"
+  )
+  add_test(NAME sml_check_cli_invalid
+    COMMAND $<TARGET_FILE:secs-sml-check> ${CMAKE_CURRENT_SOURCE_DIR}/sml_check_invalid.sml
+  )
+  set_tests_properties(sml_check_cli_invalid PROPERTIES WILL_FAIL TRUE)
+
+  add_test(NAME sml_check_cli_semantic_undefined_ref
+    COMMAND $<TARGET_FILE:secs-sml-check> ${CMAKE_CURRENT_SOURCE_DIR}/sml_check_undefined_ref.sml
+  )
+  set_tests_properties(sml_check_cli_semantic_undefined_ref PROPERTIES WILL_FAIL TRUE)
+
+  add_test(NAME sml_check_cli_semantic_type_mismatch
+    COMMAND $<TARGET_FILE:secs-sml-check> ${CMAKE_CURRENT_SOURCE_DIR}/sml_check_type_mismatch.sml
+  )
+  set_tests_properties(sml_check_cli_semantic_type_mismatch PROPERTIES WILL_FAIL TRUE)
+
+  add_test(NAME sml_check_cli_json_format
+    COMMAND $<TARGET_FILE:secs-sml-check> --format json ${PROJECT_SOURCE_DIR}/docs/sml_sample/sample.sml
+  )
+  set_tests_properties(sml_check_cli_json_format PROPERTIES
+    PASS_REGULAR_EXPRESSION "\"files\""
+  )
 endif()
 
 if(SECS_ENABLE_COVERAGE)
@@ -120,6 +158,8 @@ if(SECS_ENABLE_COVERAGE)
   secs_enable_coverage(test_sml_runtime)
   secs_enable_coverage(test_utils_dump)
   secs_enable_coverage(test_utils_helpers)
+  secs_enable_coverage(test_tools_recording)
+  secs_enable_coverage(test_tools_sml_check)
   secs_enable_coverage(test_ceid_layer)
   secs_enable_coverage(test_c_api_c)
   if(TARGET test_hsms_pipe_examples)
