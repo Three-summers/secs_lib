@@ -5,6 +5,8 @@ project(secs
   LANGUAGES C CXX
 )
 
+include(CMakeParseArguments)
+
 # 用于判断是独立构建还是作为依赖被嵌入，PROJECT_SOURCE_DIR 取决于当前作用域最近的一次 project()
 set(SECS_PROJECT_IS_TOP_LEVEL OFF)
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
@@ -37,6 +39,12 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+include(CheckLanguage)
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+  include("${PROJECT_SOURCE_DIR}/cmake/EmbedTextAsC.cmake")
+endif()
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake/Modules")
 

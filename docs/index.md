@@ -23,6 +23,7 @@
 - SML/SMLX：[architecture/06-sml-module.md](architecture/06-sml-module.md)
 - C API：[architecture/07-c-api-module.md](architecture/07-c-api-module.md)
 - Utils：[architecture/08-utils-module.md](architecture/08-utils-module.md)
+- 工具链（CLI + 资源嵌入）：[architecture/09-tools.md](architecture/09-tools.md)
 
 ## SML/SMLX（扩展与提案）
 

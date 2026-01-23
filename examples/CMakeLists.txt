@@ -48,6 +48,18 @@ set_target_properties(c_api_secs1_smlx PROPERTIES LINKER_LANGUAGE CXX)
 target_compile_features(c_api_secs1_smlx PRIVATE c_std_11)
 list(APPEND _secs_example_targets c_api_secs1_smlx)
 
+if(Python3_Interpreter_FOUND)
+  # Example: embed a .sml file into a generated header, so users can keep SML on the host
+  # (e.g. SD card during dev) while deploying as an in-memory constant.
+  secs_embed_text_as_c(
+    TARGET c_api_secs1_smlx
+    INPUT  ${CMAKE_CURRENT_SOURCE_DIR}/micro_pressure.sml
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/generated/micro_pressure_sml.h
+    VAR    micro_pressure_sml
+    NULL_TERMINATE
+  )
+endif()
+
 # ----------------------------- Legacy 示例（可选构建，默认关闭）
 option(SECS_BUILD_LEGACY_EXAMPLES "Build legacy example programs" OFF)
 if(SECS_BUILD_LEGACY_EXAMPLES)
