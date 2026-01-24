@@ -3512,6 +3512,74 @@ static void test_sml_render_context_lifecycle(void) {
     secs_sml_render_context_destroy(ctx);
 }
 
+static void test_sml_render_context_sticky_error_context(void) {
+    secs_sml_render_context_t *ctx = NULL;
+    expect_ok("secs_sml_render_context_create(sticky)",
+              secs_sml_render_context_create(&ctx));
+
+    expect_ok("secs_sml_render_context_begin",
+              secs_sml_render_context_begin(ctx));
+
+    secs_error_t first = secs_sml_render_context_set_boolean(ctx, "BAD", 2);
+    expect_err("secs_sml_render_context_set_boolean(bad value01)", first);
+    if (first.category == NULL ||
+        strcmp(first.category, "secs.c_api") != 0 ||
+        first.value != (int)SECS_C_API_INVALID_ARGUMENT) {
+        failf("sticky first error should be secs.c_api/invalid_argument", first);
+    }
+
+    secs_error_t second = secs_sml_render_context_set_ascii(ctx, "MDLN", "MODEL");
+    expect_err("secs_sml_render_context_set_ascii(short-circuit)", second);
+    if (second.category == NULL || first.category == NULL ||
+        strcmp(second.category, first.category) != 0 ||
+        second.value != first.value) {
+        failf("sticky second error should equal first", second);
+    }
+
+    {
+        secs_ii_item_t *out = NULL;
+        secs_error_t err = secs_sml_render_context_get(ctx, "MDLN", &out);
+        expect_err("secs_sml_render_context_get(MDLN not set)", err);
+        if (err.value != (int)SECS_C_API_NOT_FOUND) {
+            failf("get(MDLN) should be NOT_FOUND", err);
+        }
+        secs_ii_item_destroy(out);
+    }
+
+    secs_error_t end_err = secs_sml_render_context_end(ctx);
+    expect_err("secs_sml_render_context_end(first error)", end_err);
+    if (end_err.category == NULL || strcmp(end_err.category, first.category) != 0 ||
+        end_err.value != first.value) {
+        failf("end() should return sticky first error", end_err);
+    }
+
+    expect_ok("secs_sml_render_context_set_ascii(after end)",
+              secs_sml_render_context_set_ascii(ctx, "MDLN", "OK"));
+    {
+        const char *p = NULL;
+        size_t n = 0;
+        expect_ok("secs_sml_render_context_get_ascii_view(after end)",
+                  secs_sml_render_context_get_ascii_view(ctx, "MDLN", &p, &n));
+        if (!p || n != 2 || memcmp(p, "OK", 2) != 0) {
+            fprintf(stderr, "FAIL: sticky(after end) MDLN mismatch\n");
+            ++g_failures;
+        }
+    }
+
+    /* clear 应能恢复 sticky（不必退出 begin/end 模式） */
+    expect_ok("secs_sml_render_context_begin(recover)",
+              secs_sml_render_context_begin(ctx));
+    expect_err("secs_sml_render_context_set_boolean(bad value01 2)",
+               secs_sml_render_context_set_boolean(ctx, "BAD2", 2));
+    secs_sml_render_context_clear(ctx);
+    expect_ok("secs_sml_render_context_set_ascii(after clear)",
+              secs_sml_render_context_set_ascii(ctx, "MDLN2", "OK"));
+    expect_ok("secs_sml_render_context_end(after clear)",
+              secs_sml_render_context_end(ctx));
+
+    secs_sml_render_context_destroy(ctx);
+}
+
 static void test_sml_runtime_encode_message_body_with_context(void) {
     secs_sml_runtime_t *rt = NULL;
     expect_ok("secs_sml_runtime_create(encode ctx)", secs_sml_runtime_create(&rt));
@@ -6593,6 +6661,7 @@ int main(void) {
     test_sml_runtime_basic();
     test_sml_runtime_placeholders();
     test_sml_render_context_lifecycle();
+    test_sml_render_context_sticky_error_context();
     test_sml_runtime_encode_message_body_with_context();
     test_sml_runtime_match_response_with_context();
     test_sml_runtime_match_response_empty_body();

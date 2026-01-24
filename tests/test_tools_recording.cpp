@@ -171,6 +171,56 @@ void test_message_recorder_filter_exception_sets_error() {
     std::filesystem::remove(path, rm_ec);
 }
 
+void test_message_recorder_filter_by_sf() {
+    const auto path = make_temp_path("secs_tools_recording_filter_sf");
+
+    {
+        MessageRecorder rec(path);
+        TEST_EXPECT(rec.is_open());
+
+        rec.set_filter([](const secs::protocol::DataMessage &m) -> bool {
+            return m.stream == 1 && m.function == 2;
+        });
+
+        secs::protocol::DataMessage a{};
+        a.stream = 1;
+        a.function = 1;
+        a.w_bit = false;
+        a.system_bytes = 1;
+        a.body = std::vector<byte>{0x01};
+
+        secs::protocol::DataMessage b{};
+        b.stream = 1;
+        b.function = 2;
+        b.w_bit = false;
+        b.system_bytes = 2;
+        b.body = std::vector<byte>{0x02};
+
+        rec.record_tx(a);
+        rec.record_tx(b);
+        rec.flush();
+        TEST_EXPECT_OK(rec.last_error());
+    }
+
+    {
+        MessagePlayer player(path);
+        TEST_EXPECT(player.is_open());
+
+        auto m = player.next_message();
+        TEST_EXPECT(m.has_value());
+        TEST_EXPECT_EQ(m->stream, 1u);
+        TEST_EXPECT_EQ(m->function, 2u);
+        TEST_EXPECT_EQ(m->system_bytes, 2u);
+
+        auto end = player.next_message();
+        TEST_EXPECT(!end.has_value());
+        TEST_EXPECT(!player.last_error());
+    }
+
+    std::error_code rm_ec{};
+    std::filesystem::remove(path, rm_ec);
+}
+
 void test_recorded_message_jsonl_rejects_out_of_range_fields() {
     const std::string line =
         R"({"ts_us":1,"dir":"TX","s":256,"f":1,"w":false,"sb":1,"body_hex":""})";
@@ -185,6 +235,17 @@ void test_recorded_message_jsonl_allows_unknown_null_field() {
     RecordedMessage parsed{};
     TEST_EXPECT_OK(MessagePlayer::parse_jsonl_line(line, parsed));
     TEST_EXPECT(!parsed.is_tx);
+    TEST_EXPECT_EQ(parsed.body.size(), 2u);
+}
+
+void test_recorded_message_jsonl_allows_unknown_string_fields() {
+    const std::string line =
+        R"({"ts_us":1,"dir":"RX","s":1,"f":2,"w":false,"sb":3,"body_hex":"00ff","peer":"127.0.0.1:5000","local":"0.0.0.0:1234"})";
+    RecordedMessage parsed{};
+    TEST_EXPECT_OK(MessagePlayer::parse_jsonl_line(line, parsed));
+    TEST_EXPECT(!parsed.is_tx);
+    TEST_EXPECT_EQ(parsed.stream, 1u);
+    TEST_EXPECT_EQ(parsed.function, 2u);
     TEST_EXPECT_EQ(parsed.body.size(), 2u);
 }
 
@@ -204,8 +265,10 @@ int main() {
     test_recorded_message_jsonl_rejects_invalid_direction();
     test_message_recorder_and_player_end_to_end_file();
     test_message_recorder_filter_exception_sets_error();
+    test_message_recorder_filter_by_sf();
     test_recorded_message_jsonl_rejects_out_of_range_fields();
     test_recorded_message_jsonl_allows_unknown_null_field();
+    test_recorded_message_jsonl_allows_unknown_string_fields();
     test_recorded_message_jsonl_rejects_invalid_unicode_escape();
     return secs::tests::run_and_report();
 }

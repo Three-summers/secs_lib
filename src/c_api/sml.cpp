@@ -137,6 +137,35 @@ secs_sml_runtime_get_message_body_by_name(const secs_sml_runtime_t *rt,
 
 // ----------------------------- SML RenderContext -----------------------------
 
+namespace {
+
+static bool sml_render_ctx_short_circuit(secs_sml_render_context_t *ctx,
+                                        secs_error_t &out) noexcept {
+    if (!ctx) {
+        out = c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        return true;
+    }
+    if (ctx->sticky_enabled && !secs_error_is_ok(ctx->sticky_err)) {
+        out = ctx->sticky_err;
+        return true;
+    }
+    return false;
+}
+
+static secs_error_t sml_render_ctx_remember(secs_sml_render_context_t *ctx,
+                                           secs_error_t err) noexcept {
+    if (!ctx) {
+        return err;
+    }
+    if (ctx->sticky_enabled && secs_error_is_ok(ctx->sticky_err) &&
+        !secs_error_is_ok(err)) {
+        ctx->sticky_err = err;
+    }
+    return err;
+}
+
+} // namespace
+
 secs_error_t secs_sml_render_context_create(secs_sml_render_context_t **out_ctx) {
     return guard_error([&]() -> secs_error_t {
         if (!out_ctx) {
@@ -163,6 +192,30 @@ void secs_sml_render_context_clear(secs_sml_render_context_t *ctx) {
             return;
         }
         ctx->ctx.clear();
+        ctx->sticky_err = ok();
+    });
+}
+
+secs_error_t secs_sml_render_context_begin(secs_sml_render_context_t *ctx) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        ctx->sticky_enabled = true;
+        ctx->sticky_err = ok();
+        return ok();
+    });
+}
+
+secs_error_t secs_sml_render_context_end(secs_sml_render_context_t *ctx) {
+    return guard_error([&]() -> secs_error_t {
+        if (!ctx) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        const auto err = ctx->sticky_err;
+        ctx->sticky_enabled = false;
+        ctx->sticky_err = ok();
+        return err;
     });
 }
 
@@ -170,10 +223,22 @@ secs_error_t secs_sml_render_context_set(secs_sml_render_context_t *ctx,
                                          const char *name,
                                          const secs_ii_item_t *value) {
     return guard_error([&]() -> secs_error_t {
-        if (!ctx || !name || !value) {
-            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        secs_error_t sticky{};
+        if (sml_render_ctx_short_circuit(ctx, sticky)) {
+            return sticky;
         }
-        ctx->ctx.set(std::string{name}, value->item);
+        if (!name || !value) {
+            return sml_render_ctx_remember(ctx,
+                                           c_api_err(SECS_C_API_INVALID_ARGUMENT));
+        }
+        try {
+            ctx->ctx.set(std::string{name}, value->item);
+        } catch (const std::bad_alloc &) {
+            return sml_render_ctx_remember(ctx,
+                                           c_api_err(SECS_C_API_OUT_OF_MEMORY));
+        } catch (...) {
+            return sml_render_ctx_remember(ctx, c_api_err(SECS_C_API_EXCEPTION));
+        }
         return ok();
     });
 }
@@ -182,8 +247,13 @@ secs_error_t secs_sml_render_context_set_ascii(secs_sml_render_context_t *ctx,
                                                const char *name,
                                                const char *value) {
     return guard_error([&]() -> secs_error_t {
-        if (!ctx || !name || !value) {
-            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        secs_error_t sticky{};
+        if (sml_render_ctx_short_circuit(ctx, sticky)) {
+            return sticky;
+        }
+        if (!name || !value) {
+            return sml_render_ctx_remember(ctx,
+                                           c_api_err(SECS_C_API_INVALID_ARGUMENT));
         }
 
         secs_ii_item_t *tmp = nullptr;
@@ -191,7 +261,7 @@ secs_error_t secs_sml_render_context_set_ascii(secs_sml_render_context_t *ctx,
             secs_ii_item_create_ascii(value, std::strlen(value), &tmp);
         if (!secs_error_is_ok(err)) {
             secs_ii_item_destroy(tmp);
-            return err;
+            return sml_render_ctx_remember(ctx, err);
         }
 
         const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
@@ -205,18 +275,24 @@ secs_error_t secs_sml_render_context_set_binary(secs_sml_render_context_t *ctx,
                                                 const uint8_t *bytes,
                                                 size_t n) {
     return guard_error([&]() -> secs_error_t {
-        if (!ctx || !name) {
-            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        secs_error_t sticky{};
+        if (sml_render_ctx_short_circuit(ctx, sticky)) {
+            return sticky;
+        }
+        if (!name) {
+            return sml_render_ctx_remember(ctx,
+                                           c_api_err(SECS_C_API_INVALID_ARGUMENT));
         }
         if (!bytes && n != 0) {
-            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+            return sml_render_ctx_remember(ctx,
+                                           c_api_err(SECS_C_API_INVALID_ARGUMENT));
         }
 
         secs_ii_item_t *tmp = nullptr;
         const auto err = secs_ii_item_create_binary(bytes, n, &tmp);
         if (!secs_error_is_ok(err)) {
             secs_ii_item_destroy(tmp);
-            return err;
+            return sml_render_ctx_remember(ctx, err);
         }
 
         const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
@@ -229,18 +305,24 @@ secs_error_t secs_sml_render_context_set_boolean(secs_sml_render_context_t *ctx,
                                                  const char *name,
                                                  uint8_t value01) {
     return guard_error([&]() -> secs_error_t {
-        if (!ctx || !name) {
-            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        secs_error_t sticky{};
+        if (sml_render_ctx_short_circuit(ctx, sticky)) {
+            return sticky;
+        }
+        if (!name) {
+            return sml_render_ctx_remember(ctx,
+                                           c_api_err(SECS_C_API_INVALID_ARGUMENT));
         }
         if (value01 != 0 && value01 != 1) {
-            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+            return sml_render_ctx_remember(ctx,
+                                           c_api_err(SECS_C_API_INVALID_ARGUMENT));
         }
 
         secs_ii_item_t *tmp = nullptr;
         const auto err = secs_ii_item_create_boolean(&value01, 1, &tmp);
         if (!secs_error_is_ok(err)) {
             secs_ii_item_destroy(tmp);
-            return err;
+            return sml_render_ctx_remember(ctx, err);
         }
 
         const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
@@ -253,15 +335,20 @@ secs_error_t secs_sml_render_context_set_i1(secs_sml_render_context_t *ctx,
                                             const char *name,
                                             int8_t value) {
     return guard_error([&]() -> secs_error_t {
-        if (!ctx || !name) {
-            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        secs_error_t sticky{};
+        if (sml_render_ctx_short_circuit(ctx, sticky)) {
+            return sticky;
+        }
+        if (!name) {
+            return sml_render_ctx_remember(ctx,
+                                           c_api_err(SECS_C_API_INVALID_ARGUMENT));
         }
 
         secs_ii_item_t *tmp = nullptr;
         const auto err = secs_ii_item_create_i1(&value, 1, &tmp);
         if (!secs_error_is_ok(err)) {
             secs_ii_item_destroy(tmp);
-            return err;
+            return sml_render_ctx_remember(ctx, err);
         }
 
         const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
@@ -274,15 +361,20 @@ secs_error_t secs_sml_render_context_set_i2(secs_sml_render_context_t *ctx,
                                             const char *name,
                                             int16_t value) {
     return guard_error([&]() -> secs_error_t {
-        if (!ctx || !name) {
-            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        secs_error_t sticky{};
+        if (sml_render_ctx_short_circuit(ctx, sticky)) {
+            return sticky;
+        }
+        if (!name) {
+            return sml_render_ctx_remember(ctx,
+                                           c_api_err(SECS_C_API_INVALID_ARGUMENT));
         }
 
         secs_ii_item_t *tmp = nullptr;
         const auto err = secs_ii_item_create_i2(&value, 1, &tmp);
         if (!secs_error_is_ok(err)) {
             secs_ii_item_destroy(tmp);
-            return err;
+            return sml_render_ctx_remember(ctx, err);
         }
 
         const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
@@ -295,15 +387,20 @@ secs_error_t secs_sml_render_context_set_i4(secs_sml_render_context_t *ctx,
                                             const char *name,
                                             int32_t value) {
     return guard_error([&]() -> secs_error_t {
-        if (!ctx || !name) {
-            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        secs_error_t sticky{};
+        if (sml_render_ctx_short_circuit(ctx, sticky)) {
+            return sticky;
+        }
+        if (!name) {
+            return sml_render_ctx_remember(ctx,
+                                           c_api_err(SECS_C_API_INVALID_ARGUMENT));
         }
 
         secs_ii_item_t *tmp = nullptr;
         const auto err = secs_ii_item_create_i4(&value, 1, &tmp);
         if (!secs_error_is_ok(err)) {
             secs_ii_item_destroy(tmp);
-            return err;
+            return sml_render_ctx_remember(ctx, err);
         }
 
         const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
@@ -316,15 +413,20 @@ secs_error_t secs_sml_render_context_set_i8(secs_sml_render_context_t *ctx,
                                             const char *name,
                                             int64_t value) {
     return guard_error([&]() -> secs_error_t {
-        if (!ctx || !name) {
-            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        secs_error_t sticky{};
+        if (sml_render_ctx_short_circuit(ctx, sticky)) {
+            return sticky;
+        }
+        if (!name) {
+            return sml_render_ctx_remember(ctx,
+                                           c_api_err(SECS_C_API_INVALID_ARGUMENT));
         }
 
         secs_ii_item_t *tmp = nullptr;
         const auto err = secs_ii_item_create_i8(&value, 1, &tmp);
         if (!secs_error_is_ok(err)) {
             secs_ii_item_destroy(tmp);
-            return err;
+            return sml_render_ctx_remember(ctx, err);
         }
 
         const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
@@ -337,15 +439,20 @@ secs_error_t secs_sml_render_context_set_u1(secs_sml_render_context_t *ctx,
                                             const char *name,
                                             uint8_t value) {
     return guard_error([&]() -> secs_error_t {
-        if (!ctx || !name) {
-            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        secs_error_t sticky{};
+        if (sml_render_ctx_short_circuit(ctx, sticky)) {
+            return sticky;
+        }
+        if (!name) {
+            return sml_render_ctx_remember(ctx,
+                                           c_api_err(SECS_C_API_INVALID_ARGUMENT));
         }
 
         secs_ii_item_t *tmp = nullptr;
         const auto err = secs_ii_item_create_u1(&value, 1, &tmp);
         if (!secs_error_is_ok(err)) {
             secs_ii_item_destroy(tmp);
-            return err;
+            return sml_render_ctx_remember(ctx, err);
         }
 
         const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
@@ -358,15 +465,20 @@ secs_error_t secs_sml_render_context_set_u2(secs_sml_render_context_t *ctx,
                                             const char *name,
                                             uint16_t value) {
     return guard_error([&]() -> secs_error_t {
-        if (!ctx || !name) {
-            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        secs_error_t sticky{};
+        if (sml_render_ctx_short_circuit(ctx, sticky)) {
+            return sticky;
+        }
+        if (!name) {
+            return sml_render_ctx_remember(ctx,
+                                           c_api_err(SECS_C_API_INVALID_ARGUMENT));
         }
 
         secs_ii_item_t *tmp = nullptr;
         const auto err = secs_ii_item_create_u2(&value, 1, &tmp);
         if (!secs_error_is_ok(err)) {
             secs_ii_item_destroy(tmp);
-            return err;
+            return sml_render_ctx_remember(ctx, err);
         }
 
         const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
@@ -379,15 +491,20 @@ secs_error_t secs_sml_render_context_set_u4(secs_sml_render_context_t *ctx,
                                             const char *name,
                                             uint32_t value) {
     return guard_error([&]() -> secs_error_t {
-        if (!ctx || !name) {
-            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        secs_error_t sticky{};
+        if (sml_render_ctx_short_circuit(ctx, sticky)) {
+            return sticky;
+        }
+        if (!name) {
+            return sml_render_ctx_remember(ctx,
+                                           c_api_err(SECS_C_API_INVALID_ARGUMENT));
         }
 
         secs_ii_item_t *tmp = nullptr;
         const auto err = secs_ii_item_create_u4(&value, 1, &tmp);
         if (!secs_error_is_ok(err)) {
             secs_ii_item_destroy(tmp);
-            return err;
+            return sml_render_ctx_remember(ctx, err);
         }
 
         const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
@@ -400,15 +517,20 @@ secs_error_t secs_sml_render_context_set_u8(secs_sml_render_context_t *ctx,
                                             const char *name,
                                             uint64_t value) {
     return guard_error([&]() -> secs_error_t {
-        if (!ctx || !name) {
-            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        secs_error_t sticky{};
+        if (sml_render_ctx_short_circuit(ctx, sticky)) {
+            return sticky;
+        }
+        if (!name) {
+            return sml_render_ctx_remember(ctx,
+                                           c_api_err(SECS_C_API_INVALID_ARGUMENT));
         }
 
         secs_ii_item_t *tmp = nullptr;
         const auto err = secs_ii_item_create_u8(&value, 1, &tmp);
         if (!secs_error_is_ok(err)) {
             secs_ii_item_destroy(tmp);
-            return err;
+            return sml_render_ctx_remember(ctx, err);
         }
 
         const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
@@ -421,15 +543,20 @@ secs_error_t secs_sml_render_context_set_f4(secs_sml_render_context_t *ctx,
                                             const char *name,
                                             float value) {
     return guard_error([&]() -> secs_error_t {
-        if (!ctx || !name) {
-            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        secs_error_t sticky{};
+        if (sml_render_ctx_short_circuit(ctx, sticky)) {
+            return sticky;
+        }
+        if (!name) {
+            return sml_render_ctx_remember(ctx,
+                                           c_api_err(SECS_C_API_INVALID_ARGUMENT));
         }
 
         secs_ii_item_t *tmp = nullptr;
         const auto err = secs_ii_item_create_f4(&value, 1, &tmp);
         if (!secs_error_is_ok(err)) {
             secs_ii_item_destroy(tmp);
-            return err;
+            return sml_render_ctx_remember(ctx, err);
         }
 
         const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
@@ -442,15 +569,20 @@ secs_error_t secs_sml_render_context_set_f8(secs_sml_render_context_t *ctx,
                                             const char *name,
                                             double value) {
     return guard_error([&]() -> secs_error_t {
-        if (!ctx || !name) {
-            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        secs_error_t sticky{};
+        if (sml_render_ctx_short_circuit(ctx, sticky)) {
+            return sticky;
+        }
+        if (!name) {
+            return sml_render_ctx_remember(ctx,
+                                           c_api_err(SECS_C_API_INVALID_ARGUMENT));
         }
 
         secs_ii_item_t *tmp = nullptr;
         const auto err = secs_ii_item_create_f8(&value, 1, &tmp);
         if (!secs_error_is_ok(err)) {
             secs_ii_item_destroy(tmp);
-            return err;
+            return sml_render_ctx_remember(ctx, err);
         }
 
         const auto set_err = secs_sml_render_context_set(ctx, name, tmp);
@@ -857,4 +989,3 @@ void secs_sml_match_traces_free(secs_sml_match_trace_t *traces, size_t count) {
         secs_free(traces);
     });
 }
-

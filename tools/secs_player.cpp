@@ -14,8 +14,10 @@
 
 #include <charconv>
 #include <chrono>
+#include <cctype>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -37,6 +39,14 @@ struct Options final {
 
     secs::core::duration rx_timeout{std::chrono::seconds{5}};
 
+    enum class DirFilter : std::uint8_t { any = 0, tx = 1, rx = 2 };
+    std::vector<std::pair<std::uint8_t, std::uint8_t>> only_sf{};
+    std::vector<std::uint8_t> only_streams{};
+    DirFilter dir{DirFilter::any};
+    std::optional<std::uint64_t> since_us{};
+    std::optional<std::uint64_t> until_us{};
+    std::optional<std::size_t> limit{};
+
     bool verbose{false};
     bool stats{false};
     bool ignore_system_bytes{false};
@@ -57,6 +67,12 @@ static void print_usage(const char *argv0) {
               << "  --mode <fast|realtime>  回放模式（默认 fast）\n"
               << "  --speed <double>        realtime 速度倍率（默认 1.0）\n"
               << "  --timeout-ms <u32>      等待 RX 的超时毫秒（默认 5000）\n"
+              << "  --only s=<u8>,f=<u8>    仅回放指定 S/F（可重复指定）\n"
+              << "  --only-stream <u8>      仅回放指定 Stream（可重复指定）\n"
+              << "  --dir <tx|rx>           仅回放指定方向（默认不过滤）\n"
+              << "  --since-us <u64>        仅回放 ts_us >= since-us 的消息\n"
+              << "  --until-us <u64>        仅回放 ts_us <= until-us 的消息\n"
+              << "  --limit <N>             最多回放 N 条（按过滤后的消息计数）\n"
               << "  --ignore-system-bytes   校验时忽略 system_bytes\n"
               << "  --continue-on-mismatch  校验失败继续回放（默认失败即退出）\n"
               << "  --verbose               输出更详细的差异（包含 body hexdump）\n"
@@ -81,6 +97,15 @@ static bool parse_u16(std::string_view s, std::uint16_t &out) {
     return true;
 }
 
+static bool parse_u8(std::string_view s, std::uint8_t &out) {
+    std::uint16_t v = 0;
+    if (!parse_u16(s, v) || v > 0xFFu) {
+        return false;
+    }
+    out = static_cast<std::uint8_t>(v);
+    return true;
+}
+
 static bool parse_u32(std::string_view s, std::uint32_t &out) {
     std::uint64_t v = 0;
     auto *begin = s.data();
@@ -91,6 +116,108 @@ static bool parse_u32(std::string_view s, std::uint32_t &out) {
     }
     out = static_cast<std::uint32_t>(v);
     return true;
+}
+
+static bool parse_u64(std::string_view s, std::uint64_t &out) {
+    std::uint64_t v = 0;
+    int base = 10;
+    if (s.size() > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        base = 16;
+        s.remove_prefix(2);
+    }
+    auto *begin = s.data();
+    auto *end = s.data() + s.size();
+    auto [ptr, ec] = std::from_chars(begin, end, v, base);
+    if (ec != std::errc{} || ptr != end) {
+        return false;
+    }
+    out = v;
+    return true;
+}
+
+static bool parse_size(std::string_view s, std::size_t &out) {
+    std::uint64_t v = 0;
+    if (!parse_u64(s, v) || v == 0) {
+        return false;
+    }
+    if (v > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        return false;
+    }
+    out = static_cast<std::size_t>(v);
+    return true;
+}
+
+static std::string_view trim(std::string_view s) {
+    while (!s.empty() &&
+           std::isspace(static_cast<unsigned char>(s.front())) != 0) {
+        s.remove_prefix(1);
+    }
+    while (!s.empty() &&
+           std::isspace(static_cast<unsigned char>(s.back())) != 0) {
+        s.remove_suffix(1);
+    }
+    return s;
+}
+
+static bool parse_only_sf(std::string_view s,
+                          std::uint8_t &out_stream,
+                          std::uint8_t &out_function) {
+    std::optional<std::uint8_t> stream{};
+    std::optional<std::uint8_t> function{};
+
+    for (;;) {
+        const auto comma = s.find(',');
+        auto part = (comma == std::string_view::npos) ? s : s.substr(0, comma);
+        part = trim(part);
+        if (part.empty()) {
+            return false;
+        }
+        const auto eq = part.find('=');
+        if (eq == std::string_view::npos) {
+            return false;
+        }
+        const auto key = trim(part.substr(0, eq));
+        const auto val = trim(part.substr(eq + 1));
+        if (key == "s" || key == "stream") {
+            std::uint8_t v = 0;
+            if (!parse_u8(val, v)) {
+                return false;
+            }
+            stream = v;
+        } else if (key == "f" || key == "function") {
+            std::uint8_t v = 0;
+            if (!parse_u8(val, v)) {
+                return false;
+            }
+            function = v;
+        } else {
+            return false;
+        }
+
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        s.remove_prefix(comma + 1);
+    }
+
+    if (!stream.has_value() || !function.has_value()) {
+        return false;
+    }
+    out_stream = *stream;
+    out_function = *function;
+    return true;
+}
+
+static bool parse_dir(std::string_view s, Options::DirFilter &out) {
+    if (s == "tx" || s == "TX") {
+        out = Options::DirFilter::tx;
+        return true;
+    }
+    if (s == "rx" || s == "RX") {
+        out = Options::DirFilter::rx;
+        return true;
+    }
+    return false;
 }
 
 static bool parse_endpoint(std::string_view text,
@@ -216,6 +343,83 @@ static std::optional<Options> parse_args(int argc, char **argv) {
             opt.rx_timeout = std::chrono::milliseconds{ms};
             continue;
         }
+        if (a == "--only") {
+            const char *v = need_value("--only");
+            if (!v) {
+                return std::nullopt;
+            }
+            std::uint8_t s8 = 0;
+            std::uint8_t f8 = 0;
+            if (!parse_only_sf(v, s8, f8)) {
+                std::cerr << "非法 only: " << v << "（期望 s=<u8>,f=<u8>）\n";
+                return std::nullopt;
+            }
+            opt.only_sf.emplace_back(s8, f8);
+            continue;
+        }
+        if (a == "--only-stream") {
+            const char *v = need_value("--only-stream");
+            if (!v) {
+                return std::nullopt;
+            }
+            std::uint8_t s8 = 0;
+            if (!parse_u8(v, s8)) {
+                std::cerr << "非法 only-stream: " << v << "\n";
+                return std::nullopt;
+            }
+            opt.only_streams.push_back(s8);
+            continue;
+        }
+        if (a == "--dir") {
+            const char *v = need_value("--dir");
+            if (!v) {
+                return std::nullopt;
+            }
+            if (!parse_dir(v, opt.dir)) {
+                std::cerr << "非法 dir: " << v << "（期望 tx|rx）\n";
+                return std::nullopt;
+            }
+            continue;
+        }
+        if (a == "--since-us") {
+            const char *v = need_value("--since-us");
+            if (!v) {
+                return std::nullopt;
+            }
+            std::uint64_t u = 0;
+            if (!parse_u64(v, u)) {
+                std::cerr << "非法 since-us: " << v << "\n";
+                return std::nullopt;
+            }
+            opt.since_us = u;
+            continue;
+        }
+        if (a == "--until-us") {
+            const char *v = need_value("--until-us");
+            if (!v) {
+                return std::nullopt;
+            }
+            std::uint64_t u = 0;
+            if (!parse_u64(v, u)) {
+                std::cerr << "非法 until-us: " << v << "\n";
+                return std::nullopt;
+            }
+            opt.until_us = u;
+            continue;
+        }
+        if (a == "--limit") {
+            const char *v = need_value("--limit");
+            if (!v) {
+                return std::nullopt;
+            }
+            std::size_t n = 0;
+            if (!parse_size(v, n)) {
+                std::cerr << "非法 limit: " << v << "（期望 N>=1）\n";
+                return std::nullopt;
+            }
+            opt.limit = n;
+            continue;
+        }
         if (a == "--ignore-system-bytes") {
             opt.ignore_system_bytes = true;
             continue;
@@ -238,6 +442,11 @@ static std::optional<Options> parse_args(int argc, char **argv) {
     }
 
     if (opt.input.empty() || opt.connect.empty()) {
+        return std::nullopt;
+    }
+    if (opt.since_us.has_value() && opt.until_us.has_value() &&
+        *opt.since_us > *opt.until_us) {
+        std::cerr << "非法时间窗：since-us > until-us\n";
         return std::nullopt;
     }
     return opt;
@@ -324,7 +533,48 @@ static asio::awaitable<int> run(const Options &opt) {
     std::size_t total = 0;
     std::size_t tx = 0;
     std::size_t rx = 0;
+    std::size_t skipped = 0;
     std::size_t mismatches = 0;
+
+    const auto matches_selector = [&](const secs::tools::RecordedMessage &m) -> bool {
+        const bool has_selector =
+            !opt.only_sf.empty() || !opt.only_streams.empty();
+        if (has_selector) {
+            bool ok = false;
+            for (const auto s : opt.only_streams) {
+                if (m.stream == s) {
+                    ok = true;
+                    break;
+                }
+            }
+            if (!ok) {
+                for (const auto &sf : opt.only_sf) {
+                    if (m.stream == sf.first && m.function == sf.second) {
+                        ok = true;
+                        break;
+                    }
+                }
+            }
+            if (!ok) {
+                return false;
+            }
+        }
+
+        if (opt.dir == Options::DirFilter::tx && !m.is_tx) {
+            return false;
+        }
+        if (opt.dir == Options::DirFilter::rx && m.is_tx) {
+            return false;
+        }
+
+        if (opt.since_us.has_value() && m.timestamp_us < *opt.since_us) {
+            return false;
+        }
+        if (opt.until_us.has_value() && m.timestamp_us > *opt.until_us) {
+            return false;
+        }
+        return true;
+    };
 
     for (;;) {
         auto m = player.next_message();
@@ -336,6 +586,16 @@ static asio::awaitable<int> run(const Options &opt) {
                 (void)co_await sess.async_wait_reader_stopped(1s);
                 co_return 2;
             }
+            break;
+        }
+        if (opt.until_us.has_value() && m->timestamp_us > *opt.until_us) {
+            break;
+        }
+        if (!matches_selector(*m)) {
+            ++skipped;
+            continue;
+        }
+        if (opt.limit.has_value() && total >= *opt.limit) {
             break;
         }
         ++total;
@@ -399,7 +659,8 @@ static asio::awaitable<int> run(const Options &opt) {
         const auto st = player.get_stats();
         std::cout << "\n=== stats ===\n"
                   << "messages_total=" << total << " tx=" << tx << " rx=" << rx
-                  << " mismatches=" << mismatches << "\n"
+                  << " skipped=" << skipped << " mismatches=" << mismatches
+                  << "\n"
                   << "file_total_lines=" << st.total_lines
                   << " parsed_messages=" << st.parsed_messages
                   << " parse_errors=" << st.parse_errors << "\n";
@@ -432,4 +693,3 @@ int main(int argc, char **argv) {
     ioc.run();
     return rc;
 }
-

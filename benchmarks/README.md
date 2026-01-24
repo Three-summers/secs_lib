@@ -11,6 +11,14 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSECS_BUILD_BENCHMARKS=ON
 cmake --build build --target benchmarks -j
 ```
 
+## 一键运行（推荐）
+
+```bash
+./benchmarks/run_benchmarks.sh
+```
+
+输出默认写入：`.codex/secs_bench_YYYYMMDD_HHMMSS.txt`。
+
 ## 运行
 
 ```bash
@@ -19,6 +27,10 @@ cmake --build build --target benchmarks -j
 ./build/benchmarks/bench_hsms_message
 ./build/benchmarks/bench_secs1_block
 ./build/benchmarks/bench_sml_runtime
+./build/benchmarks/bench_tools_recording
+./build/benchmarks/bench_c_api_render_context
+./build/benchmarks/bench_protocol_router
+./build/benchmarks/bench_protocol_system_bytes
 ```
 
 ## 说明与建议

@@ -755,6 +755,14 @@ secs_error_t secs_sml_render_context_create(secs_sml_render_context_t **out_ctx)
 void secs_sml_render_context_destroy(secs_sml_render_context_t *ctx);
 void secs_sml_render_context_clear(secs_sml_render_context_t *ctx);
 
+/*
+ * Sticky Error Context（可选，默认关闭）：
+ * - begin 后：set/set_* 会记忆首个错误，并在后续调用中短路返回该错误；
+ * - end：返回首错（或 OK），并关闭该模式。
+ */
+secs_error_t secs_sml_render_context_begin(secs_sml_render_context_t *ctx);
+secs_error_t secs_sml_render_context_end(secs_sml_render_context_t *ctx);
+
 /* 设置变量：name -> SECS-II Item（value 由调用方持有，本函数会拷贝）。 */
 secs_error_t secs_sml_render_context_set(secs_sml_render_context_t *ctx,
                                          const char *name,

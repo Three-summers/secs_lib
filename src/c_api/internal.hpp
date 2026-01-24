@@ -118,6 +118,8 @@ struct secs_sml_runtime final {
 
 struct secs_sml_render_context final {
     secs::sml::RenderContext ctx{};
+    bool sticky_enabled{false};
+    secs_error_t sticky_err{0, "secs.c_api"};
 };
 
 struct secs_hsms_connection final {

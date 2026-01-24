@@ -20,12 +20,32 @@ add_executable(bench_sml_runtime bench_sml_runtime.cpp)
 target_link_libraries(bench_sml_runtime PRIVATE secs::core secs::sml secs::ii)
 target_include_directories(bench_sml_runtime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+add_executable(bench_tools_recording bench_tools_recording.cpp)
+target_link_libraries(bench_tools_recording PRIVATE secs::core secs::tools)
+target_include_directories(bench_tools_recording PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(bench_c_api_render_context bench_c_api_render_context.cpp)
+target_link_libraries(bench_c_api_render_context PRIVATE secs::core secs::c_api)
+target_include_directories(bench_c_api_render_context PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(bench_protocol_router bench_protocol_router.cpp)
+target_link_libraries(bench_protocol_router PRIVATE secs::core secs::protocol)
+target_include_directories(bench_protocol_router PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(bench_protocol_system_bytes bench_protocol_system_bytes.cpp)
+target_link_libraries(bench_protocol_system_bytes PRIVATE secs::core secs::protocol)
+target_include_directories(bench_protocol_system_bytes PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 set(_secs_bench_targets
   bench_core_buffer
   bench_secs2_codec
   bench_hsms_message
   bench_secs1_block
   bench_sml_runtime
+  bench_tools_recording
+  bench_c_api_render_context
+  bench_protocol_router
+  bench_protocol_system_bytes
 )
 
 # 基准测试：编译警告等级
