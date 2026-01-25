@@ -12,6 +12,10 @@
     - 乱序应答（覆盖 system-bytes 匹配能力）
     - DeviceId 不匹配触发 `S9F1`（覆盖错误路径互通）
   - 若环境禁用 `socket()`（常见于受限沙箱），则会自动 **Skip** TCP 用例，并改用 **stdin/stdout 双向管道**承载 HSMS 帧（`integration_hsms_pipe_with_secs4net`，仍是“真实字节流”，可覆盖分包/重组逻辑）
+- **HSMS-SS（纯 C++ loopback）**：不依赖 dotnet，用于在“单机/同实现”场景下做连通性与临界测试
+  - `integration_hsms_tcp_loopback`：真实 TCP（127.0.0.1:0），覆盖 SELECT/LINKTEST、乱序应答、T3 超时 + late response、SEPARATE 断线收敛、inbound 队列溢出断线、pending 上限（非致命）、stop 中断挂起事务（cancelled 收敛）
+    - 若环境禁用 `socket()` 会返回 77 并由 CTest 标记为 Skip
+  - `integration_hsms_pipe_loopback`：pipe 全双工字节流（无 socket 依赖），覆盖 SELECT/LINKTEST、乱序应答、T3 超时 + late response、SEPARATE 断线收敛、inbound 队列溢出断线、pending 上限（非致命）、stop 中断挂起事务（cancelled 收敛）
 - **SECS-I（E4，串口）**：优先使用 Linux `pty` 构造“虚拟串口线”；若环境无 `/dev/ptmx` 权限则自动降级为 `socketpair()` 字节流链路，验证 `secs_lib` 的 SECS-I 状态机/协议层可用性
   - 额外提供 `integration_secs1_pty_required`：强制要求 `pty` 可用；若不可用则会 Skip（返回码 77）
 

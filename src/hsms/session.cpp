@@ -55,14 +55,274 @@ constexpr std::uint8_t kRspReject = 1;
 // 初始状态下未启动 reader_loop_，因此 reader_stopped_event_
 // 置为已完成（避免等待方无意义阻塞）。 该事件会在 start_reader_() 时
 // reset，并在 reader_loop_ 退出时 set。
+struct Session::State final : std::enable_shared_from_this<State> {
+    friend class Session;
+
+    struct Pending final {
+        explicit Pending(SType expected) : expected_stype(expected) {}
+
+        SType expected_stype;
+        secs::core::Event ready{};
+        std::error_code ec{};
+        std::optional<Message> response{};
+    };
+
+    explicit State(asio::any_io_executor ex, SessionOptions options);
+
+    [[nodiscard]] std::uint32_t normalized_system_bytes_max_() const noexcept;
+    [[nodiscard]] bool is_system_bytes_in_flight_(std::uint32_t sb) const noexcept;
+    [[nodiscard]] bool try_mark_system_bytes_in_flight_(std::uint32_t sb) noexcept;
+    void unmark_system_bytes_in_flight_(std::uint32_t sb) noexcept;
+    void clear_system_bytes_in_flight_() noexcept;
+
+    [[nodiscard]] std::uint32_t allocate_system_bytes() noexcept;
+
+    void stop() noexcept;
+
+    asio::awaitable<std::error_code>
+    async_open_active(const asio::ip::tcp::endpoint &endpoint);
+    asio::awaitable<std::error_code> async_open_active(Connection connection);
+    asio::awaitable<std::error_code>
+    async_open_passive(asio::ip::tcp::socket socket);
+    asio::awaitable<std::error_code> async_open_passive(Connection connection);
+
+    asio::awaitable<std::error_code>
+    async_run_active(const asio::ip::tcp::endpoint &endpoint);
+    asio::awaitable<std::error_code>
+    async_run_passive(asio::ip::tcp::acceptor &acceptor);
+
+    asio::awaitable<std::error_code> async_send(const Message &msg);
+
+    asio::awaitable<std::pair<std::error_code, Message>>
+    async_receive_data(std::optional<core::duration> timeout = std::nullopt);
+
+    asio::awaitable<std::pair<std::error_code, Message>> async_request_data(
+        std::uint8_t stream, std::uint8_t function, core::bytes_view body);
+
+    asio::awaitable<std::pair<std::error_code, Message>>
+    async_request_data(std::uint8_t stream,
+                       std::uint8_t function,
+                       core::bytes_view body,
+                       std::optional<core::duration> timeout);
+
+    asio::awaitable<std::error_code> async_linktest();
+
+    asio::awaitable<std::error_code>
+    async_wait_selected(std::uint64_t min_generation, core::duration timeout);
+
+    asio::awaitable<std::error_code> async_wait_reader_stopped(
+        std::optional<core::duration> timeout = std::nullopt);
+
+private:
+    void reset_state_() noexcept;
+    void set_selected_() noexcept;
+    void set_not_selected_() noexcept;
+    void on_disconnected_(std::error_code reason) noexcept;
+    void emit_control_event_(ControlDirection direction,
+                             const Message &msg) noexcept;
+
+    void start_reader_();
+    asio::awaitable<void> reader_loop_();
+    asio::awaitable<void> linktest_loop_(std::uint64_t generation);
+
+    asio::awaitable<std::pair<std::error_code, Message>>
+    async_control_transaction_(Message req, SType expected_rsp, core::duration timeout);
+
+    asio::awaitable<std::pair<std::error_code, Message>>
+    async_data_transaction_(Message req, core::duration timeout);
+
+    [[nodiscard]] bool fulfill_pending_(Message &msg) noexcept;
+    void cancel_pending_data_(std::error_code reason) noexcept;
+
+    asio::any_io_executor executor_;
+    SessionOptions options_{};
+
+    Connection connection_;
+
+    std::atomic<std::uint32_t> system_bytes_{0};
+    mutable std::mutex system_bytes_mu_{};
+    std::unordered_set<std::uint32_t> system_bytes_in_flight_{};
+
+    SessionState state_{SessionState::disconnected};
+    std::atomic<std::uint64_t> selected_generation_{0};
+    std::optional<std::error_code> disconnected_reason_{};
+
+    bool stop_requested_{false};
+    bool reader_running_{false};
+
+    // 若 async_run_passive 正在等待 accept，可通过 stop() 取消/关闭 acceptor。
+    // 约束：acceptor 必须在 async_run_passive 协程结束前保持有效。
+    asio::ip::tcp::acceptor *passive_acceptor_{nullptr};
+
+    secs::core::Event selected_event_{};
+    secs::core::Event disconnected_event_{};
+    secs::core::Event reader_stopped_event_{};
+
+    std::deque<Message> inbound_data_{};
+    secs::core::Event inbound_event_{};
+
+    std::unordered_map<std::uint32_t, std::shared_ptr<Pending>> pending_{};
+};
+
 Session::Session(asio::any_io_executor ex, SessionOptions options)
+    : state_(std::make_shared<State>(ex, options)) {}
+
+Session::~Session() noexcept { stop(); }
+
+asio::any_io_executor Session::executor() const noexcept {
+    if (!state_) {
+        return asio::any_io_executor{};
+    }
+    return state_->executor_;
+}
+
+SessionState Session::state() const noexcept {
+    if (!state_) {
+        return SessionState::disconnected;
+    }
+    return state_->state_;
+}
+
+bool Session::is_selected() const noexcept {
+    return state() == SessionState::selected;
+}
+
+std::uint64_t Session::selected_generation() const noexcept {
+    if (!state_) {
+        return 0;
+    }
+    return state_->selected_generation_.load();
+}
+
+std::uint32_t Session::allocate_system_bytes() noexcept {
+    if (!state_) {
+        return 0U;
+    }
+    return state_->allocate_system_bytes();
+}
+
+void Session::stop() noexcept {
+    if (state_) {
+        state_->stop();
+    }
+}
+
+asio::awaitable<std::error_code>
+Session::async_open_active(const asio::ip::tcp::endpoint &endpoint) {
+    if (!state_) {
+        co_return core::make_error_code(core::errc::invalid_argument);
+    }
+    co_return co_await state_->async_open_active(endpoint);
+}
+
+asio::awaitable<std::error_code> Session::async_open_active(Connection connection) {
+    if (!state_) {
+        co_return core::make_error_code(core::errc::invalid_argument);
+    }
+    co_return co_await state_->async_open_active(std::move(connection));
+}
+
+asio::awaitable<std::error_code>
+Session::async_open_passive(asio::ip::tcp::socket socket) {
+    if (!state_) {
+        co_return core::make_error_code(core::errc::invalid_argument);
+    }
+    co_return co_await state_->async_open_passive(std::move(socket));
+}
+
+asio::awaitable<std::error_code> Session::async_open_passive(Connection connection) {
+    if (!state_) {
+        co_return core::make_error_code(core::errc::invalid_argument);
+    }
+    co_return co_await state_->async_open_passive(std::move(connection));
+}
+
+asio::awaitable<std::error_code>
+Session::async_run_active(const asio::ip::tcp::endpoint &endpoint) {
+    if (!state_) {
+        co_return core::make_error_code(core::errc::invalid_argument);
+    }
+    co_return co_await state_->async_run_active(endpoint);
+}
+
+asio::awaitable<std::error_code>
+Session::async_run_passive(asio::ip::tcp::acceptor &acceptor) {
+    if (!state_) {
+        co_return core::make_error_code(core::errc::invalid_argument);
+    }
+    co_return co_await state_->async_run_passive(acceptor);
+}
+
+asio::awaitable<std::error_code> Session::async_send(const Message &msg) {
+    if (!state_) {
+        co_return core::make_error_code(core::errc::invalid_argument);
+    }
+    co_return co_await state_->async_send(msg);
+}
+
+asio::awaitable<std::pair<std::error_code, Message>>
+Session::async_receive_data(std::optional<core::duration> timeout) {
+    if (!state_) {
+        co_return std::pair{core::make_error_code(core::errc::invalid_argument),
+                            Message{}};
+    }
+    co_return co_await state_->async_receive_data(timeout);
+}
+
+asio::awaitable<std::pair<std::error_code, Message>>
+Session::async_request_data(std::uint8_t stream,
+                            std::uint8_t function,
+                            core::bytes_view body) {
+    if (!state_) {
+        co_return std::pair{core::make_error_code(core::errc::invalid_argument),
+                            Message{}};
+    }
+    co_return co_await state_->async_request_data(stream, function, body);
+}
+
+asio::awaitable<std::pair<std::error_code, Message>>
+Session::async_request_data(std::uint8_t stream,
+                            std::uint8_t function,
+                            core::bytes_view body,
+                            std::optional<core::duration> timeout) {
+    if (!state_) {
+        co_return std::pair{core::make_error_code(core::errc::invalid_argument),
+                            Message{}};
+    }
+    co_return co_await state_->async_request_data(stream, function, body, timeout);
+}
+
+asio::awaitable<std::error_code> Session::async_linktest() {
+    if (!state_) {
+        co_return core::make_error_code(core::errc::invalid_argument);
+    }
+    co_return co_await state_->async_linktest();
+}
+
+asio::awaitable<std::error_code>
+Session::async_wait_selected(std::uint64_t min_generation, core::duration timeout) {
+    if (!state_) {
+        co_return core::make_error_code(core::errc::invalid_argument);
+    }
+    co_return co_await state_->async_wait_selected(min_generation, timeout);
+}
+
+asio::awaitable<std::error_code>
+Session::async_wait_reader_stopped(std::optional<core::duration> timeout) {
+    if (!state_) {
+        co_return core::make_error_code(core::errc::invalid_argument);
+    }
+    co_return co_await state_->async_wait_reader_stopped(timeout);
+}
+
+Session::State::State(asio::any_io_executor ex, SessionOptions options)
     : executor_(asio::make_strand(ex)),
       options_(options),
       connection_(executor_, ConnectionOptions{.t8 = options.t8}) {
     reader_stopped_event_.set();
 }
 
-std::uint32_t Session::normalized_system_bytes_max_() const noexcept {
+std::uint32_t Session::State::normalized_system_bytes_max_() const noexcept {
     const auto max_value = options_.system_bytes_max_value;
     if (max_value == 0U) {
         return std::numeric_limits<std::uint32_t>::max();
@@ -70,7 +330,7 @@ std::uint32_t Session::normalized_system_bytes_max_() const noexcept {
     return max_value;
 }
 
-bool Session::is_system_bytes_in_flight_(std::uint32_t sb) const noexcept {
+bool Session::State::is_system_bytes_in_flight_(std::uint32_t sb) const noexcept {
     if (sb == 0U) {
         return true;
     }
@@ -83,7 +343,7 @@ bool Session::is_system_bytes_in_flight_(std::uint32_t sb) const noexcept {
     }
 }
 
-bool Session::try_mark_system_bytes_in_flight_(std::uint32_t sb) noexcept {
+bool Session::State::try_mark_system_bytes_in_flight_(std::uint32_t sb) noexcept {
     if (sb == 0U) {
         return false;
     }
@@ -95,7 +355,7 @@ bool Session::try_mark_system_bytes_in_flight_(std::uint32_t sb) noexcept {
     }
 }
 
-void Session::unmark_system_bytes_in_flight_(std::uint32_t sb) noexcept {
+void Session::State::unmark_system_bytes_in_flight_(std::uint32_t sb) noexcept {
     if (sb == 0U) {
         return;
     }
@@ -106,7 +366,7 @@ void Session::unmark_system_bytes_in_flight_(std::uint32_t sb) noexcept {
     }
 }
 
-void Session::clear_system_bytes_in_flight_() noexcept {
+void Session::State::clear_system_bytes_in_flight_() noexcept {
     try {
         std::lock_guard lk(system_bytes_mu_);
         system_bytes_in_flight_.clear();
@@ -114,7 +374,7 @@ void Session::clear_system_bytes_in_flight_() noexcept {
     }
 }
 
-std::uint32_t Session::allocate_system_bytes() noexcept {
+std::uint32_t Session::State::allocate_system_bytes() noexcept {
     // 目标：保证“在飞唯一”且永不返回 0（0 作为保留值）。
     const auto max_value = normalized_system_bytes_max_();
     if (max_value == 0U) {
@@ -138,7 +398,7 @@ std::uint32_t Session::allocate_system_bytes() noexcept {
     return 0U;
 }
 
-void Session::reset_state_() noexcept {
+void Session::State::reset_state_() noexcept {
     state_ = SessionState::connected;
     disconnected_reason_.reset();
     connection_.disable_data_writes(core::make_error_code(core::errc::cancelled));
@@ -152,7 +412,7 @@ void Session::reset_state_() noexcept {
     clear_system_bytes_in_flight_();
 }
 
-void Session::set_selected_() noexcept {
+void Session::State::set_selected_() noexcept {
     if (state_ == SessionState::selected) {
         return;
     }
@@ -166,10 +426,11 @@ void Session::set_selected_() noexcept {
 
     if (options_.linktest_interval != core::duration{}) {
         try {
+            auto self = shared_from_this();
             asio::co_spawn(
                 executor_,
-                [this, gen]() -> asio::awaitable<void> {
-                    co_await linktest_loop_(gen);
+                [self, gen]() -> asio::awaitable<void> {
+                    co_await self->linktest_loop_(gen);
                 }, // GCOVR_EXCL_LINE：co_spawn 内联分支不计入覆盖率
                 asio::detached);
         } catch (...) {
@@ -179,7 +440,7 @@ void Session::set_selected_() noexcept {
     }
 }
 
-void Session::set_not_selected_() noexcept {
+void Session::State::set_not_selected_() noexcept {
     if (state_ == SessionState::disconnected) {
         return;
     }
@@ -199,7 +460,7 @@ void Session::set_not_selected_() noexcept {
     SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(), "hsms not-selected");
 }
 
-void Session::on_disconnected_(std::error_code reason) noexcept {
+void Session::State::on_disconnected_(std::error_code reason) noexcept {
     SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
                         "hsms disconnected: ec={}({})",
                         reason.value(),
@@ -225,7 +486,7 @@ void Session::on_disconnected_(std::error_code reason) noexcept {
     inbound_data_.clear();
 }
 
-void Session::emit_control_event_(ControlDirection direction,
+void Session::State::emit_control_event_(ControlDirection direction,
                                   const Message &msg) noexcept {
     if (!options_.on_control_event) {
         return;
@@ -270,46 +531,54 @@ void Session::emit_control_event_(ControlDirection direction,
     }
 }
 
-void Session::stop() noexcept {
+void Session::State::stop() noexcept {
     // 约束：core::Event/Connection 默认假设在同一 executor/strand 语境；
     // stop() 通过 dispatch 收敛到 Session 自身 executor_，避免跨线程直接 cancel waiters。
+    std::shared_ptr<State> self;
     try {
-        asio::dispatch(executor_, [this]() noexcept {
-            if (stop_requested_) {
+        self = shared_from_this();
+    } catch (...) {
+        return;
+    }
+
+    try {
+        asio::dispatch(executor_, [self]() noexcept {
+            if (self->stop_requested_) {
                 return;
             }
-            stop_requested_ = true;
-            connection_.cancel_and_close();
+            self->stop_requested_ = true;
+            self->connection_.cancel_and_close();
 
             // 若正在被动 accept，关闭 acceptor 以打断 async_accept（best-effort）。
-            if (passive_acceptor_) {
+            if (self->passive_acceptor_) {
                 std::error_code ignore{};
-                passive_acceptor_->close(ignore);
+                self->passive_acceptor_->close(ignore);
             }
 
             SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
                                 "hsms stop requested");
-            on_disconnected_(core::make_error_code(core::errc::cancelled));
+            self->on_disconnected_(core::make_error_code(core::errc::cancelled));
         });
     } catch (...) {
         // best-effort：dispatch/post 失败通常意味着资源不足，此处不抛异常。
     }
 }
 
-void Session::start_reader_() {
+void Session::State::start_reader_() {
     reader_running_ = true;
     disconnected_event_.reset();
     reader_stopped_event_.reset();
 
+    auto self = shared_from_this();
     asio::co_spawn(
         executor_,
-        [this]() -> asio::awaitable<void> {
-            co_await reader_loop_();
+        [self]() -> asio::awaitable<void> {
+            co_await self->reader_loop_();
         }, // GCOVR_EXCL_LINE：co_spawn 内联分支不计入覆盖率
         asio::detached);
 }
 
-asio::awaitable<void> Session::reader_loop_() {
+asio::awaitable<void> Session::State::reader_loop_() {
     while (!stop_requested_) {
         auto [ec, msg] = co_await connection_.async_read_message();
         if (ec) {
@@ -488,7 +757,7 @@ asio::awaitable<void> Session::reader_loop_() {
     reader_stopped_event_.set();
 }
 
-asio::awaitable<void> Session::linktest_loop_(std::uint64_t generation) {
+asio::awaitable<void> Session::State::linktest_loop_(std::uint64_t generation) {
     std::uint32_t consecutive_failures = 0;
     const std::uint32_t max_failures =
         std::max<std::uint32_t>(1U, options_.linktest_max_consecutive_failures);
@@ -531,7 +800,7 @@ asio::awaitable<void> Session::linktest_loop_(std::uint64_t generation) {
 }
 
 asio::awaitable<std::error_code>
-Session::async_wait_reader_stopped(std::optional<core::duration> timeout) {
+Session::State::async_wait_reader_stopped(std::optional<core::duration> timeout) {
     const auto ex = co_await asio::this_coro::executor;
     if (ex != executor_) {
         try {
@@ -547,7 +816,7 @@ Session::async_wait_reader_stopped(std::optional<core::duration> timeout) {
     co_return co_await reader_stopped_event_.async_wait(timeout);
 }
 
-bool Session::fulfill_pending_(Message &msg) noexcept {
+bool Session::State::fulfill_pending_(Message &msg) noexcept {
     const auto it = pending_.find(msg.header.system_bytes);
     if (it == pending_.end()) {
         return false;
@@ -565,7 +834,7 @@ bool Session::fulfill_pending_(Message &msg) noexcept {
     return true;
 }
 
-void Session::cancel_pending_data_(std::error_code reason) noexcept {
+void Session::State::cancel_pending_data_(std::error_code reason) noexcept {
     std::vector<std::uint32_t> to_erase;
     to_erase.reserve(pending_.size());
 
@@ -585,9 +854,9 @@ void Session::cancel_pending_data_(std::error_code reason) noexcept {
 }
 
 asio::awaitable<std::pair<std::error_code, Message>>
-Session::async_control_transaction_(Message req,
-                                    SType expected_rsp,
-                                    core::duration timeout) {
+Session::State::async_control_transaction_(Message req,
+                                           SType expected_rsp,
+                                           core::duration timeout) {
     // 控制事务：把请求登记到 pending_，由 reader_loop_ 收到响应后唤醒。
     const auto max_pending =
         options_.max_pending_requests == 0 ? std::size_t{1}
@@ -657,7 +926,7 @@ Session::async_control_transaction_(Message req,
 }
 
 asio::awaitable<std::pair<std::error_code, Message>>
-Session::async_data_transaction_(Message req, core::duration timeout) {
+Session::State::async_data_transaction_(Message req, core::duration timeout) {
     // 数据事务（W=1）：同样用 pending_ 做请求-响应匹配；按 HSMS-SS 语义，
     // T3 超时只取消事务，不强制断线。
     const auto max_pending =
@@ -721,7 +990,7 @@ Session::async_data_transaction_(Message req, core::duration timeout) {
 }
 
 asio::awaitable<std::error_code>
-Session::async_open_active(const asio::ip::tcp::endpoint &endpoint) {
+Session::State::async_open_active(const asio::ip::tcp::endpoint &endpoint) {
     const auto ex = co_await asio::this_coro::executor;
     if (ex != executor_) {
         try {
@@ -754,7 +1023,7 @@ Session::async_open_active(const asio::ip::tcp::endpoint &endpoint) {
 }
 
 asio::awaitable<std::error_code>
-Session::async_open_active(Connection connection) {
+Session::State::async_open_active(Connection connection) {
     const auto ex = co_await asio::this_coro::executor;
     if (ex != executor_) {
         try {
@@ -810,7 +1079,7 @@ Session::async_open_active(Connection connection) {
 }
 
 asio::awaitable<std::error_code>
-Session::async_open_passive(asio::ip::tcp::socket socket) {
+Session::State::async_open_passive(asio::ip::tcp::socket socket) {
     const auto ex = co_await asio::this_coro::executor;
     if (ex != executor_) {
         try {
@@ -836,7 +1105,7 @@ Session::async_open_passive(asio::ip::tcp::socket socket) {
 }
 
 asio::awaitable<std::error_code>
-Session::async_open_passive(Connection connection) {
+Session::State::async_open_passive(Connection connection) {
     const auto ex = co_await asio::this_coro::executor;
     if (ex != executor_) {
         try {
@@ -880,7 +1149,7 @@ Session::async_open_passive(Connection connection) {
 }
 
 asio::awaitable<std::error_code>
-Session::async_run_active(const asio::ip::tcp::endpoint &endpoint) {
+Session::State::async_run_active(const asio::ip::tcp::endpoint &endpoint) {
     const auto ex = co_await asio::this_coro::executor;
     if (ex != executor_) {
         try {
@@ -918,7 +1187,7 @@ Session::async_run_active(const asio::ip::tcp::endpoint &endpoint) {
 }
 
 asio::awaitable<std::error_code>
-Session::async_run_passive(asio::ip::tcp::acceptor &acceptor) {
+Session::State::async_run_passive(asio::ip::tcp::acceptor &acceptor) {
     const auto ex = co_await asio::this_coro::executor;
     if (ex != executor_) {
         try {
@@ -937,7 +1206,7 @@ Session::async_run_passive(asio::ip::tcp::acceptor &acceptor) {
 
     passive_acceptor_ = &acceptor;
     struct Reset final {
-        Session *self;
+        State *self;
         ~Reset() { self->passive_acceptor_ = nullptr; }
     } reset{this};
 
@@ -981,7 +1250,7 @@ Session::async_run_passive(asio::ip::tcp::acceptor &acceptor) {
     co_return std::error_code{};
 }
 
-asio::awaitable<std::error_code> Session::async_send(const Message &msg) {
+asio::awaitable<std::error_code> Session::State::async_send(const Message &msg) {
     const auto ex = co_await asio::this_coro::executor;
     if (ex != executor_) {
         try {
@@ -1024,7 +1293,7 @@ asio::awaitable<std::error_code> Session::async_send(const Message &msg) {
 }
 
 asio::awaitable<std::pair<std::error_code, Message>>
-Session::async_receive_data(std::optional<core::duration> timeout) {
+Session::State::async_receive_data(std::optional<core::duration> timeout) {
     const auto ex = co_await asio::this_coro::executor;
     if (ex != executor_) {
         try {
@@ -1064,17 +1333,17 @@ Session::async_receive_data(std::optional<core::duration> timeout) {
 }
 
 asio::awaitable<std::pair<std::error_code, Message>>
-Session::async_request_data(std::uint8_t stream,
-                            std::uint8_t function,
-                            core::bytes_view body) {
+Session::State::async_request_data(std::uint8_t stream,
+                                   std::uint8_t function,
+                                   core::bytes_view body) {
     co_return co_await async_request_data(stream, function, body, std::nullopt);
 }
 
 asio::awaitable<std::pair<std::error_code, Message>>
-Session::async_request_data(std::uint8_t stream,
-                            std::uint8_t function,
-                            core::bytes_view body,
-                            std::optional<core::duration> timeout) {
+Session::State::async_request_data(std::uint8_t stream,
+                                   std::uint8_t function,
+                                   core::bytes_view body,
+                                   std::optional<core::duration> timeout) {
     const auto ex = co_await asio::this_coro::executor;
     if (ex != executor_) {
         try {
@@ -1105,7 +1374,7 @@ Session::async_request_data(std::uint8_t stream,
                                                timeout.value_or(options_.t3));
 }
 
-asio::awaitable<std::error_code> Session::async_linktest() {
+asio::awaitable<std::error_code> Session::State::async_linktest() {
     const auto ex = co_await asio::this_coro::executor;
     if (ex != executor_) {
         try {
@@ -1135,8 +1404,8 @@ asio::awaitable<std::error_code> Session::async_linktest() {
 }
 
 asio::awaitable<std::error_code>
-Session::async_wait_selected(std::uint64_t min_generation,
-                             core::duration timeout) {
+Session::State::async_wait_selected(std::uint64_t min_generation,
+                                    core::duration timeout) {
     const auto ex = co_await asio::this_coro::executor;
     if (ex != executor_) {
         try {

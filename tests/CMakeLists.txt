@@ -36,6 +36,10 @@ add_executable(test_hsms_transport test_hsms_transport.cpp)
 target_link_libraries(test_hsms_transport PRIVATE secs_hsms)
 add_test(NAME hsms_transport COMMAND test_hsms_transport)
 
+add_executable(test_hsms_session_lifetime test_hsms_session_lifetime.cpp)
+target_link_libraries(test_hsms_session_lifetime PRIVATE secs_hsms)
+add_test(NAME hsms_session_lifetime COMMAND test_hsms_session_lifetime)
+
 add_executable(test_hsms_message test_hsms_message.cpp)
 target_link_libraries(test_hsms_message PRIVATE secs_hsms)
 add_test(NAME hsms_message COMMAND test_hsms_message)

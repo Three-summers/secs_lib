@@ -120,18 +120,20 @@ struct SessionOptions final {
 class Session final {
 public:
     explicit Session(asio::any_io_executor ex, SessionOptions options);
+    // 析构时会 best-effort 请求 stop()（不等待 reader_loop_ 退出）。
+    // 若需要确定性的资源回收，请显式调用 stop() 并 co_await async_wait_reader_stopped()。
+    ~Session() noexcept;
 
-    [[nodiscard]] asio::any_io_executor executor() const noexcept {
-        return executor_;
-    }
-    [[nodiscard]] SessionState state() const noexcept { return state_; }
-    [[nodiscard]] bool is_selected() const noexcept {
-        return state_ == SessionState::selected;
-    }
+    Session(const Session &) = delete;
+    Session &operator=(const Session &) = delete;
+    Session(Session &&) = delete;
+    Session &operator=(Session &&) = delete;
 
-    [[nodiscard]] std::uint64_t selected_generation() const noexcept {
-        return selected_generation_.load();
-    }
+    [[nodiscard]] asio::any_io_executor executor() const noexcept;
+    [[nodiscard]] SessionState state() const noexcept;
+    [[nodiscard]] bool is_selected() const noexcept;
+
+    [[nodiscard]] std::uint64_t selected_generation() const noexcept;
     [[nodiscard]] std::uint32_t allocate_system_bytes() noexcept;
 
     void stop() noexcept;
@@ -184,69 +186,8 @@ public:
         std::optional<core::duration> timeout = std::nullopt);
 
 private:
-    struct Pending final {
-        explicit Pending(SType expected) : expected_stype(expected) {}
-
-        SType expected_stype;
-        secs::core::Event ready{};
-        std::error_code ec{};
-        std::optional<Message> response{};
-    };
-
-    void reset_state_() noexcept;
-    void set_selected_() noexcept;
-    void set_not_selected_() noexcept;
-    void on_disconnected_(std::error_code reason) noexcept;
-    void emit_control_event_(ControlDirection direction,
-                             const Message &msg) noexcept;
-
-    void start_reader_();
-    asio::awaitable<void> reader_loop_();
-    asio::awaitable<void> linktest_loop_(std::uint64_t generation);
-
-    asio::awaitable<std::pair<std::error_code, Message>>
-    async_control_transaction_(Message req, SType expected_rsp, core::duration timeout);
-
-    asio::awaitable<std::pair<std::error_code, Message>>
-    async_data_transaction_(Message req, core::duration timeout);
-
-    [[nodiscard]] bool fulfill_pending_(Message &msg) noexcept;
-    void cancel_pending_data_(std::error_code reason) noexcept;
-
-    [[nodiscard]] std::uint32_t normalized_system_bytes_max_() const noexcept;
-    [[nodiscard]] bool is_system_bytes_in_flight_(std::uint32_t sb) const noexcept;
-    [[nodiscard]] bool try_mark_system_bytes_in_flight_(std::uint32_t sb) noexcept;
-    void unmark_system_bytes_in_flight_(std::uint32_t sb) noexcept;
-    void clear_system_bytes_in_flight_() noexcept;
-
-    asio::any_io_executor executor_;
-    SessionOptions options_{};
-
-    Connection connection_;
-
-    std::atomic<std::uint32_t> system_bytes_{0};
-    mutable std::mutex system_bytes_mu_{};
-    std::unordered_set<std::uint32_t> system_bytes_in_flight_{};
-
-    SessionState state_{SessionState::disconnected};
-    std::atomic<std::uint64_t> selected_generation_{0};
-    std::optional<std::error_code> disconnected_reason_{};
-
-    bool stop_requested_{false};
-    bool reader_running_{false};
-
-    // 若 async_run_passive 正在等待 accept，可通过 stop() 取消/关闭 acceptor。
-    // 约束：acceptor 必须在 async_run_passive 协程结束前保持有效。
-    asio::ip::tcp::acceptor *passive_acceptor_{nullptr};
-
-    secs::core::Event selected_event_{};
-    secs::core::Event disconnected_event_{};
-    secs::core::Event reader_stopped_event_{};
-
-    std::deque<Message> inbound_data_{};
-    secs::core::Event inbound_event_{};
-
-    std::unordered_map<std::uint32_t, std::shared_ptr<Pending>> pending_{};
+    struct State;
+    std::shared_ptr<State> state_{};
 };
 
 } // namespace secs::hsms

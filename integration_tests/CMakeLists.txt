@@ -34,6 +34,17 @@ target_link_libraries(integration_hsms_tcp_with_secs4net PRIVATE secs_hsms secs_
 add_executable(integration_hsms_tcp_extended_with_secs4net hsms/test_hsms_tcp_extended_with_secs4net.cpp)
 target_link_libraries(integration_hsms_tcp_extended_with_secs4net PRIVATE secs_hsms secs_ii secs_core)
 
+# HSMS（纯 C++）pipe loopback：在禁用 socket() 的环境下仍可做真实字节流联调
+add_executable(integration_hsms_pipe_loopback hsms/test_hsms_pipe_loopback.cpp)
+target_link_libraries(integration_hsms_pipe_loopback PRIVATE secs_hsms secs_ii secs_core)
+add_test(NAME integration_hsms_pipe_loopback COMMAND integration_hsms_pipe_loopback)
+
+# HSMS（纯 C++）真实 TCP loopback：用于验证连接/SELECT/LINKTEST/收发在真实 socket 上可用
+add_executable(integration_hsms_tcp_loopback hsms/test_hsms_tcp_loopback.cpp)
+target_link_libraries(integration_hsms_tcp_loopback PRIVATE secs_hsms secs_ii secs_core)
+add_test(NAME integration_hsms_tcp_loopback COMMAND integration_hsms_tcp_loopback)
+set_tests_properties(integration_hsms_tcp_loopback PROPERTIES SKIP_RETURN_CODE 77)
+
 if(SECS_DOTNET_EXECUTABLE)
   set(_hsms_peer_proj "${CMAKE_CURRENT_SOURCE_DIR}/hsms/dotnet_peer/HsmsPeer.csproj")
   set(_hsms_peer_dll "${CMAKE_CURRENT_SOURCE_DIR}/hsms/dotnet_peer/bin/Release/net8.0/HsmsPeer.dll")
