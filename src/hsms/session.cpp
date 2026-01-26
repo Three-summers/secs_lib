@@ -1431,6 +1431,26 @@ Session::State::async_wait_selected(std::uint64_t min_generation,
         }
 
         const auto remaining = deadline - now;
+        // 注意：selected_event_ 是“电平触发”（set 后保持置位，直到 reset）。
+        // 当处于 selected 但 generation 尚未满足 min_generation 时，直接等待
+        // selected_event_ 会立即返回，导致在单线程 io_context 中形成忙等，进而
+        // 饿死 reader_loop_/accept/reconnect 等逻辑，最终触发误判超时。
+        //
+        // 该分支的典型使用场景是“等待下一次重连后 selected”（min_generation > 当前）。
+        // 在 HSMS 语义下，下一次 selected 必然经历一次断线，因此这里改为等待
+        // disconnected_event_（会在断线时 set），避免 busy-spin。
+        if (state_ == SessionState::selected &&
+            selected_generation_.load() < min_generation) {
+            auto ec = co_await disconnected_event_.async_wait(remaining);
+            if (ec == core::make_error_code(core::errc::timeout)) {
+                co_return ec;
+            }
+            if (ec && ec != core::make_error_code(core::errc::cancelled)) {
+                co_return ec;
+            }
+            continue;
+        }
+
         auto ec = co_await selected_event_.async_wait(remaining);
         if (ec == core::make_error_code(core::errc::timeout)) {
             co_return ec;

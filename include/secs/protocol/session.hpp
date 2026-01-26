@@ -134,12 +134,18 @@ public:
             std::uint16_t device_id,
             SessionOptions options = {});
 
-    [[nodiscard]] asio::any_io_executor executor() const noexcept {
-        return executor_;
-    }
+    // 析构时会 best-effort 请求 stop()（不等待 async_run 退出）。
+    ~Session() noexcept;
 
-    [[nodiscard]] Router &router() noexcept { return router_; }
-    [[nodiscard]] const Router &router() const noexcept { return router_; }
+    Session(const Session &) = delete;
+    Session &operator=(const Session &) = delete;
+    Session(Session &&) = delete;
+    Session &operator=(Session &&) = delete;
+
+    [[nodiscard]] asio::any_io_executor executor() const noexcept;
+
+    [[nodiscard]] Router &router() noexcept;
+    [[nodiscard]] const Router &router() const noexcept;
 
     void stop() noexcept;
 
@@ -175,68 +181,8 @@ public:
                   std::optional<secs::core::duration> timeout = std::nullopt);
 
 private:
-    enum class Backend : std::uint8_t {
-        hsms = 0,
-        secs1 = 1,
-    };
-
-    struct Pending final {
-        Pending(std::uint8_t stream, std::uint8_t function)
-            : expected_stream(stream), expected_function(function) {}
-
-        std::uint8_t expected_stream{0};
-        std::uint8_t expected_function{0};
-        secs::core::Event ready{};
-        std::error_code ec{};
-        std::optional<DataMessage> response{};
-    };
-
-    asio::awaitable<std::error_code>
-    async_send_message_(const DataMessage &msg);
-    asio::awaitable<std::pair<std::error_code, DataMessage>>
-    async_receive_message_(std::optional<secs::core::duration> timeout);
-
-    asio::awaitable<void> handle_inbound_(DataMessage msg);
-    [[nodiscard]] bool try_fulfill_pending_(DataMessage &msg) noexcept;
-    void cancel_all_pending_(std::error_code reason) noexcept;
-
-    void ensure_hsms_run_loop_started_();
-
-    // 为了避免 Pending::ready(core::Event) 在多线程 io_context 下出现跨线程并发访问，
-    // public API 会把实际逻辑收敛到同一 executor/strand 上执行。
-    asio::awaitable<void> async_run_impl_();
-    asio::awaitable<std::error_code>
-    async_poll_once_impl_(std::optional<secs::core::duration> timeout);
-    asio::awaitable<std::error_code>
-    async_send_impl_(std::uint8_t stream,
-                     std::uint8_t function,
-                     secs::core::bytes_view body);
-    asio::awaitable<std::pair<std::error_code, DataMessage>>
-    async_request_impl_(std::uint8_t stream,
-                        std::uint8_t function,
-                        secs::core::bytes_view body,
-                        std::optional<secs::core::duration> timeout);
-
-    Backend backend_{Backend::hsms};
-    asio::any_io_executor executor_{};
-    SessionOptions options_{};
-
-    SystemBytes system_bytes_{};
-    Router router_{};
-
-    mutable std::mutex pending_mu_{};
-    std::unordered_map<std::uint32_t, std::shared_ptr<Pending>> pending_{};
-
-    bool stop_requested_{false};
-    bool run_loop_active_{false};
-    bool run_loop_spawned_{false};
-    std::mutex run_mu_{};
-
-    secs::hsms::Session *hsms_{nullptr};
-    std::uint16_t hsms_session_id_{0};
-
-    secs::secs1::StateMachine *secs1_{nullptr};
-    std::uint16_t secs1_device_id_{0};
+    struct State;
+    std::shared_ptr<State> state_{};
 };
 
 } // namespace secs::protocol

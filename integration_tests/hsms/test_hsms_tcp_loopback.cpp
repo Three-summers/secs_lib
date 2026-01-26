@@ -1663,6 +1663,343 @@ static asio::awaitable<int> case_stop_during_pending_request() {
     co_return 0;
 }
 #
+static asio::awaitable<int> case_auto_reconnect_after_separate() {
+    auto ex = co_await asio::this_coro::executor;
+    constexpr std::uint16_t device_id = 1;
+#
+    auto [acc_ec, acceptor] = make_loopback_acceptor(ex);
+    if (acc_ec) {
+        if (is_socket_not_permitted(acc_ec)) {
+            std::cerr << "[HSMS][tcp][loopback][reconnect] socket 被禁用，跳过\n";
+            co_return 77;
+        }
+        std::cerr << "[HSMS][tcp][loopback][reconnect] listen 失败: "
+                  << acc_ec.message() << "\n";
+        co_return 2;
+    }
+#
+    std::error_code ep_ec{};
+    const auto ep = acceptor.local_endpoint(ep_ec);
+    if (ep_ec) {
+        std::cerr << "[HSMS][tcp][loopback][reconnect] local_endpoint 失败: "
+                  << ep_ec.message() << "\n";
+        co_return 3;
+    }
+#
+    auto server_opts = make_default_opts(device_id);
+    auto client_opts = make_default_opts(device_id);
+#
+    // 让重连更快一些，避免用例跑太久。
+    server_opts.auto_reconnect = true;
+    server_opts.t5 = 50ms;
+    client_opts.auto_reconnect = true;
+    client_opts.t5 = 50ms;
+#
+    struct Shared final {
+        secs::core::Event server_done{};
+        secs::core::Event client_done{};
+        secs::core::Event server_run_done{};
+        secs::core::Event client_run_done{};
+        std::error_code server_run_ec{};
+        std::error_code client_run_ec{};
+        int server_rc{1};
+        int client_rc{1};
+    };
+    auto shared = std::make_shared<Shared>();
+#
+    asio::co_spawn(
+        ex,
+        [&, shared, server_opts]() -> asio::awaitable<void> {
+            secs::hsms::Session server(co_await asio::this_coro::executor,
+                                       server_opts);
+#
+            asio::co_spawn(
+                co_await asio::this_coro::executor,
+                [&]() -> asio::awaitable<void> {
+                    shared->server_run_ec =
+                        co_await server.async_run_passive(acceptor);
+                    shared->server_run_done.set();
+                },
+                asio::detached);
+#
+            // round#1：等待首次 selected，收一条请求并回包
+            auto ec = co_await server.async_wait_selected(/*min_generation=*/1, 3s);
+            if (ec) {
+                shared->server_rc = 10;
+                std::cerr << "[HSMS][tcp][loopback][reconnect] server 等待 selected#1 失败: "
+                          << ec.message() << "\n";
+                std::error_code ignore{};
+                acceptor.close(ignore);
+                server.stop();
+                (void)co_await shared->server_run_done.async_wait(2s);
+                (void)co_await server.async_wait_reader_stopped(2s);
+                shared->server_done.set();
+                co_return;
+            }
+#
+            auto [rec1, req1] = co_await server.async_receive_data(2s);
+            if (rec1) {
+                shared->server_rc = 11;
+                std::cerr << "[HSMS][tcp][loopback][reconnect] server recv#1 失败: "
+                          << rec1.message() << "\n";
+                std::error_code ignore{};
+                acceptor.close(ignore);
+                server.stop();
+                (void)co_await shared->server_run_done.async_wait(2s);
+                (void)co_await server.async_wait_reader_stopped(2s);
+                shared->server_done.set();
+                co_return;
+            }
+#
+            const auto rsp1 =
+                secs::hsms::make_data_message(server_opts.session_id,
+                                              req1.stream(),
+                                              static_cast<std::uint8_t>(
+                                                  req1.function() + 1U),
+                                              /*w_bit=*/false,
+                                              req1.header.system_bytes,
+                                              bytes_view{req1.body.data(),
+                                                         req1.body.size()});
+            ec = co_await server.async_send(rsp1);
+            if (ec) {
+                shared->server_rc = 12;
+                std::cerr << "[HSMS][tcp][loopback][reconnect] server send#1 失败: "
+                          << ec.message() << "\n";
+                std::error_code ignore{};
+                acceptor.close(ignore);
+                server.stop();
+                (void)co_await shared->server_run_done.async_wait(2s);
+                (void)co_await server.async_wait_reader_stopped(2s);
+                shared->server_done.set();
+                co_return;
+            }
+#
+            // 主动触发断线：发 SEPARATE.req，让对端断开并触发双方进入 disconnected。
+            const auto sep =
+                secs::hsms::make_separate_req(/*session_id=*/0xFFFF,
+                                              server.allocate_system_bytes());
+            ec = co_await server.async_send(sep);
+            if (ec) {
+                shared->server_rc = 13;
+                std::cerr << "[HSMS][tcp][loopback][reconnect] server send SEPARATE 失败: "
+                          << ec.message() << "\n";
+                std::error_code ignore{};
+                acceptor.close(ignore);
+                server.stop();
+                (void)co_await shared->server_run_done.async_wait(2s);
+                (void)co_await server.async_wait_reader_stopped(2s);
+                shared->server_done.set();
+                co_return;
+            }
+#
+            // round#2：等待下一次 selected（重连成功）
+            ec = co_await server.async_wait_selected(/*min_generation=*/2, 3s);
+            if (ec) {
+                shared->server_rc = 14;
+                std::cerr << "[HSMS][tcp][loopback][reconnect] server 等待 selected#2 失败: "
+                          << ec.message() << "\n";
+                std::error_code ignore{};
+                acceptor.close(ignore);
+                server.stop();
+                (void)co_await shared->server_run_done.async_wait(2s);
+                (void)co_await server.async_wait_reader_stopped(2s);
+                shared->server_done.set();
+                co_return;
+            }
+#
+            auto [rec2, req2] = co_await server.async_receive_data(2s);
+            if (rec2) {
+                shared->server_rc = 15;
+                std::cerr << "[HSMS][tcp][loopback][reconnect] server recv#2 失败: "
+                          << rec2.message() << "\n";
+                std::error_code ignore{};
+                acceptor.close(ignore);
+                server.stop();
+                (void)co_await shared->server_run_done.async_wait(2s);
+                (void)co_await server.async_wait_reader_stopped(2s);
+                shared->server_done.set();
+                co_return;
+            }
+#
+            const auto rsp2 =
+                secs::hsms::make_data_message(server_opts.session_id,
+                                              req2.stream(),
+                                              static_cast<std::uint8_t>(
+                                                  req2.function() + 1U),
+                                              /*w_bit=*/false,
+                                              req2.header.system_bytes,
+                                              bytes_view{req2.body.data(),
+                                                         req2.body.size()});
+            ec = co_await server.async_send(rsp2);
+            if (ec) {
+                shared->server_rc = 16;
+                std::cerr << "[HSMS][tcp][loopback][reconnect] server send#2 失败: "
+                          << ec.message() << "\n";
+                std::error_code ignore{};
+                acceptor.close(ignore);
+                server.stop();
+                (void)co_await shared->server_run_done.async_wait(2s);
+                (void)co_await server.async_wait_reader_stopped(2s);
+                shared->server_done.set();
+                co_return;
+            }
+#
+            std::error_code ignore{};
+            acceptor.close(ignore);
+            server.stop();
+            (void)co_await shared->server_run_done.async_wait(2s);
+            (void)co_await server.async_wait_reader_stopped(2s);
+            shared->server_rc = shared->server_run_ec ? 17 : 0;
+            shared->server_done.set();
+            co_return;
+        },
+        asio::detached);
+#
+    asio::co_spawn(
+        ex,
+        [shared, client_opts, ep]() -> asio::awaitable<void> {
+            secs::hsms::Session client(co_await asio::this_coro::executor,
+                                       client_opts);
+#
+            asio::co_spawn(
+                co_await asio::this_coro::executor,
+                [&]() -> asio::awaitable<void> {
+                    shared->client_run_ec = co_await client.async_run_active(ep);
+                    shared->client_run_done.set();
+                },
+                asio::detached);
+#
+            auto ec = co_await client.async_wait_selected(/*min_generation=*/1, 3s);
+            if (ec) {
+                shared->client_rc = 20;
+                std::cerr << "[HSMS][tcp][loopback][reconnect] client 等待 selected#1 失败: "
+                          << ec.message() << "\n";
+                client.stop();
+                (void)co_await shared->client_run_done.async_wait(2s);
+                (void)co_await client.async_wait_reader_stopped(2s);
+                shared->client_done.set();
+                co_return;
+            }
+#
+            const auto item1 = make_test_item(/*tag=*/3001U);
+            auto [enc_ec1, body1] = encode_item(item1);
+            if (enc_ec1) {
+                shared->client_rc = 21;
+                std::cerr << "[HSMS][tcp][loopback][reconnect] client 编码#1 失败: "
+                          << enc_ec1.message() << "\n";
+                client.stop();
+                (void)co_await shared->client_run_done.async_wait(2s);
+                (void)co_await client.async_wait_reader_stopped(2s);
+                shared->client_done.set();
+                co_return;
+            }
+#
+            auto [req_ec1, rsp1] = co_await client.async_request_data(
+                1, 13, bytes_view{body1.data(), body1.size()}, 2s);
+            if (req_ec1) {
+                shared->client_rc = 22;
+                std::cerr << "[HSMS][tcp][loopback][reconnect] client request#1 失败: "
+                          << req_ec1.message() << "\n";
+                client.stop();
+                (void)co_await shared->client_run_done.async_wait(2s);
+                (void)co_await client.async_wait_reader_stopped(2s);
+                shared->client_done.set();
+                co_return;
+            }
+#
+            auto [dec_ec1, out1] =
+                decode_item(bytes_view{rsp1.body.data(), rsp1.body.size()});
+            if (dec_ec1 || out1 != item1) {
+                shared->client_rc = 23;
+                std::cerr << "[HSMS][tcp][loopback][reconnect] client 回包#1 不匹配\n";
+                client.stop();
+                (void)co_await shared->client_run_done.async_wait(2s);
+                (void)co_await client.async_wait_reader_stopped(2s);
+                shared->client_done.set();
+                co_return;
+            }
+#
+            ec = co_await client.async_wait_selected(/*min_generation=*/2, 3s);
+            if (ec) {
+                shared->client_rc = 24;
+                std::cerr << "[HSMS][tcp][loopback][reconnect] client 等待 selected#2 失败: "
+                          << ec.message() << "\n";
+                client.stop();
+                (void)co_await shared->client_run_done.async_wait(2s);
+                (void)co_await client.async_wait_reader_stopped(2s);
+                shared->client_done.set();
+                co_return;
+            }
+#
+            const auto item2 = make_test_item(/*tag=*/3002U);
+            auto [enc_ec2, body2] = encode_item(item2);
+            if (enc_ec2) {
+                shared->client_rc = 25;
+                std::cerr << "[HSMS][tcp][loopback][reconnect] client 编码#2 失败: "
+                          << enc_ec2.message() << "\n";
+                client.stop();
+                (void)co_await shared->client_run_done.async_wait(2s);
+                (void)co_await client.async_wait_reader_stopped(2s);
+                shared->client_done.set();
+                co_return;
+            }
+#
+            auto [req_ec2, rsp2] = co_await client.async_request_data(
+                1, 13, bytes_view{body2.data(), body2.size()}, 2s);
+            if (req_ec2) {
+                shared->client_rc = 26;
+                std::cerr << "[HSMS][tcp][loopback][reconnect] client request#2 失败: "
+                          << req_ec2.message() << "\n";
+                client.stop();
+                (void)co_await shared->client_run_done.async_wait(2s);
+                (void)co_await client.async_wait_reader_stopped(2s);
+                shared->client_done.set();
+                co_return;
+            }
+#
+            auto [dec_ec2, out2] =
+                decode_item(bytes_view{rsp2.body.data(), rsp2.body.size()});
+            if (dec_ec2 || out2 != item2) {
+                shared->client_rc = 27;
+                std::cerr << "[HSMS][tcp][loopback][reconnect] client 回包#2 不匹配\n";
+                client.stop();
+                (void)co_await shared->client_run_done.async_wait(2s);
+                (void)co_await client.async_wait_reader_stopped(2s);
+                shared->client_done.set();
+                co_return;
+            }
+#
+            client.stop();
+            (void)co_await shared->client_run_done.async_wait(2s);
+            (void)co_await client.async_wait_reader_stopped(2s);
+            shared->client_rc = shared->client_run_ec ? 28 : 0;
+            shared->client_done.set();
+            co_return;
+        },
+        asio::detached);
+#
+    auto ec = co_await shared->server_done.async_wait(8s);
+    if (ec) {
+        std::cerr << "[HSMS][tcp][loopback][reconnect] 等待 server_done 失败: "
+                  << ec.message() << "\n";
+        co_return 4;
+    }
+    ec = co_await shared->client_done.async_wait(8s);
+    if (ec) {
+        std::cerr << "[HSMS][tcp][loopback][reconnect] 等待 client_done 失败: "
+                  << ec.message() << "\n";
+        co_return 5;
+    }
+#
+    if (shared->server_rc != 0) {
+        co_return shared->server_rc;
+    }
+    if (shared->client_rc != 0) {
+        co_return shared->client_rc;
+    }
+    co_return 0;
+}
+#
 static asio::awaitable<int> run_all() {
     if (const int rc = co_await case_basic_request_response(); rc != 0) {
         co_return rc;
@@ -1683,6 +2020,9 @@ static asio::awaitable<int> run_all() {
         co_return rc;
     }
     if (const int rc = co_await case_stop_during_pending_request(); rc != 0) {
+        co_return rc;
+    }
+    if (const int rc = co_await case_auto_reconnect_after_separate(); rc != 0) {
         co_return rc;
     }
     co_return 0;

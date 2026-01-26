@@ -12,6 +12,7 @@
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/dispatch.hpp>
+#include <asio/post.hpp>
 #include <asio/strand.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
@@ -150,52 +151,239 @@ normalize_timeout(secs::core::duration d) noexcept {
 
 } // namespace
 
+struct Session::State final : std::enable_shared_from_this<State> {
+    friend class Session;
+
+    enum class Backend : std::uint8_t {
+        hsms = 0,
+        secs1 = 1,
+    };
+
+    struct Pending final {
+        Pending(std::uint8_t stream, std::uint8_t function)
+            : expected_stream(stream), expected_function(function) {}
+
+        std::uint8_t expected_stream{0};
+        std::uint8_t expected_function{0};
+        secs::core::Event ready{};
+        std::error_code ec{};
+        std::optional<DataMessage> response{};
+    };
+
+    State(secs::hsms::Session &hsms,
+          std::uint16_t session_id,
+          SessionOptions options);
+    State(secs::secs1::StateMachine &secs1,
+          std::uint16_t device_id,
+          SessionOptions options);
+
+    [[nodiscard]] asio::any_io_executor executor() const noexcept {
+        return executor_;
+    }
+
+    [[nodiscard]] Router &router() noexcept { return router_; }
+    [[nodiscard]] const Router &router() const noexcept { return router_; }
+
+    void stop() noexcept;
+
+    asio::awaitable<void> async_run();
+    asio::awaitable<std::error_code>
+    async_poll_once(std::optional<secs::core::duration> timeout);
+    asio::awaitable<std::error_code>
+    async_send(std::uint8_t stream,
+               std::uint8_t function,
+               secs::core::bytes_view body);
+    asio::awaitable<std::pair<std::error_code, DataMessage>>
+    async_request(std::uint8_t stream,
+                  std::uint8_t function,
+                  secs::core::bytes_view body,
+                  std::optional<secs::core::duration> timeout);
+
+private:
+    asio::awaitable<std::error_code>
+    async_send_message_(const DataMessage &msg);
+    asio::awaitable<std::pair<std::error_code, DataMessage>>
+    async_receive_message_(std::optional<secs::core::duration> timeout);
+
+    asio::awaitable<void> handle_inbound_(DataMessage msg);
+    [[nodiscard]] bool try_fulfill_pending_(DataMessage &msg) noexcept;
+    void cancel_all_pending_(std::error_code reason) noexcept;
+
+    void ensure_hsms_run_loop_started_();
+
+    // 为了避免 Pending::ready(core::Event) 在多线程 io_context 下出现跨线程并发访问，
+    // public API 会把实际逻辑收敛到同一 executor/strand 上执行。
+    asio::awaitable<void> async_run_impl_();
+    asio::awaitable<std::error_code>
+    async_poll_once_impl_(std::optional<secs::core::duration> timeout);
+    asio::awaitable<std::error_code>
+    async_send_impl_(std::uint8_t stream,
+                     std::uint8_t function,
+                     secs::core::bytes_view body);
+    asio::awaitable<std::pair<std::error_code, DataMessage>>
+    async_request_impl_(std::uint8_t stream,
+                        std::uint8_t function,
+                        secs::core::bytes_view body,
+                        std::optional<secs::core::duration> timeout);
+
+    Backend backend_{Backend::hsms};
+    asio::any_io_executor executor_{};
+    SessionOptions options_{};
+
+    SystemBytes system_bytes_{};
+    Router router_{};
+
+    mutable std::mutex pending_mu_{};
+    std::unordered_map<std::uint32_t, std::shared_ptr<Pending>> pending_{};
+
+    bool stop_requested_{false};
+    bool run_loop_active_{false};
+    bool run_loop_spawned_{false};
+    std::mutex run_mu_{};
+
+    secs::hsms::Session *hsms_{nullptr};
+    std::uint16_t hsms_session_id_{0};
+
+    secs::secs1::StateMachine *secs1_{nullptr};
+    std::uint16_t secs1_device_id_{0};
+};
+
 Session::Session(secs::hsms::Session &hsms,
                  std::uint16_t session_id,
                  SessionOptions options)
-    : backend_(Backend::hsms),
-      executor_(asio::make_strand(hsms.executor())),
-      options_(options),
-      hsms_(&hsms), hsms_session_id_(session_id) {}
+    : state_(std::make_shared<State>(hsms, session_id, options)) {}
 
 Session::Session(secs::secs1::StateMachine &secs1,
                  std::uint16_t device_id,
                  SessionOptions options)
+    : state_(std::make_shared<State>(secs1, device_id, options)) {}
+
+Session::~Session() noexcept { stop(); }
+
+asio::any_io_executor Session::executor() const noexcept {
+    if (!state_) {
+        return asio::any_io_executor{};
+    }
+    return state_->executor();
+}
+
+Router &Session::router() noexcept {
+    // 约定：Session 构造成功后 state_ 永远非空。
+    return state_->router();
+}
+
+const Router &Session::router() const noexcept { return state_->router(); }
+
+void Session::stop() noexcept {
+    if (state_) {
+        state_->stop();
+    }
+}
+
+asio::awaitable<void> Session::async_run() {
+    const auto state = state_;
+    if (!state) {
+        co_return;
+    }
+    co_await state->async_run();
+}
+
+asio::awaitable<std::error_code>
+Session::async_poll_once(std::optional<secs::core::duration> timeout) {
+    const auto state = state_;
+    if (!state) {
+        co_return make_error_code(errc::invalid_argument);
+    }
+    co_return co_await state->async_poll_once(timeout);
+}
+
+asio::awaitable<std::error_code>
+Session::async_send(std::uint8_t stream,
+                    std::uint8_t function,
+                    secs::core::bytes_view body) {
+    const auto state = state_;
+    if (!state) {
+        co_return make_error_code(errc::invalid_argument);
+    }
+    co_return co_await state->async_send(stream, function, body);
+}
+
+asio::awaitable<std::pair<std::error_code, DataMessage>>
+Session::async_request(std::uint8_t stream,
+                       std::uint8_t function,
+                       secs::core::bytes_view body,
+                       std::optional<secs::core::duration> timeout) {
+    const auto state = state_;
+    if (!state) {
+        co_return std::pair{make_error_code(errc::invalid_argument), DataMessage{}};
+    }
+    co_return co_await state->async_request(stream, function, body, timeout);
+}
+
+Session::State::State(secs::hsms::Session &hsms,
+                      std::uint16_t session_id,
+                      SessionOptions options)
+    : backend_(Backend::hsms),
+      executor_(asio::make_strand(hsms.executor())),
+      options_(options),
+      hsms_(&hsms),
+      hsms_session_id_(session_id) {}
+
+Session::State::State(secs::secs1::StateMachine &secs1,
+                      std::uint16_t device_id,
+                      SessionOptions options)
     : backend_(Backend::secs1),
       executor_(asio::make_strand(secs1.executor())),
       options_(options),
-      secs1_(&secs1), secs1_device_id_(device_id) {}
+      secs1_(&secs1),
+      secs1_device_id_(device_id) {}
 
-void Session::ensure_hsms_run_loop_started_() {
+void Session::State::ensure_hsms_run_loop_started_() {
     std::lock_guard lk(run_mu_);
     if (run_loop_spawned_) {
         return;
     }
-    run_loop_spawned_ = true;
+    std::shared_ptr<State> self;
+    try {
+        self = shared_from_this();
+    } catch (...) {
+        return;
+    }
 
-    asio::co_spawn(
-        executor_,
-        [this]() -> asio::awaitable<void> {
-            co_await async_run_impl_();
-        }, // GCOVR_EXCL_LINE：co_spawn 内联分支不计入覆盖率
-        asio::detached);
+    run_loop_spawned_ = true;
+    try {
+        asio::co_spawn(
+            executor_,
+            [self]() -> asio::awaitable<void> { co_await self->async_run_impl_(); },
+            // GCOVR_EXCL_LINE：co_spawn 内联分支不计入覆盖率
+            asio::detached);
+    } catch (...) {
+        // best-effort：资源不足时允许后续重试启动 run loop。
+        run_loop_spawned_ = false;
+    }
 }
 
-void Session::stop() noexcept {
+void Session::State::stop() noexcept {
     // 约束：core::Event 默认假设同一 executor/strand 语境，因此 stop() 通过 dispatch
     // 收敛到 Session 自身的 executor_ 执行，避免跨线程直接 cancel waiters。
+    std::shared_ptr<State> self;
     try {
-        asio::dispatch(executor_, [this]() noexcept {
-            if (stop_requested_) {
+        self = shared_from_this();
+    } catch (...) {
+        return;
+    }
+    try {
+        asio::dispatch(executor_, [self]() noexcept {
+            if (self->stop_requested_) {
                 return;
             }
 
-            stop_requested_ = true;
-            cancel_all_pending_(make_error_code(errc::cancelled));
+            self->stop_requested_ = true;
+            self->cancel_all_pending_(make_error_code(errc::cancelled));
 
             // HSMS 后端：主动取消底层阻塞读，避免依赖 poll_interval 轮询退出。
-            if (backend_ == Backend::hsms && hsms_) {
-                hsms_->stop();
+            if (self->backend_ == Backend::hsms && self->hsms_) {
+                self->hsms_->stop();
             }
         });
     } catch (...) {
@@ -203,34 +391,29 @@ void Session::stop() noexcept {
     }
 }
 
-asio::awaitable<void> Session::async_run() {
+asio::awaitable<void> Session::State::async_run() {
     const auto ex = co_await asio::this_coro::executor;
-    if (ex == executor_) {
-        co_await async_run_impl_();
-        co_return;
+    if (ex != executor_) {
+        // 统一切到自身 strand，避免内部状态跨线程并发访问。
+        try {
+            co_await asio::dispatch(executor_, asio::use_awaitable);
+        } catch (...) {
+            // best-effort：资源不足等异常不应导致上层协程崩溃。
+            co_return;
+        }
     }
 
-    try {
-        co_await asio::co_spawn(
-            executor_,
-            [this]() -> asio::awaitable<void> {
-                co_await async_run_impl_();
-                co_return;
-            },
-            asio::use_awaitable);
-    } catch (...) {
-        // co_spawn 失败（例如资源不足）时，不应抛异常导致上层协程崩溃。
-    }
+    co_await async_run_impl_();
 }
 
-asio::awaitable<void> Session::async_run_impl_() {
+asio::awaitable<void> Session::State::async_run_impl_() {
     if (run_loop_active_) {
         co_return;
     }
 
     run_loop_active_ = true;
     struct Reset final {
-        Session *self;
+        State *self;
         ~Reset() { self->run_loop_active_ = false; }
     } reset{this};
 
@@ -291,28 +474,23 @@ asio::awaitable<void> Session::async_run_impl_() {
 }
 
 asio::awaitable<std::error_code>
-Session::async_poll_once(std::optional<secs::core::duration> timeout) {
+Session::State::async_poll_once(std::optional<secs::core::duration> timeout) {
     const auto ex = co_await asio::this_coro::executor;
-    if (ex == executor_) {
-        co_return co_await async_poll_once_impl_(timeout);
+    if (ex != executor_) {
+        try {
+            co_await asio::dispatch(executor_, asio::use_awaitable);
+        } catch (const std::bad_alloc &) {
+            co_return make_error_code(errc::out_of_memory);
+        } catch (...) {
+            co_return make_error_code(errc::invalid_argument);
+        }
     }
 
-    try {
-        co_return co_await asio::co_spawn(
-            executor_,
-            [this, timeout]() -> asio::awaitable<std::error_code> {
-                co_return co_await async_poll_once_impl_(timeout);
-            },
-            asio::use_awaitable);
-    } catch (const std::bad_alloc &) {
-        co_return make_error_code(errc::out_of_memory);
-    } catch (...) {
-        co_return make_error_code(errc::invalid_argument);
-    }
+    co_return co_await async_poll_once_impl_(timeout);
 }
 
 asio::awaitable<std::error_code>
-Session::async_poll_once_impl_(std::optional<secs::core::duration> timeout) {
+Session::State::async_poll_once_impl_(std::optional<secs::core::duration> timeout) {
     if (stop_requested_) {
         co_return make_error_code(errc::cancelled);
     }
@@ -330,28 +508,23 @@ Session::async_poll_once_impl_(std::optional<secs::core::duration> timeout) {
     co_return std::error_code{};
 }
 
-asio::awaitable<std::error_code> Session::async_send(
+asio::awaitable<std::error_code> Session::State::async_send(
     std::uint8_t stream, std::uint8_t function, secs::core::bytes_view body) {
     const auto ex = co_await asio::this_coro::executor;
-    if (ex == executor_) {
-        co_return co_await async_send_impl_(stream, function, body);
+    if (ex != executor_) {
+        try {
+            co_await asio::dispatch(executor_, asio::use_awaitable);
+        } catch (const std::bad_alloc &) {
+            co_return make_error_code(errc::out_of_memory);
+        } catch (...) {
+            co_return make_error_code(errc::invalid_argument);
+        }
     }
 
-    try {
-        co_return co_await asio::co_spawn(
-            executor_,
-            [this, stream, function, body]() -> asio::awaitable<std::error_code> {
-                co_return co_await async_send_impl_(stream, function, body);
-            },
-            asio::use_awaitable);
-    } catch (const std::bad_alloc &) {
-        co_return make_error_code(errc::out_of_memory);
-    } catch (...) {
-        co_return make_error_code(errc::invalid_argument);
-    }
+    co_return co_await async_send_impl_(stream, function, body);
 }
 
-asio::awaitable<std::error_code> Session::async_send_impl_(
+asio::awaitable<std::error_code> Session::State::async_send_impl_(
     std::uint8_t stream, std::uint8_t function, secs::core::bytes_view body) {
     static constexpr const char *kCalls = "secs.protocol.send.calls";
     static constexpr const char *kOk = "secs.protocol.send.ok";
@@ -404,38 +577,30 @@ asio::awaitable<std::error_code> Session::async_send_impl_(
 }
 
 asio::awaitable<std::pair<std::error_code, DataMessage>>
-Session::async_request(std::uint8_t stream,
-                       std::uint8_t function,
-                       secs::core::bytes_view body,
-                       std::optional<secs::core::duration> timeout) {
+Session::State::async_request(std::uint8_t stream,
+                              std::uint8_t function,
+                              secs::core::bytes_view body,
+                              std::optional<secs::core::duration> timeout) {
     const auto ex = co_await asio::this_coro::executor;
-    if (ex == executor_) {
-        co_return co_await async_request_impl_(stream, function, body, timeout);
+    if (ex != executor_) {
+        try {
+            co_await asio::dispatch(executor_, asio::use_awaitable);
+        } catch (const std::bad_alloc &) {
+            co_return std::pair{make_error_code(errc::out_of_memory), DataMessage{}};
+        } catch (...) {
+            co_return std::pair{make_error_code(errc::invalid_argument),
+                                DataMessage{}};
+        }
     }
 
-    try {
-        co_return co_await asio::co_spawn(
-            executor_,
-            [this, stream, function, body, timeout]()
-                -> asio::awaitable<std::pair<std::error_code, DataMessage>> {
-                co_return co_await async_request_impl_(stream,
-                                                      function,
-                                                      body,
-                                                      timeout);
-            },
-            asio::use_awaitable);
-    } catch (const std::bad_alloc &) {
-        co_return std::pair{make_error_code(errc::out_of_memory), DataMessage{}};
-    } catch (...) {
-        co_return std::pair{make_error_code(errc::invalid_argument), DataMessage{}};
-    }
+    co_return co_await async_request_impl_(stream, function, body, timeout);
 }
 
 asio::awaitable<std::pair<std::error_code, DataMessage>>
-Session::async_request_impl_(std::uint8_t stream,
-                             std::uint8_t function,
-                             secs::core::bytes_view body,
-                             std::optional<secs::core::duration> timeout) {
+Session::State::async_request_impl_(std::uint8_t stream,
+                                    std::uint8_t function,
+                                    secs::core::bytes_view body,
+                                    std::optional<secs::core::duration> timeout) {
     static constexpr const char *kCalls = "secs.protocol.request.calls";
     static constexpr const char *kOk = "secs.protocol.request.ok";
     static constexpr const char *kErrors = "secs.protocol.request.errors";
@@ -680,7 +845,7 @@ Session::async_request_impl_(std::uint8_t stream,
 }
 
 asio::awaitable<std::error_code>
-Session::async_send_message_(const DataMessage &msg) {
+Session::State::async_send_message_(const DataMessage &msg) {
     if (stop_requested_) {
         co_return make_error_code(errc::cancelled);
     }
@@ -738,7 +903,7 @@ Session::async_send_message_(const DataMessage &msg) {
 }
 
 asio::awaitable<std::pair<std::error_code, DataMessage>>
-Session::async_receive_message_(std::optional<secs::core::duration> timeout) {
+Session::State::async_receive_message_(std::optional<secs::core::duration> timeout) {
     if (stop_requested_) {
         co_return std::pair{make_error_code(errc::cancelled), DataMessage{}};
     }
@@ -801,7 +966,7 @@ Session::async_receive_message_(std::optional<secs::core::duration> timeout) {
     co_return std::pair{std::error_code{}, std::move(out)};
 }
 
-asio::awaitable<void> Session::handle_inbound_(DataMessage msg) {
+asio::awaitable<void> Session::State::handle_inbound_(DataMessage msg) {
     if (try_fulfill_pending_(msg)) {
         co_return;
     }
@@ -866,7 +1031,7 @@ asio::awaitable<void> Session::handle_inbound_(DataMessage msg) {
     (void)co_await async_send_message_(rsp);
 }
 
-bool Session::try_fulfill_pending_(DataMessage &msg) noexcept {
+bool Session::State::try_fulfill_pending_(DataMessage &msg) noexcept {
     std::shared_ptr<Pending> pending;
     {
         std::lock_guard lk(pending_mu_);
@@ -899,7 +1064,7 @@ bool Session::try_fulfill_pending_(DataMessage &msg) noexcept {
     return true;
 }
 
-void Session::cancel_all_pending_(std::error_code reason) noexcept {
+void Session::State::cancel_all_pending_(std::error_code reason) noexcept {
     std::unordered_map<std::uint32_t, std::shared_ptr<Pending>> moved;
     {
         std::lock_guard lk(pending_mu_);
