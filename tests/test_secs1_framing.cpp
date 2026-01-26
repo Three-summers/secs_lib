@@ -53,7 +53,8 @@ public:
         reads_.push_back(ReadResult{ec, byte{0}});
     }
 
-    void push_write_error(std::error_code ec) { write_errors_.push_back(ec); }
+    void push_write_ok() { write_results_.push_back(std::error_code{}); }
+    void push_write_error(std::error_code ec) { write_results_.push_back(ec); }
 
     [[nodiscard]] const std::vector<std::vector<byte>> &
     writes() const noexcept {
@@ -62,9 +63,9 @@ public:
 
     asio::awaitable<std::error_code> async_write(bytes_view data) override {
         writes_.emplace_back(data.begin(), data.end());
-        if (!write_errors_.empty()) {
-            const auto ec = write_errors_.front();
-            write_errors_.pop_front();
+        if (!write_results_.empty()) {
+            const auto ec = write_results_.front();
+            write_results_.pop_front();
             co_return ec;
         }
         co_return std::error_code{};
@@ -89,7 +90,7 @@ private:
 
     asio::any_io_executor ex_{};
     std::deque<ReadResult> reads_{};
-    std::deque<std::error_code> write_errors_{};
+    std::deque<std::error_code> write_results_{};
     std::vector<std::vector<byte>> writes_{};
 };
 
@@ -1035,6 +1036,60 @@ void test_state_machine_send_propagates_handshake_write_error_scripted() {
 
     ioc.run();
     TEST_EXPECT_EQ(result, make_error_code(errc::invalid_argument));
+}
+
+void test_state_machine_send_propagates_frame_write_error_scripted() {
+    asio::io_context ioc;
+    ScriptedLink link(ioc.get_executor());
+
+    // 第 1 次写（ENQ）成功；第 2 次写（块帧）失败。
+    link.push_write_ok();
+    link.push_write_error(make_error_code(errc::invalid_argument));
+    link.push_read_ok(secs::secs1::kEot);
+
+    StateMachine sm(link, std::nullopt, Timeouts{}, 1);
+    auto h = sample_header();
+
+    std::error_code result;
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            result = co_await sm.async_send(h, as_bytes("x"));
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT_EQ(result, make_error_code(errc::invalid_argument));
+    TEST_EXPECT_EQ(link.writes().size(), 2u); // ENQ + 块帧（尝试写入）
+    TEST_EXPECT_EQ(link.writes()[0].size(), 1u);
+    TEST_EXPECT_EQ(link.writes()[0][0], secs::secs1::kEnq);
+    TEST_EXPECT(link.writes()[1].size() >= 1u);
+}
+
+void test_state_machine_send_rejects_too_large_body_without_io() {
+    asio::io_context ioc;
+    ScriptedLink link(ioc.get_executor());
+
+    StateMachine sm(link, std::nullopt, Timeouts{}, 1);
+    auto h = sample_header();
+
+    // blocks = ceil(size/244)；当 blocks>0x7FFF 时应直接拒绝，且不触发任何 IO。
+    std::vector<byte> too_large(secs::secs1::kMaxBlockDataSize * 0x7FFFu + 1);
+
+    std::error_code result;
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            result = co_await sm.async_send(
+                h, bytes_view{too_large.data(), too_large.size()});
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT_EQ(result, make_error_code(errc::invalid_argument));
+    TEST_EXPECT(link.writes().empty());
 }
 
 void test_state_machine_send_accepts_ack_as_handshake_response_scripted() {
@@ -2086,6 +2141,93 @@ void test_receiver_supports_multi_block_message_interleaving_direct_next_block()
     TEST_EXPECT(done.load());
 }
 
+void test_receiver_rejects_interleaving_new_message_when_block_number_not_one() {
+    asio::io_context ioc;
+    auto [a, b] = MemoryLink::create(ioc.get_executor());
+
+    Timeouts timeouts{};
+    timeouts.t1_intercharacter = 200ms;
+    timeouts.t2_protocol = 200ms;
+    timeouts.t4_interblock = 200ms;
+
+    StateMachine receiver(b, 0x1234, timeouts, 3);
+
+    auto h_a = sample_header();
+    h_a.system_bytes = 0;
+    auto payload_a = make_payload(secs::secs1::kMaxBlockDataSize + 10);
+    auto frames_a = secs::secs1::fragment_message(
+        h_a, bytes_view{payload_a.data(), payload_a.size()});
+    TEST_EXPECT_EQ(frames_a.size(), 2u);
+
+    // 新消息 B 以 block_number=2 开始：在 interleaving 模式下应被拒绝。
+    auto h_b = h_a;
+    h_b.system_bytes = 1;
+    h_b.block_number = 2;
+    h_b.end_bit = true;
+
+    std::vector<byte> frame_b;
+    TEST_EXPECT_OK(secs::secs1::encode_block(h_b, as_bytes("z"), frame_b));
+
+    std::atomic<int> done{0};
+    asio::steady_timer watchdog(ioc);
+    watchdog.expires_after(1s);
+    watchdog.async_wait([&](const std::error_code &) {
+        TEST_FAIL("watchdog fired");
+        ioc.stop();
+    });
+
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            // 握手：ENQ -> EOT
+            TEST_EXPECT_OK(co_await write_byte(a, secs::secs1::kEnq));
+            auto [ec0, ch0] = co_await a.async_read_byte(200ms);
+            TEST_EXPECT_OK(ec0);
+            TEST_EXPECT_EQ(ch0, secs::secs1::kEot);
+
+            // 先发送 A1，使接收端进入 in-flight（允许后续直接 Length 的变体）。
+            TEST_EXPECT_OK(co_await a.async_write(
+                bytes_view{frames_a[0].data(), frames_a[0].size()}));
+            auto [ec1, ack1] = co_await a.async_read_byte(200ms);
+            TEST_EXPECT_OK(ec1);
+            TEST_EXPECT_EQ(ack1, secs::secs1::kAck);
+
+            // 直接发送 B1（非法：block_number!=1），应收到 NAK。
+            TEST_EXPECT_OK(co_await a.async_write(
+                bytes_view{frame_b.data(), frame_b.size()}));
+            auto [ec2, resp2] = co_await a.async_read_byte(200ms);
+            TEST_EXPECT_OK(ec2);
+            TEST_EXPECT_EQ(resp2, secs::secs1::kNak);
+
+            if (++done == 2) {
+                watchdog.cancel();
+                ioc.stop();
+            }
+            co_return;
+        },
+        asio::detached);
+
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            auto [ec, _] = co_await receiver.async_receive(1s);
+            TEST_EXPECT_EQ(ec,
+                           secs::secs1::make_error_code(
+                               secs::secs1::errc::block_sequence_error));
+            TEST_EXPECT_EQ(receiver.state(), secs::secs1::State::idle);
+
+            if (++done == 2) {
+                watchdog.cancel();
+                ioc.stop();
+            }
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT_EQ(done.load(), 2);
+}
+
 void test_receiver_nak_then_accept_on_checksum_error() {
     asio::io_context ioc;
     auto [a, b] = MemoryLink::create(ioc.get_executor());
@@ -2568,6 +2710,8 @@ int main() {
     test_state_machine_send_unexpected_handshake_byte_protocol_error_scripted();
     test_state_machine_send_propagates_handshake_read_error_scripted();
     test_state_machine_send_propagates_handshake_write_error_scripted();
+    test_state_machine_send_propagates_frame_write_error_scripted();
+    test_state_machine_send_rejects_too_large_body_without_io();
     test_state_machine_send_accepts_ack_as_handshake_response_scripted();
     test_state_machine_send_unexpected_ack_response_protocol_error_scripted();
     test_state_machine_send_propagates_ack_read_error_scripted();
@@ -2585,6 +2729,7 @@ int main() {
     test_receiver_accepts_enq_per_block_multi_block();
     test_receiver_supports_multi_block_message_interleaving_enq_per_block();
     test_receiver_supports_multi_block_message_interleaving_direct_next_block();
+    test_receiver_rejects_interleaving_new_message_when_block_number_not_one();
     test_receiver_nak_then_accept_on_checksum_error();
     test_t1_intercharacter_timeout();
     test_t2_handshake_timeout_to_too_many_retries();
