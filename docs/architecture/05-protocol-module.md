@@ -1,6 +1,6 @@
 # Protocol 模块详细实现原理
 
-> 文档更新：2026-01-19（Codex）  
+> 文档更新：2026-01-26（Codex）  
 > 对应实现：`main`（CMake：`project(secs VERSION 0.1.0)`）
 
 ## 1. 模块概述
@@ -326,6 +326,29 @@
 
 ## 5. Session 统一会话
 
+> 重要说明（2026-01-26 更新）：`secs::protocol::Session` 内部实现已从“直接在对象上维护状态/后台协程捕获 this”调整为 **`shared_ptr<State>` 持有内部状态**，用于规避 detached run loop 在对象析构后的 **Use-After-Free (UAF)** 风险。
+
+### 5.0 生命周期与线程模型（必读）
+
+#### 5.0.1 对象语义
+
+- `protocol::Session` **不可拷贝、不可移动**（copy/move 均被禁用）。
+- `~Session() noexcept` 析构时会 **best-effort 请求 `stop()`**，但**不等待**内部接收循环退出。
+  - 若你需要确定性的资源回收/退出时序，请显式调用 `stop()`，并等待你自己启动的 `async_run()` 协程完成。
+
+#### 5.0.2 executor 收敛
+
+`protocol::Session` 的 public 异步 API 会把实际逻辑收敛到同一个内部 `executor` 上执行（避免在多线程 `io_context` 下对内部事件/容器产生跨线程并发访问）。
+
+从调用方视角：你可以在任意 executor 上 `co_await session.async_request(...)`，实现会先切到 session 内部 executor 再执行。
+
+#### 5.0.3 HSMS 后端的接收循环启动方式
+
+HSMS 后端为了实现“请求侧并发等待 + 入站 primary 自动分发/回包”，需要持续接收。
+
+- 旧描述里提到 `ensure_hsms_run_loop_started_()` / `co_spawn async_run()`（见下方 5.4）是实现细节；
+- 当前实现仍会在需要时启动后台接收循环，但为了避免 UAF，接收循环持有的是 `State` 的共享所有权，而不是裸 `this`。
+
 ### 5.1 后端抽象
 
 ```
@@ -511,7 +534,7 @@
 │  │  3. 分配 SystemBytes                                        │    │
 │  │                                                             │    │
 │  │  4. 确保接收循环启动：ensure_hsms_run_loop_started_()       │    │
-│  │     └── 首次调用时 co_spawn async_run()                     │    │
+│  │     └── 首次调用时启动后台接收循环（实现细节；内部状态由 State 管理）│    │
 │  │                                                             │    │
 │  │  5. 创建 Pending 对象并注册到 pending_[sb]                  │    │
 │  │     ┌──────────────────────────────────────────────────┐   │    │

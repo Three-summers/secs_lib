@@ -1,6 +1,6 @@
 # HSMS 模块详细实现原理
 
-> 文档更新：2026-01-19（Codex）  
+> 文档更新：2026-01-26（Codex）  
 > 对应实现：`main`（CMake：`project(secs VERSION 0.1.0)`）
 > 对应标准：SEMI E37（HSMS - High-Speed SECS Message Services）
 
@@ -376,6 +376,20 @@
 ---
 
 ## 5. Session 会话层
+
+> 重要说明（2026-01-26 更新）：`secs::hsms::Session` 内部实现已调整为 **`shared_ptr<State>` 持有内部状态**。
+>
+> 目的：当 `Session` 内部存在后台 `reader_loop_` / `linktest_loop_` 等协程时，如果调用方未显式 `stop()` 就析构对象，旧实现可能因协程恢复访问已释放对象而触发 **Use-After-Free (UAF)**。
+
+### 5.0 生命周期与正确退出方式（必读）
+
+- `hsms::Session` **不可拷贝、不可移动**（copy/move 均被禁用）。
+- `~Session() noexcept` 析构时会 **best-effort 请求 `stop()`**，但**不等待** `reader_loop_` 退出。
+- 若需要确定性的资源回收（例如进程退出前确保 socket/pipe 已关闭、所有协程已退出），推荐：
+  1. 调用 `session.stop()`
+  2. `co_await session.async_wait_reader_stopped(timeout)`
+
+上述约束同样适用于通过 `async_run_active/async_run_passive` 启动的自动重连主循环：如果你在外部 `co_spawn` 了 run 协程，应当在退出路径上显式 stop 并等待 run 协程结束。
 
 ### 5.1 状态机
 
