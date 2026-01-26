@@ -647,8 +647,9 @@ int main(int argc, char **argv) {
         if (!r.diags.empty()) {
             std::string io_err;
             const auto content_opt = read_file_text(r.path, io_err);
-            const auto lines =
-                build_source_lines(content_opt.value_or(std::string{}));
+            const std::string content =
+                content_opt.has_value() ? *content_opt : std::string{};
+            const auto lines = build_source_lines(content);
             for (const auto &d : r.diags) {
                 print_diagnostic_text(lines, d);
                 std::cout << "\n";

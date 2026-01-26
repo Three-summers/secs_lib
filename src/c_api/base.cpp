@@ -70,6 +70,8 @@ secs_error_t secs_log_set_level(secs_log_level_t level) {
         case SECS_LOG_OFF:
             secs::core::set_log_level(LogLevel::off);
             return ok();
+        case SECS_LOG__MAX:
+            break;
         }
         return c_api_err(SECS_C_API_INVALID_ARGUMENT);
     });

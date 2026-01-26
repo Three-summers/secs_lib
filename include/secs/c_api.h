@@ -77,7 +77,10 @@ typedef enum secs_log_level {
     SECS_LOG_WARN = 3,
     SECS_LOG_ERROR = 4,
     SECS_LOG_CRITICAL = 5,
-    SECS_LOG_OFF = 6
+    SECS_LOG_OFF = 6,
+    /* 说明：作为 C API，调用方可能传入非法枚举值；添加上界哨兵以避免 UBSan
+       将“越界 enum 值”视为未定义行为（实现侧会自行校验并返回错误码）。 */
+    SECS_LOG__MAX = 2147483647
 } secs_log_level_t;
 
 secs_error_t secs_log_set_level(secs_log_level_t level);
