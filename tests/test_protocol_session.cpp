@@ -912,6 +912,301 @@ void test_hsms_protocol_disconnect_cancels_pending() {
     TEST_EXPECT(done);
 }
 
+void test_hsms_protocol_reconnect_after_separate_keeps_run_loop_alive() {
+    asio::io_context ioc;
+    const std::uint16_t session_id = 0x1014;
+
+    secs::hsms::Session server(ioc.get_executor(),
+                               secs::hsms::SessionOptions{
+                                   .session_id = session_id,
+                                   .t3 = 200ms,
+                                   .t5 = 10ms,
+                                   .t6 = 50ms,
+                                   .t7 = 50ms,
+                                   .t8 = 0ms,
+                                   .linktest_interval = 0ms,
+                                   .auto_reconnect = false,
+                               });
+
+    secs::hsms::Session client(ioc.get_executor(),
+                               secs::hsms::SessionOptions{
+                                   .session_id = session_id,
+                                   .t3 = 200ms,
+                                   .t5 = 10ms,
+                                   .t6 = 50ms,
+                                   .t7 = 50ms,
+                                   .t8 = 0ms,
+                                   .linktest_interval = 0ms,
+                                   .auto_reconnect = false,
+                               });
+
+    Session proto_server(
+        server, session_id, SessionOptions{.t3 = 200ms, .poll_interval = 1ms});
+    proto_server.router().set(
+        1,
+        1,
+        [](const DataMessage &msg) -> asio::awaitable<secs::protocol::HandlerResult> {
+            std::vector<byte> body(msg.body.begin(), msg.body.end());
+            co_return std::pair{std::error_code{}, std::move(body)};
+        });
+
+    asio::co_spawn(ioc, proto_server.async_run(), asio::detached);
+
+    std::atomic<bool> done{false};
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            // round#1：首次连接可正常请求-响应（S1F1 -> S1F2）。
+            secs::core::Event server_opened1{};
+            secs::core::Event client_opened1{};
+            {
+                auto duplex = make_memory_duplex(ioc.get_executor());
+                Connection server_conn(std::move(duplex.server_stream));
+                Connection client_conn(std::move(duplex.client_stream));
+
+                asio::co_spawn(
+                    ioc,
+                    [&, server_conn = std::move(server_conn)]() mutable
+                    -> asio::awaitable<void> {
+                        auto ec = co_await server.async_open_passive(std::move(server_conn));
+                        TEST_EXPECT_OK(ec);
+                        server_opened1.set();
+                    },
+                    asio::detached);
+
+                asio::co_spawn(
+                    ioc,
+                    [&, client_conn = std::move(client_conn)]() mutable
+                    -> asio::awaitable<void> {
+                        auto ec = co_await client.async_open_active(std::move(client_conn));
+                        TEST_EXPECT_OK(ec);
+                        client_opened1.set();
+                    },
+                    asio::detached);
+            }
+
+            TEST_EXPECT_OK(co_await server_opened1.async_wait(200ms));
+            TEST_EXPECT_OK(co_await client_opened1.async_wait(200ms));
+
+            auto [ec1, rsp1] =
+                co_await client.async_request_data(1, 1, as_bytes("hello-1"), 200ms);
+            TEST_EXPECT_OK(ec1);
+            TEST_EXPECT_EQ(rsp1.stream(), 1u);
+            TEST_EXPECT_EQ(rsp1.function(), 2u);
+
+            // 主动端发 SEPARATE 断线（典型“主动断开”场景）。
+            auto sep_ec = co_await client.async_send(secs::hsms::make_separate_req(
+                0xFFFF, client.allocate_system_bytes()));
+            TEST_EXPECT_OK(sep_ec);
+
+            TEST_EXPECT_OK(co_await server.async_wait_reader_stopped(200ms));
+            TEST_EXPECT_OK(co_await client.async_wait_reader_stopped(200ms));
+
+            // round#2：重连后仍应能继续处理入站消息并回包。
+            secs::core::Event server_opened2{};
+            secs::core::Event client_opened2{};
+            {
+                auto duplex = make_memory_duplex(ioc.get_executor());
+                Connection server_conn(std::move(duplex.server_stream));
+                Connection client_conn(std::move(duplex.client_stream));
+
+                asio::co_spawn(
+                    ioc,
+                    [&, server_conn = std::move(server_conn)]() mutable
+                    -> asio::awaitable<void> {
+                        auto ec = co_await server.async_open_passive(std::move(server_conn));
+                        TEST_EXPECT_OK(ec);
+                        server_opened2.set();
+                    },
+                    asio::detached);
+
+                asio::co_spawn(
+                    ioc,
+                    [&, client_conn = std::move(client_conn)]() mutable
+                    -> asio::awaitable<void> {
+                        auto ec = co_await client.async_open_active(std::move(client_conn));
+                        TEST_EXPECT_OK(ec);
+                        client_opened2.set();
+                    },
+                    asio::detached);
+            }
+
+            TEST_EXPECT_OK(co_await server_opened2.async_wait(200ms));
+            TEST_EXPECT_OK(co_await client_opened2.async_wait(200ms));
+
+            auto [ec2, rsp2] =
+                co_await client.async_request_data(1, 1, as_bytes("hello-2"), 200ms);
+            TEST_EXPECT_OK(ec2);
+            TEST_EXPECT_EQ(rsp2.stream(), 1u);
+            TEST_EXPECT_EQ(rsp2.function(), 2u);
+
+            proto_server.stop();
+            client.stop();
+            server.stop();
+            done = true;
+            ioc.stop();
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(done);
+}
+
+void test_hsms_protocol_reconnect_after_deselect_and_separate_keeps_run_loop_alive() {
+    asio::io_context ioc;
+    const std::uint16_t session_id = 0x1015;
+
+    secs::hsms::Session server(ioc.get_executor(),
+                               secs::hsms::SessionOptions{
+                                   .session_id = session_id,
+                                   .t3 = 200ms,
+                                   .t5 = 10ms,
+                                   .t6 = 50ms,
+                                   .t7 = 50ms,
+                                   .t8 = 0ms,
+                                   .linktest_interval = 0ms,
+                                   .auto_reconnect = false,
+                               });
+
+    secs::hsms::Session client(ioc.get_executor(),
+                               secs::hsms::SessionOptions{
+                                   .session_id = session_id,
+                                   .t3 = 200ms,
+                                   .t5 = 10ms,
+                                   .t6 = 50ms,
+                                   .t7 = 50ms,
+                                   .t8 = 0ms,
+                                   .linktest_interval = 0ms,
+                                   .auto_reconnect = false,
+                               });
+
+    Session proto_server(
+        server, session_id, SessionOptions{.t3 = 200ms, .poll_interval = 1ms});
+    proto_server.router().set(
+        1,
+        1,
+        [](const DataMessage &msg) -> asio::awaitable<secs::protocol::HandlerResult> {
+            std::vector<byte> body(msg.body.begin(), msg.body.end());
+            co_return std::pair{std::error_code{}, std::move(body)};
+        });
+
+    asio::co_spawn(ioc, proto_server.async_run(), asio::detached);
+
+    std::atomic<bool> done{false};
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            // round#1：首次连接可正常请求-响应（S1F1 -> S1F2）。
+            secs::core::Event server_opened1{};
+            secs::core::Event client_opened1{};
+            {
+                auto duplex = make_memory_duplex(ioc.get_executor());
+                Connection server_conn(std::move(duplex.server_stream));
+                Connection client_conn(std::move(duplex.client_stream));
+
+                asio::co_spawn(
+                    ioc,
+                    [&, server_conn = std::move(server_conn)]() mutable
+                    -> asio::awaitable<void> {
+                        auto ec = co_await server.async_open_passive(std::move(server_conn));
+                        TEST_EXPECT_OK(ec);
+                        server_opened1.set();
+                    },
+                    asio::detached);
+
+                asio::co_spawn(
+                    ioc,
+                    [&, client_conn = std::move(client_conn)]() mutable
+                    -> asio::awaitable<void> {
+                        auto ec = co_await client.async_open_active(std::move(client_conn));
+                        TEST_EXPECT_OK(ec);
+                        client_opened1.set();
+                    },
+                    asio::detached);
+            }
+
+            TEST_EXPECT_OK(co_await server_opened1.async_wait(200ms));
+            TEST_EXPECT_OK(co_await client_opened1.async_wait(200ms));
+
+            auto [ec1, rsp1] =
+                co_await client.async_request_data(1, 1, as_bytes("hello-1"), 200ms);
+            TEST_EXPECT_OK(ec1);
+            TEST_EXPECT_EQ(rsp1.stream(), 1u);
+            TEST_EXPECT_EQ(rsp1.function(), 2u);
+
+            // 主动端发 DESELECT 进入 NOT_SELECTED（不断线），随后再发 SEPARATE 断线。
+            auto de_ec = co_await client.async_send(secs::hsms::make_deselect_req(
+                0xFFFF, client.allocate_system_bytes()));
+            TEST_EXPECT_OK(de_ec);
+
+            asio::steady_timer t(ioc);
+            t.expires_after(10ms);
+            (void)co_await t.async_wait(asio::as_tuple(asio::use_awaitable));
+
+            TEST_EXPECT_EQ(server.state(), secs::hsms::SessionState::connected);
+            TEST_EXPECT_EQ(client.state(), secs::hsms::SessionState::connected);
+            TEST_EXPECT(!server.is_selected());
+            TEST_EXPECT(!client.is_selected());
+
+            auto sep_ec = co_await client.async_send(secs::hsms::make_separate_req(
+                0xFFFF, client.allocate_system_bytes()));
+            TEST_EXPECT_OK(sep_ec);
+
+            TEST_EXPECT_OK(co_await server.async_wait_reader_stopped(200ms));
+            TEST_EXPECT_OK(co_await client.async_wait_reader_stopped(200ms));
+
+            // round#2：重连后仍应能继续处理入站消息并回包。
+            secs::core::Event server_opened2{};
+            secs::core::Event client_opened2{};
+            {
+                auto duplex = make_memory_duplex(ioc.get_executor());
+                Connection server_conn(std::move(duplex.server_stream));
+                Connection client_conn(std::move(duplex.client_stream));
+
+                asio::co_spawn(
+                    ioc,
+                    [&, server_conn = std::move(server_conn)]() mutable
+                    -> asio::awaitable<void> {
+                        auto ec = co_await server.async_open_passive(std::move(server_conn));
+                        TEST_EXPECT_OK(ec);
+                        server_opened2.set();
+                    },
+                    asio::detached);
+
+                asio::co_spawn(
+                    ioc,
+                    [&, client_conn = std::move(client_conn)]() mutable
+                    -> asio::awaitable<void> {
+                        auto ec = co_await client.async_open_active(std::move(client_conn));
+                        TEST_EXPECT_OK(ec);
+                        client_opened2.set();
+                    },
+                    asio::detached);
+            }
+
+            TEST_EXPECT_OK(co_await server_opened2.async_wait(200ms));
+            TEST_EXPECT_OK(co_await client_opened2.async_wait(200ms));
+
+            auto [ec2, rsp2] =
+                co_await client.async_request_data(1, 1, as_bytes("hello-2"), 200ms);
+            TEST_EXPECT_OK(ec2);
+            TEST_EXPECT_EQ(rsp2.stream(), 1u);
+            TEST_EXPECT_EQ(rsp2.function(), 2u);
+
+            proto_server.stop();
+            client.stop();
+            server.stop();
+            done = true;
+            ioc.stop();
+            co_return;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(done);
+}
+
 void test_hsms_protocol_run_without_poll_interval() {
     asio::io_context ioc;
     const std::uint16_t session_id = 0x1012;
@@ -2017,6 +2312,8 @@ int main() {
     test_hsms_protocol_stop_from_foreign_thread_cancels_pending();
     test_hsms_protocol_max_pending_requests_limit();
     test_hsms_protocol_disconnect_cancels_pending();
+    test_hsms_protocol_reconnect_after_separate_keeps_run_loop_alive();
+    test_hsms_protocol_reconnect_after_deselect_and_separate_keeps_run_loop_alive();
     test_hsms_protocol_run_without_poll_interval();
     test_hsms_protocol_echo_1000();
     test_hsms_protocol_both_sides_can_initiate_primary();

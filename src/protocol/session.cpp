@@ -429,11 +429,19 @@ asio::awaitable<void> Session::State::async_run_impl_() {
             continue;
         }
         if (ec) {
-            // HSMS：断线在业务上是“可恢复事件”（允许上层重连或被动端再次 accept）。
-            // 这里不直接 stop，而是取消挂起请求后等待下一次 selected。
+            // HSMS：状态切换在业务上通常是“可恢复事件”（允许上层重连或被动端再次 accept）。
+            //
+            // 注意 1：对端 SEPARATE 触发的断线在 HSMS 层会被映射为 errc::cancelled。
+            // 注意 2：对端 DESELECT 会进入 NOT_SELECTED（state=connected），HSMS 会 cancel
+            //         inbound_event_ 来唤醒等待者，同样可能表现为 errc::cancelled。
+            //
+            // 若此处把 cancelled 视为不可恢复，会导致协议层 run loop 在首次状态切换后永久停止，
+            // 从而出现“重连后已 selected 但再也收不到/处理不到业务消息”的现象。
+            //
+            // 因此这里不直接 stop，而是取消挂起请求后等待下一次 selected（除非本端已 stop）。
             if (backend_ == Backend::hsms && hsms_ &&
-                hsms_->state() == secs::hsms::SessionState::disconnected &&
-                ec != make_error_code(errc::cancelled) && !stop_requested_) {
+                hsms_->state() != secs::hsms::SessionState::selected &&
+                !stop_requested_) {
                 cancel_all_pending_(ec);
 
                 const auto target_gen = hsms_->selected_generation() + 1U;

@@ -6277,6 +6277,232 @@ static void test_hsms_protocol_loopback(void) {
     secs_context_destroy(ctx);
 }
 
+struct proto_reconnect_ud {
+    atomic_int *calls;
+    uint8_t tag;
+};
+
+static secs_error_t
+protocol_reconnect_reply_handler(void *user_data,
+                                 const secs_data_message_view_t *request,
+                                 uint8_t **out_body,
+                                 size_t *out_body_n) {
+    (void)request;
+    if (!user_data || !out_body || !out_body_n) {
+        secs_error_t err;
+        err.value = (int)SECS_C_API_INVALID_ARGUMENT;
+        err.category = "secs.c_api";
+        return err;
+    }
+
+    struct proto_reconnect_ud *ud = (struct proto_reconnect_ud *)user_data;
+    atomic_fetch_add(ud->calls, 1);
+
+    *out_body_n = 1;
+    *out_body = (uint8_t *)secs_malloc(*out_body_n);
+    if (!*out_body) {
+        secs_error_t oom;
+        oom.value = (int)SECS_C_API_OUT_OF_MEMORY;
+        oom.category = "secs.c_api";
+        return oom;
+    }
+    (*out_body)[0] = ud->tag;
+
+    secs_error_t ok;
+    ok.value = 0;
+    ok.category = "secs.c_api";
+    return ok;
+}
+
+static void test_hsms_protocol_reconnect_request_reply(void) {
+    secs_context_t *ctx = NULL;
+    expect_ok("secs_context_create(reconnect)", secs_context_create(&ctx));
+
+    secs_hsms_session_options_t hsms_opt;
+    memset(&hsms_opt, 0, sizeof(hsms_opt));
+    hsms_opt.session_id = 0x1010;
+    hsms_opt.t3_ms = 2000;
+    hsms_opt.t5_ms = 200;
+    hsms_opt.t6_ms = 2000;
+    hsms_opt.t7_ms = 2000;
+    hsms_opt.t8_ms = 2000;
+    hsms_opt.linktest_interval_ms = 0;
+    hsms_opt.auto_reconnect = 0;
+    hsms_opt.passive_accept_select = 1;
+
+    secs_hsms_session_t *client_hsms = NULL;
+    secs_hsms_session_t *server_hsms = NULL;
+    expect_ok("secs_hsms_session_create(reconnect client)",
+              secs_hsms_session_create(ctx, &hsms_opt, &client_hsms));
+    expect_ok("secs_hsms_session_create(reconnect server)",
+              secs_hsms_session_create(ctx, &hsms_opt, &server_hsms));
+
+    /* round#1 建链 */
+    secs_hsms_connection_t *client_conn1 = NULL;
+    secs_hsms_connection_t *server_conn1 = NULL;
+    expect_ok("secs_hsms_connection_create_memory_duplex(round1)",
+              secs_hsms_connection_create_memory_duplex(
+                  ctx, &client_conn1, &server_conn1));
+
+    pthread_t th1;
+    struct open_args args1;
+    memset(&args1, 0, sizeof(args1));
+    args1.sess = server_hsms;
+    args1.io_conn = &server_conn1;
+    const int started1 = pthread_create(&th1, NULL, open_passive_thread, &args1);
+    if (started1 != 0) {
+        fprintf(stderr, "FAIL: pthread_create(open_passive round1)\n");
+        ++g_failures;
+        goto cleanup;
+    }
+
+    expect_ok("secs_hsms_session_open_active_connection(round1)",
+              secs_hsms_session_open_active_connection(client_hsms, &client_conn1));
+
+    if (started1 == 0) {
+        (void)pthread_join(th1, NULL);
+        expect_ok("secs_hsms_session_open_passive_connection(round1)", args1.out_err);
+    }
+
+    /* selected 状态校验 */
+    {
+        int selected = 0;
+        expect_ok("secs_hsms_session_is_selected(round1 client)",
+                  secs_hsms_session_is_selected(client_hsms, &selected));
+        if (!selected) {
+            fprintf(stderr, "FAIL: reconnect round1 client not selected\n");
+            ++g_failures;
+        }
+        selected = 0;
+        expect_ok("secs_hsms_session_is_selected(round1 server)",
+                  secs_hsms_session_is_selected(server_hsms, &selected));
+        if (!selected) {
+            fprintf(stderr, "FAIL: reconnect round1 server not selected\n");
+            ++g_failures;
+        }
+    }
+
+    secs_protocol_session_options_t proto_opt;
+    memset(&proto_opt, 0, sizeof(proto_opt));
+    proto_opt.t3_ms = 1000;
+    proto_opt.poll_interval_ms = 5;
+
+    secs_protocol_session_t *client_proto = NULL;
+    secs_protocol_session_t *server_proto = NULL;
+    expect_ok("secs_protocol_session_create_from_hsms(reconnect client)",
+              secs_protocol_session_create_from_hsms(
+                  ctx, client_hsms, hsms_opt.session_id, &proto_opt, &client_proto));
+    expect_ok("secs_protocol_session_create_from_hsms(reconnect server)",
+              secs_protocol_session_create_from_hsms(
+                  ctx, server_hsms, hsms_opt.session_id, &proto_opt, &server_proto));
+
+    atomic_int calls;
+    atomic_init(&calls, 0);
+    struct proto_reconnect_ud ud;
+    ud.calls = &calls;
+    ud.tag = 0xA1u;
+    expect_ok("secs_protocol_session_set_handler(reconnect)",
+              secs_protocol_session_set_handler(server_proto,
+                                                1,
+                                                1,
+                                                protocol_reconnect_reply_handler,
+                                                &ud));
+
+    /* round#1 请求-应答 */
+    {
+        const uint8_t body[1] = {0x01u};
+        secs_data_message_t reply;
+        memset(&reply, 0, sizeof(reply));
+        expect_ok("secs_protocol_session_request(round1)",
+                  secs_protocol_session_request(
+                      client_proto, 1, 1, body, sizeof(body), 1000, &reply));
+        if (reply.body_n != 1u || !reply.body || reply.body[0] != ud.tag) {
+            fprintf(stderr, "FAIL: reconnect round1 reply mismatch\n");
+            ++g_failures;
+        }
+        secs_data_message_free(&reply);
+    }
+
+    /* round#2 断线并重连（同一 protocol session 继续可用） */
+    secs_hsms_connection_t *client_conn2 = NULL;
+    secs_hsms_connection_t *server_conn2 = NULL;
+    expect_ok("secs_hsms_connection_create_memory_duplex(round2)",
+              secs_hsms_connection_create_memory_duplex(
+                  ctx, &client_conn2, &server_conn2));
+
+    pthread_t th2;
+    struct open_args args2;
+    memset(&args2, 0, sizeof(args2));
+    args2.sess = server_hsms;
+    args2.io_conn = &server_conn2;
+    const int started2 = pthread_create(&th2, NULL, open_passive_thread, &args2);
+    if (started2 != 0) {
+        fprintf(stderr, "FAIL: pthread_create(open_passive round2)\n");
+        ++g_failures;
+        goto cleanup;
+    }
+
+    expect_ok("secs_hsms_session_open_active_connection(round2)",
+              secs_hsms_session_open_active_connection(client_hsms, &client_conn2));
+
+    if (started2 == 0) {
+        (void)pthread_join(th2, NULL);
+        expect_ok("secs_hsms_session_open_passive_connection(round2)", args2.out_err);
+    }
+
+    /* selected 状态校验 */
+    {
+        int selected = 0;
+        expect_ok("secs_hsms_session_is_selected(round2 client)",
+                  secs_hsms_session_is_selected(client_hsms, &selected));
+        if (!selected) {
+            fprintf(stderr, "FAIL: reconnect round2 client not selected\n");
+            ++g_failures;
+        }
+        selected = 0;
+        expect_ok("secs_hsms_session_is_selected(round2 server)",
+                  secs_hsms_session_is_selected(server_hsms, &selected));
+        if (!selected) {
+            fprintf(stderr, "FAIL: reconnect round2 server not selected\n");
+            ++g_failures;
+        }
+    }
+
+    /* round#2 请求-应答 */
+    ud.tag = 0xB2u;
+    {
+        const uint8_t body[1] = {0x02u};
+        secs_data_message_t reply;
+        memset(&reply, 0, sizeof(reply));
+        expect_ok("secs_protocol_session_request(round2)",
+                  secs_protocol_session_request(
+                      client_proto, 1, 1, body, sizeof(body), 1000, &reply));
+        if (reply.body_n != 1u || !reply.body || reply.body[0] != ud.tag) {
+            fprintf(stderr, "FAIL: reconnect round2 reply mismatch\n");
+            ++g_failures;
+        }
+        secs_data_message_free(&reply);
+    }
+
+    if (atomic_load(&calls) != 2) {
+        fprintf(stderr, "FAIL: reconnect handler calls mismatch\n");
+        ++g_failures;
+    }
+
+cleanup:
+    (void)secs_protocol_session_stop(client_proto);
+    (void)secs_protocol_session_stop(server_proto);
+    secs_protocol_session_destroy(client_proto);
+    secs_protocol_session_destroy(server_proto);
+
+    (void)secs_hsms_session_stop(client_hsms);
+    (void)secs_hsms_session_stop(server_hsms);
+    secs_hsms_session_destroy(client_hsms);
+    secs_hsms_session_destroy(server_hsms);
+
+    secs_context_destroy(ctx);
+}
+
 static secs_error_t
 secs1_simple_reply_handler(void *user_data,
                            const secs_data_message_view_t *request,
@@ -6674,6 +6900,7 @@ int main(void) {
     test_protocol_session_secs1_memory_duplex_max_pending();
     test_protocol_session_secs1_serial_pty_smoke();
     test_hsms_protocol_loopback();
+    test_hsms_protocol_reconnect_request_reply();
 
     if (g_failures == 0) {
         return 0;
