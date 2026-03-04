@@ -3759,6 +3759,19 @@ static void test_sml_runtime_match_response_empty_body(void) {
     /* body_bytes=NULL 且 body_n=0：兼容部分设备/模拟器发送“空 bytes” */
     {
         char *out_name = NULL;
+        expect_ok("secs_sml_runtime_match_response(empty body)",
+                  secs_sml_runtime_match_response(
+                      rt, 1, 1, NULL, 0, &out_name));
+        if (!out_name || strcmp(out_name, "rsp") != 0) {
+            fprintf(stderr,
+                    "FAIL: match_response(empty body) expected rsp\n");
+            ++g_failures;
+        }
+        secs_free(out_name);
+    }
+
+    {
+        char *out_name = NULL;
         expect_ok("secs_sml_runtime_match_response_with_context(empty body)",
                   secs_sml_runtime_match_response_with_context(
                       rt, 1, 1, NULL, 0, NULL, &out_name));
@@ -4652,6 +4665,108 @@ protocol_poll_once_wrong_thread_handler(void *user_data,
     ok.value = 0;
     ok.category = "secs.c_api";
     return ok;
+}
+
+struct destroy_ctx_from_io_ud {
+    secs_context_t *ctx;
+    atomic_int *called;
+};
+
+static secs_error_t
+protocol_destroy_context_from_io_handler(void *user_data,
+                                         const secs_data_message_view_t *request,
+                                         uint8_t **out_body,
+                                         size_t *out_body_n) {
+    (void)request;
+    struct destroy_ctx_from_io_ud *ud = (struct destroy_ctx_from_io_ud *)user_data;
+    if (!out_body || !out_body_n) {
+        secs_error_t err;
+        err.value = (int)SECS_C_API_INVALID_ARGUMENT;
+        err.category = "secs.c_api";
+        return err;
+    }
+
+    /* 关键回归：在 io 线程中销毁 context 必须安全，且不能导致主线程永久阻塞。 */
+    if (ud && ud->ctx) {
+        secs_context_destroy(ud->ctx);
+    }
+    if (ud && ud->called) {
+        atomic_store(ud->called, 1);
+    }
+
+    *out_body = NULL;
+    *out_body_n = 0;
+
+    secs_error_t ok;
+    ok.value = 0;
+    ok.category = "secs.c_api";
+    return ok;
+}
+
+struct hsms_is_selected_stress_args {
+    secs_hsms_session_t *sess;
+    int loops;
+    atomic_int *unexpected;
+};
+
+static void *hsms_is_selected_stress_thread(void *p) {
+    struct hsms_is_selected_stress_args *args =
+        (struct hsms_is_selected_stress_args *)p;
+    if (!args || !args->sess || args->loops <= 0) {
+        if (args && args->unexpected) {
+            atomic_store(args->unexpected, 1);
+        }
+        return NULL;
+    }
+
+    for (int i = 0; i < args->loops; ++i) {
+        int selected = 0;
+        secs_error_t err = secs_hsms_session_is_selected(args->sess, &selected);
+        if (err.value == 0) {
+            continue;
+        }
+        if (err.value == (int)SECS_C_API_INVALID_ARGUMENT) {
+            continue;
+        }
+        if (args->unexpected) {
+            atomic_store(args->unexpected, 1);
+        }
+        break;
+    }
+    return NULL;
+}
+
+struct protocol_poll_once_stress_args {
+    secs_protocol_session_t *sess;
+    int loops;
+    atomic_int *unexpected;
+};
+
+static void *protocol_poll_once_stress_thread(void *p) {
+    struct protocol_poll_once_stress_args *args =
+        (struct protocol_poll_once_stress_args *)p;
+    if (!args || !args->sess || args->loops <= 0) {
+        if (args && args->unexpected) {
+            atomic_store(args->unexpected, 1);
+        }
+        return NULL;
+    }
+
+    for (int i = 0; i < args->loops; ++i) {
+        int handled = 0;
+        secs_error_t err = secs_protocol_session_poll_once(args->sess, 1, &handled);
+        if (err.value == 0) {
+            continue;
+        }
+        if (err.value == (int)SECS_C_API_INVALID_ARGUMENT) {
+            continue;
+        }
+        if (args->unexpected) {
+            atomic_store(args->unexpected, 1);
+        }
+        break;
+    }
+    return NULL;
 }
 
 static void test_hsms_protocol_loopback(void) {
@@ -6869,6 +6984,250 @@ static void test_protocol_session_secs1_serial_pty_smoke(void) {
 #endif
 }
 
+static void test_context_destroy_before_session_destroy(void) {
+    secs_context_t *ctx = NULL;
+    expect_ok("secs_context_create(destroy order)",
+              secs_context_create(&ctx));
+
+    secs_hsms_session_options_t hs_opt;
+    memset(&hs_opt, 0, sizeof(hs_opt));
+    hs_opt.session_id = 0x0001;
+    hs_opt.t3_ms = 1000;
+    hs_opt.t5_ms = 100;
+    hs_opt.t6_ms = 100;
+    hs_opt.t7_ms = 100;
+    hs_opt.t8_ms = 100;
+    hs_opt.linktest_interval_ms = 0;
+    hs_opt.linktest_max_consecutive_failures = 1;
+    hs_opt.auto_reconnect = 0;
+    hs_opt.passive_accept_select = 1;
+
+    secs_hsms_session_t *hsms = NULL;
+    expect_ok("secs_hsms_session_create(destroy order)",
+              secs_hsms_session_create(ctx, &hs_opt, &hsms));
+
+    secs_protocol_session_options_t p_opt;
+    memset(&p_opt, 0, sizeof(p_opt));
+    p_opt.t3_ms = 200;
+    p_opt.poll_interval_ms = 1;
+
+    secs_protocol_session_t *host = NULL;
+    secs_protocol_session_t *equip = NULL;
+    expect_ok("secs_protocol_session_create_from_secs1_memory_duplex(destroy order)",
+              secs_protocol_session_create_from_secs1_memory_duplex(
+                  ctx, 0x0001, &p_opt, &host, &equip));
+
+    /* 关键回归：先销毁 ctx，再访问/销毁会话句柄必须返回错误或安全退出，不得崩溃。 */
+    secs_context_destroy(ctx);
+
+    {
+        int selected = 0;
+        expect_err("secs_hsms_session_is_selected(after ctx destroy)",
+                   secs_hsms_session_is_selected(hsms, &selected));
+    }
+
+    {
+        int handled = 0;
+        expect_err("secs_protocol_session_poll_once(after ctx destroy)",
+                   secs_protocol_session_poll_once(host, 1, &handled));
+    }
+
+    secs_hsms_session_destroy(hsms);
+    secs_protocol_session_destroy(host);
+    secs_protocol_session_destroy(equip);
+}
+
+static void test_context_destroy_on_io_thread(void) {
+    secs_context_t *ctx = NULL;
+    expect_ok("secs_context_create(io thread destroy)",
+              secs_context_create(&ctx));
+
+    secs_hsms_connection_t *client_conn = NULL;
+    secs_hsms_connection_t *server_conn = NULL;
+    expect_ok("secs_hsms_connection_create_memory_duplex(io thread destroy)",
+              secs_hsms_connection_create_memory_duplex(
+                  ctx, &client_conn, &server_conn));
+
+    secs_hsms_session_options_t hs_opt;
+    memset(&hs_opt, 0, sizeof(hs_opt));
+    hs_opt.session_id = 0x2020;
+    hs_opt.t3_ms = 1000;
+    hs_opt.t5_ms = 100;
+    hs_opt.t6_ms = 1000;
+    hs_opt.t7_ms = 1000;
+    hs_opt.t8_ms = 1000;
+    hs_opt.auto_reconnect = 0;
+    hs_opt.passive_accept_select = 1;
+
+    secs_hsms_session_t *client_hsms = NULL;
+    secs_hsms_session_t *server_hsms = NULL;
+    expect_ok("secs_hsms_session_create(client,io thread destroy)",
+              secs_hsms_session_create(ctx, &hs_opt, &client_hsms));
+    expect_ok("secs_hsms_session_create(server,io thread destroy)",
+              secs_hsms_session_create(ctx, &hs_opt, &server_hsms));
+
+    pthread_t th;
+    struct open_args args;
+    memset(&args, 0, sizeof(args));
+    args.sess = server_hsms;
+    args.io_conn = &server_conn;
+    if (pthread_create(&th, NULL, open_passive_thread, &args) != 0) {
+        fprintf(stderr, "FAIL: pthread_create(io thread destroy)\n");
+        ++g_failures;
+    }
+
+    expect_ok("secs_hsms_session_open_active_connection(io thread destroy)",
+              secs_hsms_session_open_active_connection(client_hsms, &client_conn));
+    (void)pthread_join(th, NULL);
+    expect_ok("secs_hsms_session_open_passive_connection(io thread destroy)",
+              args.out_err);
+
+    secs_protocol_session_options_t p_opt;
+    memset(&p_opt, 0, sizeof(p_opt));
+    p_opt.t3_ms = 200;
+    p_opt.poll_interval_ms = 1;
+
+    secs_protocol_session_t *client_proto = NULL;
+    secs_protocol_session_t *server_proto = NULL;
+    expect_ok("secs_protocol_session_create_from_hsms(client,io thread destroy)",
+              secs_protocol_session_create_from_hsms(
+                  ctx, client_hsms, hs_opt.session_id, &p_opt, &client_proto));
+    expect_ok("secs_protocol_session_create_from_hsms(server,io thread destroy)",
+              secs_protocol_session_create_from_hsms(
+                  ctx, server_hsms, hs_opt.session_id, &p_opt, &server_proto));
+
+    atomic_int destroy_called;
+    atomic_init(&destroy_called, 0);
+    struct destroy_ctx_from_io_ud ud;
+    ud.ctx = ctx;
+    ud.called = &destroy_called;
+
+    expect_ok("secs_protocol_session_set_handler(io thread destroy)",
+              secs_protocol_session_set_handler(server_proto,
+                                                9,
+                                                1,
+                                                protocol_destroy_context_from_io_handler,
+                                                &ud));
+
+    secs_data_message_t reply;
+    memset(&reply, 0, sizeof(reply));
+    expect_err("secs_protocol_session_request(io thread destroy)",
+               secs_protocol_session_request(
+                   client_proto, 9, 1, NULL, 0, 1000, &reply));
+    secs_data_message_free(&reply);
+
+    if (!wait_until_atomic_eq(&destroy_called, 1, 300, 1000000L)) {
+        fprintf(stderr,
+                "FAIL: context destroy handler not called on io thread\n");
+        ++g_failures;
+    }
+
+    secs_protocol_session_destroy(client_proto);
+    secs_protocol_session_destroy(server_proto);
+    secs_hsms_session_destroy(client_hsms);
+    secs_hsms_session_destroy(server_hsms);
+}
+
+static void test_context_destroy_race_stress(void) {
+    /* 压力回归：并发阻塞 API + context 销毁，验证不会挂死/崩溃。 */
+    for (int iter = 0; iter < 30; ++iter) {
+        secs_context_t *ctx = NULL;
+        expect_ok("secs_context_create(stress)", secs_context_create(&ctx));
+
+        secs_hsms_session_options_t hs_opt;
+        memset(&hs_opt, 0, sizeof(hs_opt));
+        hs_opt.session_id = 0x3030;
+        hs_opt.t3_ms = 1000;
+        hs_opt.t5_ms = 50;
+        hs_opt.t6_ms = 1000;
+        hs_opt.t7_ms = 1000;
+        hs_opt.t8_ms = 1000;
+        hs_opt.auto_reconnect = 0;
+        hs_opt.passive_accept_select = 1;
+
+        secs_hsms_session_t *hsms = NULL;
+        expect_ok("secs_hsms_session_create(stress)",
+                  secs_hsms_session_create(ctx, &hs_opt, &hsms));
+
+        secs_protocol_session_options_t p_opt;
+        memset(&p_opt, 0, sizeof(p_opt));
+        p_opt.t3_ms = 200;
+        p_opt.poll_interval_ms = 1;
+
+        secs_protocol_session_t *host = NULL;
+        secs_protocol_session_t *equip = NULL;
+        expect_ok("secs_protocol_session_create_from_secs1_memory_duplex(stress)",
+                  secs_protocol_session_create_from_secs1_memory_duplex(
+                      ctx, 0x3030, &p_opt, &host, &equip));
+
+        atomic_int hs_unexpected;
+        atomic_int pr_unexpected;
+        atomic_init(&hs_unexpected, 0);
+        atomic_init(&pr_unexpected, 0);
+
+        struct hsms_is_selected_stress_args hs_args;
+        hs_args.sess = hsms;
+        hs_args.loops = 200;
+        hs_args.unexpected = &hs_unexpected;
+
+        struct protocol_poll_once_stress_args pr_args;
+        pr_args.sess = host;
+        pr_args.loops = 200;
+        pr_args.unexpected = &pr_unexpected;
+
+        pthread_t th_hs;
+        pthread_t th_pr;
+        if (pthread_create(&th_hs, NULL, hsms_is_selected_stress_thread, &hs_args) != 0) {
+            fprintf(stderr, "FAIL: pthread_create(stress hsms)\n");
+            ++g_failures;
+            secs_protocol_session_destroy(host);
+            secs_protocol_session_destroy(equip);
+            secs_hsms_session_destroy(hsms);
+            secs_context_destroy(ctx);
+            return;
+        }
+        if (pthread_create(&th_pr, NULL, protocol_poll_once_stress_thread, &pr_args) != 0) {
+            fprintf(stderr, "FAIL: pthread_create(stress protocol)\n");
+            ++g_failures;
+            (void)pthread_join(th_hs, NULL);
+            secs_protocol_session_destroy(host);
+            secs_protocol_session_destroy(equip);
+            secs_hsms_session_destroy(hsms);
+            secs_context_destroy(ctx);
+            return;
+        }
+
+        /* 给工作线程一个很短窗口进入 run_blocking，再并发销毁 context。 */
+        {
+            struct timespec req;
+            req.tv_sec = 0;
+            req.tv_nsec = 1000000L;
+            (void)nanosleep(&req, NULL);
+        }
+        secs_context_destroy(ctx);
+
+        (void)pthread_join(th_hs, NULL);
+        (void)pthread_join(th_pr, NULL);
+
+        if (atomic_load(&hs_unexpected) != 0) {
+            fprintf(stderr,
+                    "FAIL: hsms stress unexpected error at iter=%d\n",
+                    iter);
+            ++g_failures;
+        }
+        if (atomic_load(&pr_unexpected) != 0) {
+            fprintf(stderr,
+                    "FAIL: protocol stress unexpected error at iter=%d\n",
+                    iter);
+            ++g_failures;
+        }
+
+        secs_hsms_session_destroy(hsms);
+        secs_protocol_session_destroy(host);
+        secs_protocol_session_destroy(equip);
+    }
+}
+
 int main(void) {
     test_version_and_error_message();
     test_error_message_category_mapping();
@@ -6899,8 +7258,11 @@ int main(void) {
     test_protocol_session_secs1_memory_duplex();
     test_protocol_session_secs1_memory_duplex_max_pending();
     test_protocol_session_secs1_serial_pty_smoke();
+    test_context_destroy_before_session_destroy();
     test_hsms_protocol_loopback();
     test_hsms_protocol_reconnect_request_reply();
+    test_context_destroy_on_io_thread();
+    test_context_destroy_race_stress();
 
     if (g_failures == 0) {
         return 0;

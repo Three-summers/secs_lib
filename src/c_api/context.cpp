@@ -85,15 +85,56 @@ void secs_context_destroy(secs_context_t *ctx) {
             return;
         }
 
+        const auto self = std::this_thread::get_id();
+        bool called_from_io_thread = false;
+        for (const auto tid : ctx->io_thread_ids) {
+            if (tid == self) {
+                called_from_io_thread = true;
+                break;
+            }
+        }
+
+        bool expected = false;
+        if (!ctx->destroyed.compare_exchange_strong(expected,
+                                                    true,
+                                                    std::memory_order_acq_rel,
+                                                    std::memory_order_acquire)) {
+            return;
+        }
+
         ctx->work.reset();
         ctx->ioc.stop();
+
+        if (called_from_io_thread) {
+            // 在 io 线程内销毁时，不能自 join，也不能在 run() 尚未完全退出前直接释放
+            // context（否则可能 UAF）。改为后台线程统一 join+release。
+            context_retain(ctx);
+            try {
+                std::thread([ctx]() {
+                    for (auto &t : ctx->io_threads) {
+                        if (t.joinable()) {
+                            t.join();
+                        }
+                    }
+                    // 先释放后台线程持有的引用，再释放 destroy() 的“所有权引用”。
+                    context_release(ctx);
+                    context_release(ctx);
+                }).detach();
+                return;
+            } catch (...) {
+                // 极端情况下线程创建失败：保留 destroy 标记并返回。
+                // 这里释放额外 retain，避免无界泄漏；基础引用在该极端场景下保留。
+                context_release(ctx);
+                return;
+            }
+        }
 
         for (auto &t : ctx->io_threads) {
             if (t.joinable()) {
                 t.join();
             }
         }
-        delete ctx;
+
+        context_release(ctx);
     });
 }
-

@@ -21,6 +21,8 @@ secs_hsms_connection_create_memory_duplex(secs_context_t *ctx,
     return guard_error([&]() -> secs_error_t {
         if (!ctx || !out_client || !out_server)
             return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        if (!context_is_alive(ctx))
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
         *out_client = nullptr;
         *out_server = nullptr;
 
@@ -60,13 +62,17 @@ secs_hsms_session_create(secs_context_t *ctx,
     return guard_error([&]() -> secs_error_t {
         if (!ctx || !options || !out_sess)
             return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        if (!context_is_alive(ctx))
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
         *out_sess = nullptr;
 
         auto *h = new (std::nothrow) secs_hsms_session{};
         if (!h)
             return c_api_err(SECS_C_API_OUT_OF_MEMORY);
 
+        context_retain(ctx);
         h->ctx = ctx;
+        h->ctx_ref.ptr = ctx;
         const auto opt = make_hsms_options(options);
 
         h->options = opt;
@@ -86,6 +92,11 @@ secs_hsms_session_create(secs_context_t *ctx,
 static secs_error_t hsms_stop_on_io_thread(secs_hsms_session_t *sess) {
     if (!sess || !sess->ctx || !sess->sess)
         return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+
+    if (!context_is_alive(sess->ctx)) {
+        sess->sess->stop();
+        return ok();
+    }
 
     if (is_io_thread(sess->ctx)) {
         sess->sess->stop();
@@ -312,6 +323,12 @@ void secs_hsms_session_destroy(secs_hsms_session_t *sess) {
             return;
         }
 
+        if (!context_is_alive(sess->ctx)) {
+            sess->sess->stop();
+            delete sess;
+            return;
+        }
+
         // 若在 io 线程调用 destroy，为避免死锁/悬挂协程，改为“异步销毁”。
         if (is_io_thread(sess->ctx)) {
             asio::co_spawn(
@@ -486,4 +503,3 @@ secs_hsms_session_request_data(secs_hsms_session_t *sess,
         return fill_hsms_out_message(result.second, out_reply);
     });
 }
-

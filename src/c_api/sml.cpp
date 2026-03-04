@@ -58,12 +58,14 @@ secs_error_t secs_sml_runtime_match_response(const secs_sml_runtime_t *rt,
 
         secs::ii::Item decoded{secs::ii::List{}};
         std::size_t consumed = 0;
-        auto dec_ec = secs::ii::decode_one(
-            bytes_view{reinterpret_cast<const byte *>(body_bytes), body_n},
-            decoded,
-            consumed);
-        if (dec_ec) {
-            return from_error_code(dec_ec);
+        if (body_n != 0) {
+            auto dec_ec = secs::ii::decode_one(
+                bytes_view{reinterpret_cast<const byte *>(body_bytes), body_n},
+                decoded,
+                consumed);
+            if (dec_ec) {
+                return from_error_code(dec_ec);
+            }
         }
 
         auto matched = rt->rt.match_response(stream, function, decoded);

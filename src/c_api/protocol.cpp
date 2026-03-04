@@ -94,6 +94,9 @@ secs_error_t secs_protocol_session_create_from_hsms(
         if (!ctx || !hsms_sess || !hsms_sess->sess || !out_sess) {
             return c_api_err(SECS_C_API_INVALID_ARGUMENT);
         }
+        if (!context_is_alive(ctx)) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
         if (hsms_sess->ctx != ctx) {
             // 协议层与 HSMS 会话必须共享同一个
             // context，否则执行器/线程模型会被破坏。
@@ -108,7 +111,9 @@ secs_error_t secs_protocol_session_create_from_hsms(
         }
 
         auto state = std::make_shared<protocol_state>();
+        context_retain(ctx);
         state->ctx = ctx;
+        state->ctx_ref.ptr = ctx;
         state->hsms_keepalive = hsms_sess->sess;
         state->sess = std::make_unique<secs::protocol::Session>(
             *state->hsms_keepalive,
@@ -144,6 +149,9 @@ secs_error_t secs_protocol_session_create_from_secs1_serial(
         if (!ctx || !serial_path || !out_sess) {
             return c_api_err(SECS_C_API_INVALID_ARGUMENT);
         }
+        if (!context_is_alive(ctx)) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
         *out_sess = nullptr;
 
 #if !defined(ASIO_HAS_SERIAL_PORT)
@@ -160,7 +168,9 @@ secs_error_t secs_protocol_session_create_from_secs1_serial(
         }
 
         auto state = std::make_shared<protocol_state>();
+        context_retain(ctx);
         state->ctx = ctx;
+        state->ctx_ref.ptr = ctx;
 
         auto [ec, link] = secs::secs1::SerialPortLink::open(
             ctx->ioc.get_executor(), std::string(serial_path), baud);
@@ -195,6 +205,9 @@ secs_error_t secs_protocol_session_create_from_secs1_memory_duplex(
         if (!ctx || !out_host || !out_equipment) {
             return c_api_err(SECS_C_API_INVALID_ARGUMENT);
         }
+        if (!context_is_alive(ctx)) {
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
         *out_host = nullptr;
         *out_equipment = nullptr;
 
@@ -213,7 +226,9 @@ secs_error_t secs_protocol_session_create_from_secs1_memory_duplex(
         }
 
         auto host_state = std::make_shared<protocol_state>();
+        context_retain(ctx);
         host_state->ctx = ctx;
+        host_state->ctx_ref.ptr = ctx;
         host_state->secs1_link =
             std::make_unique<secs::secs1::MemoryLink::Endpoint>(
                 std::move(host_ep));
@@ -226,7 +241,9 @@ secs_error_t secs_protocol_session_create_from_secs1_memory_duplex(
         host->state = std::move(host_state);
 
         auto eq_state = std::make_shared<protocol_state>();
+        context_retain(ctx);
         eq_state->ctx = ctx;
+        eq_state->ctx_ref.ptr = ctx;
         eq_state->secs1_link =
             std::make_unique<secs::secs1::MemoryLink::Endpoint>(
                 std::move(eq_ep));
@@ -250,6 +267,10 @@ static secs_error_t proto_stop_on_io_thread(secs_protocol_session_t *sess) {
     }
 
     auto state = sess->state;
+    if (!context_is_alive(state->ctx)) {
+        state->sess->stop();
+        return ok();
+    }
     if (is_io_thread(state->ctx)) {
         state->sess->stop();
         return ok();
@@ -275,6 +296,12 @@ void secs_protocol_session_destroy(secs_protocol_session_t *sess) {
             return;
         }
 
+        if (!context_is_alive(state->ctx)) {
+            state->sess->stop();
+            delete sess;
+            return;
+        }
+
         // io 线程内不能阻塞等待；这里仅 stop 并释放 handle，让 run_loop
         // 自行结束并释放 state。
         if (is_io_thread(state->ctx)) {
@@ -289,7 +316,10 @@ void secs_protocol_session_destroy(secs_protocol_session_t *sess) {
         if (need_wait) {
             (void)run_blocking_ec(
                 state->ctx, [state]() -> asio::awaitable<std::error_code> {
-                    co_return co_await state->run_done.async_wait(std::nullopt);
+                    // destroy 不应无限阻塞：给 run loop 一个收敛窗口，超时后交由
+                    // context stop 阶段继续兜底回收。
+                    co_return co_await state->run_done.async_wait(
+                        std::chrono::seconds(5));
                 });
         }
 

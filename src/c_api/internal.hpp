@@ -53,6 +53,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -86,12 +87,38 @@
 // -----------------------------------------------------------------------------
 
 struct secs_context final {
+    std::atomic_size_t ref_count{1};
+    std::atomic_bool destroyed{false};
     asio::io_context ioc{};
     asio::executor_work_guard<asio::io_context::executor_type> work{
         asio::make_work_guard(ioc)};
     std::vector<std::thread> io_threads{};
     std::vector<std::thread::id> io_thread_ids{};
 };
+
+[[maybe_unused]] inline void context_retain(secs_context *ctx) noexcept {
+    if (!ctx) {
+        return;
+    }
+    (void)ctx->ref_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+[[maybe_unused]] inline void context_release(secs_context *ctx) noexcept {
+    if (!ctx) {
+        return;
+    }
+    if (ctx->ref_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        delete ctx;
+    }
+}
+
+[[maybe_unused]] [[nodiscard]] inline bool
+context_is_alive(const secs_context *ctx) noexcept {
+    if (!ctx) {
+        return false;
+    }
+    return !ctx->destroyed.load(std::memory_order_acquire);
+}
 
 struct secs_ii_item final {
     explicit secs_ii_item(secs::ii::Item v) : item(std::move(v)) {}
@@ -129,6 +156,13 @@ struct secs_hsms_connection final {
 };
 
 struct secs_hsms_session final {
+    struct context_ref final {
+        secs_context *ptr{nullptr};
+        ~context_ref() noexcept { context_release(ptr); }
+    };
+
+    // 必须放在首位：确保在其他成员（尤其 sess）析构后才释放 context。
+    context_ref ctx_ref{};
     secs_context *ctx{nullptr};
     secs::hsms::SessionOptions options{};
     // 用 shared_ptr 的原因：
@@ -138,6 +172,13 @@ struct secs_hsms_session final {
 };
 
 struct protocol_state final {
+    struct context_ref final {
+        secs_context *ptr{nullptr};
+        ~context_ref() noexcept { context_release(ptr); }
+    };
+
+    // 必须放在首位：确保在其他成员（尤其 sess）析构后才释放 context。
+    context_ref ctx_ref{};
     secs_context *ctx{nullptr};
     // 保证底层 HSMS 会话在 protocol::Session 存活期间不会被提前释放（避免
     // UAF）。
@@ -253,7 +294,7 @@ category_from_name(const char *name) noexcept {
 }
 
 [[maybe_unused]] [[nodiscard]] bool is_io_thread(const secs_context *ctx) noexcept {
-    if (!ctx) {
+    if (!context_is_alive(ctx)) {
         return false;
     }
     const auto self = std::this_thread::get_id();
@@ -263,6 +304,15 @@ category_from_name(const char *name) noexcept {
         }
     }
     return false;
+}
+
+template <class Result, class AwaitableFactory>
+[[maybe_unused]] asio::awaitable<Result>
+run_blocking_invoke_factory(std::shared_ptr<AwaitableFactory> factory) {
+    // 注意：不要直接使用“捕获变量的协程 lambda”作为 co_spawn(awaitable)
+    // 的入参，否则闭包对象可能先于协程恢复而析构，触发悬空访问。
+    // 这里把 factory 放进 shared_ptr，并作为协程参数持有到结束。
+    co_return co_await (*factory)();
 }
 
 template <class Result, class AwaitableFactory>
@@ -282,33 +332,68 @@ template <class Result, class AwaitableFactory>
         secs::core::metrics_counter(kErrors, 1);
         return c_api_err(SECS_C_API_INVALID_ARGUMENT);
     }
+
+    // 在整个阻塞调用期间持有 context 引用，避免并发 destroy 导致悬空指针。
+    context_retain(ctx);
+    struct context_hold final {
+        secs_context *ctx{nullptr};
+        ~context_hold() noexcept { context_release(ctx); }
+    } hold{ctx};
+
+    if (!context_is_alive(ctx)) {
+        secs::core::metrics_counter(kErrors, 1);
+        return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+    }
     if (is_io_thread(ctx)) {
         secs::core::metrics_counter(kErrors, 1);
         secs::core::metrics_counter(kWrongThread, 1);
         return c_api_err(SECS_C_API_WRONG_THREAD);
     }
 
-    std::mutex mu;
-    std::condition_variable cv;
-    bool done = false;
-    std::exception_ptr eptr;
-    std::optional<Result> result;
+    struct wait_state final {
+        std::mutex mu{};
+        std::condition_variable cv{};
+        bool done{false};
+        std::exception_ptr eptr{};
+        std::optional<Result> result{};
+    };
+    auto state = std::make_shared<wait_state>();
+    using factory_t = std::decay_t<AwaitableFactory>;
+    std::shared_ptr<factory_t> factory;
+    try {
+        factory = std::make_shared<factory_t>(
+            std::forward<AwaitableFactory>(make_awaitable));
+    } catch (const std::bad_alloc &) {
+        secs::core::metrics_counter(kErrors, 1);
+        return c_api_err(SECS_C_API_OUT_OF_MEMORY);
+    } catch (...) {
+        secs::core::metrics_counter(kErrors, 1);
+        return c_api_err(SECS_C_API_EXCEPTION);
+    }
 
     const auto start = std::chrono::steady_clock::now();
 
     asio::co_spawn(
-        ctx->ioc, make_awaitable(), [&](std::exception_ptr e, Result r) {
+        ctx->ioc,
+        run_blocking_invoke_factory<Result, factory_t>(std::move(factory)),
+        [state](std::exception_ptr e, Result r) {
             {
-                std::lock_guard lk(mu);
-                eptr = e;
-                result = std::move(r);
-                done = true;
+                std::lock_guard lk(state->mu);
+                state->eptr = e;
+                state->result = std::move(r);
+                state->done = true;
             }
-            cv.notify_one();
+            state->cv.notify_one();
         });
 
-    std::unique_lock lk(mu);
-    cv.wait(lk, [&] { return done; });
+    std::unique_lock lk(state->mu);
+    while (!state->done) {
+        if (!context_is_alive(ctx)) {
+            secs::core::metrics_counter(kErrors, 1);
+            return c_api_err(SECS_C_API_INVALID_ARGUMENT);
+        }
+        state->cv.wait_for(lk, std::chrono::milliseconds(10));
+    }
 
     const auto waited_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                std::chrono::steady_clock::now() - start)
@@ -318,16 +403,16 @@ template <class Result, class AwaitableFactory>
                                       static_cast<std::uint64_t>(waited_ms));
     }
 
-    if (eptr) {
+    if (state->eptr) {
         secs::core::metrics_counter(kErrors, 1);
         return c_api_err(SECS_C_API_EXCEPTION);
     }
-    if (!result.has_value()) {
+    if (!state->result.has_value()) {
         secs::core::metrics_counter(kErrors, 1);
         return c_api_err(SECS_C_API_EXCEPTION);
     }
 
-    out = std::move(*result);
+    out = std::move(*state->result);
     secs::core::metrics_counter(kOk, 1);
     return ok();
 }
@@ -369,6 +454,7 @@ template <class Fn>
 // --------------------------------------------------------------------------
 
 struct MemoryChannel final {
+    std::mutex mu{};
     std::deque<byte> buf{};
     bool closed{false};
     secs::core::Event data_event{};
@@ -384,21 +470,26 @@ public:
     [[nodiscard]] asio::any_io_executor executor() const noexcept override {
         return ex_;
     }
-    [[nodiscard]] bool is_open() const noexcept override { return open_; }
+    [[nodiscard]] bool is_open() const noexcept override {
+        return open_.load(std::memory_order_acquire);
+    }
 
     void cancel() noexcept override {
-        if (inbox_) {
-            inbox_->data_event.cancel();
+        if (!inbox_) {
+            return;
         }
+        inbox_->data_event.cancel();
     }
 
     void close() noexcept override {
-        if (!open_) {
+        if (!open_.exchange(false, std::memory_order_acq_rel)) {
             return;
         }
-        open_ = false;
         if (outbox_) {
-            outbox_->closed = true;
+            {
+                std::lock_guard lk(outbox_->mu);
+                outbox_->closed = true;
+            }
             outbox_->data_event.set();
         }
         if (inbox_) {
@@ -413,39 +504,56 @@ public:
                                 std::size_t{0}};
         }
 
-        while (inbox_->buf.empty()) {
-            if (inbox_->closed) {
-                co_return std::pair{
-                    std::make_error_code(std::errc::broken_pipe),
-                    std::size_t{0}};
-            }
-            auto ec = co_await inbox_->data_event.async_wait(std::nullopt);
-            if (ec) {
-                co_return std::pair{ec, std::size_t{0}};
-            }
-        }
+        for (;;) {
+            bool need_wait = false;
+            std::size_t n = 0;
 
-        const std::size_t n = std::min(dst.size(), inbox_->buf.size());
-        for (std::size_t i = 0; i < n; ++i) {
-            dst[i] = inbox_->buf.front();
-            inbox_->buf.pop_front();
-        }
-        if (inbox_->buf.empty()) {
-            inbox_->data_event.reset();
-        }
+            {
+                std::lock_guard lk(inbox_->mu);
+                if (!inbox_->buf.empty()) {
+                    n = std::min(dst.size(), inbox_->buf.size());
+                    for (std::size_t i = 0; i < n; ++i) {
+                        dst[i] = inbox_->buf.front();
+                        inbox_->buf.pop_front();
+                    }
+                    if (inbox_->buf.empty()) {
+                        // 与队列状态同锁更新，避免“写方 set 与读方 reset 交错”导致丢唤醒。
+                        inbox_->data_event.reset();
+                    }
+                } else if (inbox_->closed) {
+                    co_return std::pair{
+                        std::make_error_code(std::errc::broken_pipe),
+                        std::size_t{0}};
+                } else {
+                    need_wait = true;
+                }
+            }
 
-        co_return std::pair{std::error_code{}, n};
+            if (!need_wait) {
+                co_return std::pair{std::error_code{}, n};
+            }
+
+            auto wait_ec = co_await inbox_->data_event.async_wait(std::nullopt);
+            if (wait_ec) {
+                co_return std::pair{wait_ec, std::size_t{0}};
+            }
+        }
     }
 
     asio::awaitable<std::error_code> async_write_all(bytes_view src) override {
-        if (!open_) {
+        if (!open_.load(std::memory_order_acquire)) {
             co_return make_error_code(errc::cancelled);
         }
         if (!outbox_) {
             co_return make_error_code(errc::invalid_argument);
         }
-        outbox_->buf.insert(outbox_->buf.end(), src.begin(), src.end());
-        outbox_->data_event.set();
+        {
+            std::lock_guard lk(outbox_->mu);
+            outbox_->buf.insert(outbox_->buf.end(), src.begin(), src.end());
+        }
+        if (!src.empty()) {
+            outbox_->data_event.set();
+        }
         co_return std::error_code{};
     }
 
@@ -458,7 +566,7 @@ private:
     asio::any_io_executor ex_;
     std::shared_ptr<MemoryChannel> inbox_;
     std::shared_ptr<MemoryChannel> outbox_;
-    bool open_{true};
+    std::atomic_bool open_{true};
 };
 
 [[maybe_unused]] [[nodiscard]] secs::core::duration

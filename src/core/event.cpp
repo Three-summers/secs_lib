@@ -141,39 +141,6 @@ Event::async_wait(std::optional<steady_clock::duration> timeout) {
 
     std::uint64_t local_set_gen = 0;
     std::uint64_t local_cancel_gen = 0;
-    std::size_t max_waiters = 1;
-    try {
-        std::lock_guard lk(state->mu);
-
-        // 说明被 set 唤醒，返回成功
-        if (state->signaled) {
-            co_return std::error_code{};
-        }
-
-        // 记录当前 generation，用于在等待结束后判断“是 set/cancel
-        // 导致的唤醒”还是“超时/错误”。
-        local_set_gen = state->set_generation;
-        local_cancel_gen = state->cancel_generation;
-
-        max_waiters = state->max_waiters == 0 ? std::size_t{1} : state->max_waiters;
-        if (state->waiter_count >= max_waiters) {
-            co_return make_error_code(errc::out_of_memory);
-        }
-        ++state->waiter_count;
-    } catch (...) {
-        co_return make_error_code(errc::out_of_memory);
-    }
-    struct WaiterCountGuard final {
-        std::shared_ptr<State> state;
-        ~WaiterCountGuard() {
-            try {
-                std::lock_guard lk(state->mu);
-                --state->waiter_count;
-            } catch (...) {
-            }
-        }
-    } waiter_count_guard{state};
-
     std::error_code wait_ec{};
     try {
         auto ex = co_await asio::this_coro::executor;
@@ -188,8 +155,42 @@ Event::async_wait(std::optional<steady_clock::duration> timeout) {
         std::list<std::weak_ptr<asio::steady_timer>>::iterator it;
         {
             std::lock_guard lk(state->mu);
-            it = state->waiters.insert(state->waiters.end(), timer);
+
+            // 检查条件与登记 waiter 需要同锁完成，避免 set/cancel 在两步之间穿插造成丢唤醒。
+            if (state->signaled) {
+                co_return std::error_code{};
+            }
+
+            const auto max_waiters =
+                state->max_waiters == 0 ? std::size_t{1} : state->max_waiters;
+            if (state->waiter_count >= max_waiters) {
+                co_return make_error_code(errc::out_of_memory);
+            }
+            ++state->waiter_count;
+
+            // 记录当前 generation，用于在等待结束后判断“是 set/cancel
+            // 导致的唤醒”还是“超时/错误”。
+            local_set_gen = state->set_generation;
+            local_cancel_gen = state->cancel_generation;
+            try {
+                it = state->waiters.insert(state->waiters.end(), timer);
+            } catch (...) {
+                --state->waiter_count;
+                throw;
+            }
         }
+
+        struct WaiterCountGuard final {
+            std::shared_ptr<State> state;
+            ~WaiterCountGuard() {
+                try {
+                    std::lock_guard lk(state->mu);
+                    --state->waiter_count;
+                } catch (...) {
+                }
+            }
+        } waiter_count_guard{state};
+
         struct WaiterListGuard final {
             std::shared_ptr<State> state;
             std::list<std::weak_ptr<asio::steady_timer>>::iterator it;

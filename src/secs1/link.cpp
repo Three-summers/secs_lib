@@ -5,6 +5,7 @@
 #include "secs/secs1/timer.hpp"
 
 #include <deque>
+#include <mutex>
 
 namespace secs::secs1 {
 
@@ -21,6 +22,7 @@ namespace secs::secs1 {
  * 说明：该实现只用于测试场景，不追求高性能与强并发语义。
  */
 struct MemoryLink::Endpoint::SharedState final {
+    std::mutex mu{};
     secs::core::Event a_event{};
     secs::core::Event b_event{};
 
@@ -47,6 +49,7 @@ void MemoryLink::Endpoint::drop_next(std::size_t n) noexcept {
     if (!shared_) {
         return;
     }
+    std::lock_guard lk(shared_->mu);
     if (is_a_) {
         shared_->drop_a_to_b = n;
     } else {
@@ -59,6 +62,7 @@ void MemoryLink::Endpoint::set_fixed_delay(
     if (!shared_) {
         return;
     }
+    std::lock_guard lk(shared_->mu);
     if (is_a_) {
         shared_->delay_a_to_b = delay;
     } else {
@@ -73,7 +77,11 @@ MemoryLink::Endpoint::async_write(secs::core::bytes_view data) {
             secs::core::errc::invalid_argument);
     }
 
-    const auto delay = is_a_ ? shared_->delay_a_to_b : shared_->delay_b_to_a;
+    std::optional<secs::core::duration> delay{};
+    {
+        std::lock_guard lk(shared_->mu);
+        delay = is_a_ ? shared_->delay_a_to_b : shared_->delay_b_to_a;
+    }
     if (delay.has_value() && *delay != secs::core::duration::zero()) {
         Timer t(executor_);
         auto ec = co_await t.async_sleep(*delay);
@@ -82,21 +90,24 @@ MemoryLink::Endpoint::async_write(secs::core::bytes_view data) {
         }
     }
 
-    auto &out_queue = is_a_ ? shared_->a_to_b : shared_->b_to_a;
-    auto &out_event = is_a_ ? shared_->b_event : shared_->a_event;
-    auto &drop = is_a_ ? shared_->drop_a_to_b : shared_->drop_b_to_a;
-
     bool wrote_any = false;
-    for (const auto b : data) {
-        if (drop != 0) {
-            --drop;
-            continue;
+    {
+        std::lock_guard lk(shared_->mu);
+        auto &out_queue = is_a_ ? shared_->a_to_b : shared_->b_to_a;
+        auto &drop = is_a_ ? shared_->drop_a_to_b : shared_->drop_b_to_a;
+
+        for (const auto b : data) {
+            if (drop != 0) {
+                --drop;
+                continue;
+            }
+            out_queue.push_back(b);
+            wrote_any = true;
         }
-        out_queue.push_back(b);
-        wrote_any = true;
     }
 
     if (wrote_any) {
+        auto &out_event = is_a_ ? shared_->b_event : shared_->a_event;
         out_event.set();
     }
 
@@ -112,21 +123,30 @@ MemoryLink::Endpoint::async_read_byte(
             secs::core::byte{0}};
     }
 
-    auto &in_queue = is_a_ ? shared_->b_to_a : shared_->a_to_b;
-    auto &in_event = is_a_ ? shared_->a_event : shared_->b_event;
-
     for (;;) {
-        if (!in_queue.empty()) {
-            const auto b = in_queue.front();
-            in_queue.pop_front();
-            if (in_queue.empty()) {
-                // 队列被读空：复位事件，避免后续无意义的立即唤醒。
-                in_event.reset();
+        bool got_byte = false;
+        secs::core::byte out{0};
+        {
+            std::lock_guard lk(shared_->mu);
+            auto &in_queue = is_a_ ? shared_->b_to_a : shared_->a_to_b;
+            if (!in_queue.empty()) {
+                out = in_queue.front();
+                in_queue.pop_front();
+                if (in_queue.empty()) {
+                    auto &in_event = is_a_ ? shared_->a_event : shared_->b_event;
+                    // 与队列状态同锁更新，避免 set/reset 竞态导致丢唤醒。
+                    in_event.reset();
+                }
+                got_byte = true;
             }
-            co_return std::pair{std::error_code{}, b};
+        }
+
+        if (got_byte) {
+            co_return std::pair{std::error_code{}, out};
         }
 
         // 队列为空：等待对端写入并 set() 事件，或等待超时/取消。
+        auto &in_event = is_a_ ? shared_->a_event : shared_->b_event;
         auto ec = co_await in_event.async_wait(timeout);
         if (ec) {
             co_return std::pair{ec, secs::core::byte{0}};

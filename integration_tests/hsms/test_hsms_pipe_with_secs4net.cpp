@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cerrno>
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -79,6 +80,27 @@ struct UniqueFd final {
 #
 static std::error_code make_errno_ec() noexcept {
     return std::error_code(errno, std::generic_category());
+}
+#
+static bool has_required_dotnet_runtime() noexcept {
+    const std::string cmd =
+        std::string(SECS_HSMS_DOTNET_EXECUTABLE) +
+        " --list-runtimes 2>/dev/null";
+    FILE *fp = ::popen(cmd.c_str(), "r");
+    if (fp == nullptr) {
+        return false;
+    }
+
+    char line[512]{};
+    bool found = false;
+    while (::fgets(line, sizeof(line), fp) != nullptr) {
+        if (std::strstr(line, "Microsoft.NETCore.App 8.") != nullptr) {
+            found = true;
+            break;
+        }
+    }
+    const int rc = ::pclose(fp);
+    return found && rc == 0;
 }
 #
 static std::error_code set_nonblocking(int fd) noexcept {
@@ -590,6 +612,11 @@ static asio::awaitable<int> run_case_dotnet_active_cpp_passive() {
 }
 #
 asio::awaitable<int> run_all() {
+    if (!has_required_dotnet_runtime()) {
+        std::cerr << "[HSMS] 缺少 Microsoft.NETCore.App 8.x runtime，跳过\n";
+        co_return 77;
+    }
+
     // 用例 1：C++ 主动端 -> dotnet 被动端（含 LINKTEST + 请求响应）
     if (const int rc = co_await run_case_cpp_active_dotnet_passive(); rc != 0) {
         co_return rc;

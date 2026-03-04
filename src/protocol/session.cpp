@@ -439,17 +439,24 @@ asio::awaitable<void> Session::State::async_run_impl_() {
             // 从而出现“重连后已 selected 但再也收不到/处理不到业务消息”的现象。
             //
             // 因此这里不直接 stop，而是取消挂起请求后等待下一次 selected（除非本端已 stop）。
-            if (backend_ == Backend::hsms && hsms_ &&
-                hsms_->state() != secs::hsms::SessionState::selected &&
-                !stop_requested_) {
+            if (backend_ == Backend::hsms && hsms_ && !stop_requested_) {
                 cancel_all_pending_(ec);
 
-                const auto target_gen = hsms_->selected_generation() + 1U;
                 while (!stop_requested_) {
-                    // 用较长超时模拟“无限等待”，同时确保 stop() 能通过 cancel 及时唤醒。
+                    // 先快路径检查：若已恢复到 selected，则立即继续收包。
+                    if (hsms_->state() == secs::hsms::SessionState::selected) {
+                        break;
+                    }
+
+                    // 以“当前代次+1”为目标等待下一次 selected。
+                    // 注意：generation 读取必须放在循环内，避免错过已完成的重连代次。
+                    const auto target_gen = hsms_->selected_generation() + 1U;
+                    // 使用短周期等待而不是“超长单次等待”：
+                    // - 即使极端并发下错过一次 cancel/set，也会在下一轮 timeout 后重新检查 stop/状态；
+                    // - 避免 destroy/stop 在少数竞态下被单次长等待拖住。
                     const auto wait_ec =
-                        co_await hsms_->async_wait_selected(target_gen,
-                                                           std::chrono::hours{24});
+                        co_await hsms_->async_wait_selected(
+                            target_gen, std::chrono::milliseconds{200});
                     if (!wait_ec) {
                         break;
                     }
