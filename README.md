@@ -16,6 +16,7 @@
 - `secs::protocol`：统一 HSMS/SECS-I 的 `send/request/run`、请求-响应匹配、消息路由
 - `secs::sml`：SML 子集 + SMLX（占位符渲染、条件匹配、捕获、主动编码 body）
 - `secs::c_api`：C ABI（不透明句柄 + 阻塞式门面 + 统一错误码/内存契约）
+- 可选 RPC 依赖脚手架：`brpc` + `protobuf`（用于后续 gRPC 兼容协议接入）
 
 ---
 
@@ -109,6 +110,23 @@ cmake --build build --target examples -j
 3. 系统路径：默认 include 路径下存在 `spdlog/spdlog.h`
 4. 自动拉取：`-DSECS_FETCH_SPDLOG=ON`（需要网络；默认：顶层工程 ON，作为子项目 OFF）
 
+#### brpc 获取策略（可选 RPC）
+
+启用条件：`-DSECS_ENABLE_RPC=ON`
+
+优先级：
+
+1. vendored：`third_party/brpc/`（源码树）
+2. 外部指定：`-DSECS_BRPC_ROOT=/path/to/brpc-source-or-prefix`
+3. pkg-config：系统已安装 `brpc.pc`
+4. 自动拉取：`-DSECS_FETCH_BRPC=ON`（默认 OFF；仅拉取 brpc 源码；仍需系统提供 Protobuf/gflags/leveldb/OpenSSL）
+
+说明：
+
+- 当前阶段仅接入 RPC 依赖基础设施，不包含具体 RPC 服务实现；
+- 规划中的 RPC 层将基于 `brpc`，并使用 gRPC 兼容协议以便与其他语言集成；
+- 不计划引入 `libgrpc` 作为运行时硬依赖，`.proto` 生成仍由 `protobuf` 负责。
+
 ### 作为子项目集成（推荐）
 
 ```cmake
@@ -152,6 +170,7 @@ target_link_libraries(my_app PRIVATE secs::protocol)
 - `SECS_ENABLE_COVERAGE`：覆盖率辅助目标（默认 OFF）
 - `SECS_ENABLE_WERROR`：警告视为错误（默认：顶层工程 ON，作为子项目 OFF）
 - `SECS_ENABLE_INSTALL`：安装与 `find_package`（默认：顶层工程 ON，作为子项目 OFF）
+- `SECS_ENABLE_RPC`：启用 RPC 依赖脚手架（`brpc` + `protobuf`，默认 OFF）
 - `SECS_STATIC_CPP_RUNTIME`：静态链接 C++ 运行库（交叉编译默认 ON）
 - `SECS_FULLY_STATIC`：尽可能全静态（默认 OFF）
 

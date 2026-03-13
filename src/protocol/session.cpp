@@ -194,6 +194,10 @@ struct Session::State final : std::enable_shared_from_this<State> {
                std::uint8_t function,
                secs::core::bytes_view body);
     asio::awaitable<std::pair<std::error_code, DataMessage>>
+    async_send_primary(std::uint8_t stream,
+                       std::uint8_t function,
+                       secs::core::bytes_view body);
+    asio::awaitable<std::pair<std::error_code, DataMessage>>
     async_request(std::uint8_t stream,
                   std::uint8_t function,
                   secs::core::bytes_view body,
@@ -220,6 +224,10 @@ private:
     async_send_impl_(std::uint8_t stream,
                      std::uint8_t function,
                      secs::core::bytes_view body);
+    asio::awaitable<std::pair<std::error_code, DataMessage>>
+    async_send_primary_impl_(std::uint8_t stream,
+                             std::uint8_t function,
+                             secs::core::bytes_view body);
     asio::awaitable<std::pair<std::error_code, DataMessage>>
     async_request_impl_(std::uint8_t stream,
                         std::uint8_t function,
@@ -306,6 +314,17 @@ Session::async_send(std::uint8_t stream,
         co_return make_error_code(errc::invalid_argument);
     }
     co_return co_await state->async_send(stream, function, body);
+}
+
+asio::awaitable<std::pair<std::error_code, DataMessage>>
+Session::async_send_primary(std::uint8_t stream,
+                            std::uint8_t function,
+                            secs::core::bytes_view body) {
+    const auto state = state_;
+    if (!state) {
+        co_return std::pair{make_error_code(errc::invalid_argument), DataMessage{}};
+    }
+    co_return co_await state->async_send_primary(stream, function, body);
 }
 
 asio::awaitable<std::pair<std::error_code, DataMessage>>
@@ -539,8 +558,36 @@ asio::awaitable<std::error_code> Session::State::async_send(
     co_return co_await async_send_impl_(stream, function, body);
 }
 
+asio::awaitable<std::pair<std::error_code, DataMessage>>
+Session::State::async_send_primary(std::uint8_t stream,
+                                   std::uint8_t function,
+                                   secs::core::bytes_view body) {
+    const auto ex = co_await asio::this_coro::executor;
+    if (ex != executor_) {
+        try {
+            co_await asio::dispatch(executor_, asio::use_awaitable);
+        } catch (const std::bad_alloc &) {
+            co_return std::pair{make_error_code(errc::out_of_memory), DataMessage{}};
+        } catch (...) {
+            co_return std::pair{make_error_code(errc::invalid_argument),
+                                DataMessage{}};
+        }
+    }
+
+    co_return co_await async_send_primary_impl_(stream, function, body);
+}
+
 asio::awaitable<std::error_code> Session::State::async_send_impl_(
     std::uint8_t stream, std::uint8_t function, secs::core::bytes_view body) {
+    auto [ec, ignored] = co_await async_send_primary_impl_(stream, function, body);
+    (void)ignored;
+    co_return ec;
+}
+
+asio::awaitable<std::pair<std::error_code, DataMessage>>
+Session::State::async_send_primary_impl_(std::uint8_t stream,
+                                         std::uint8_t function,
+                                         secs::core::bytes_view body) {
     static constexpr const char *kCalls = "secs.protocol.send.calls";
     static constexpr const char *kOk = "secs.protocol.send.ok";
     static constexpr const char *kErrors = "secs.protocol.send.errors";
@@ -552,14 +599,14 @@ asio::awaitable<std::error_code> Session::State::async_send_impl_(
 
     if (!is_valid_stream(stream) || !is_primary_function(function)) {
         secs::core::metrics_counter(kErrors, 1);
-        co_return make_error_code(errc::invalid_argument);
+        co_return std::pair{make_error_code(errc::invalid_argument), DataMessage{}};
     }
 
     std::uint32_t sb = 0;
     auto alloc_ec = system_bytes_.allocate(sb);
     if (alloc_ec) {
         secs::core::metrics_counter(kErrors, 1);
-        co_return alloc_ec;
+        co_return std::pair{alloc_ec, DataMessage{}};
     }
 
     DataMessage msg{};
@@ -588,7 +635,7 @@ asio::awaitable<std::error_code> Session::State::async_send_impl_(
         secs::core::metrics_counter(kOk, 1);
     }
     system_bytes_.release(sb);
-    co_return ec;
+    co_return std::pair{ec, std::move(msg)};
 }
 
 asio::awaitable<std::pair<std::error_code, DataMessage>>

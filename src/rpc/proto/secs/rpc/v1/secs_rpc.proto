@@ -1,0 +1,225 @@
+syntax = "proto2";
+
+package secs.rpc.v1;
+
+option cc_generic_services = true;
+
+message RpcError {
+  optional string category = 1;
+  optional int32 value = 2;
+  optional string message = 3;
+}
+
+message RpcStatus {
+  optional bool ok = 1 [default = true];
+  optional RpcError error = 2;
+}
+
+enum TransportKind {
+  TRANSPORT_KIND_UNSPECIFIED = 0;
+  TRANSPORT_KIND_HSMS = 1;
+  TRANSPORT_KIND_SECS1 = 2;
+}
+
+enum SessionState {
+  SESSION_STATE_UNSPECIFIED = 0;
+  SESSION_STATE_CREATED = 1;
+  SESSION_STATE_RUNNING = 2;
+  SESSION_STATE_STOPPED = 3;
+}
+
+enum ItemType {
+  ITEM_TYPE_UNSPECIFIED = 0;
+  ITEM_TYPE_LIST = 1;
+  ITEM_TYPE_ASCII = 2;
+  ITEM_TYPE_BINARY = 3;
+  ITEM_TYPE_BOOLEAN = 4;
+  ITEM_TYPE_I1 = 5;
+  ITEM_TYPE_I2 = 6;
+  ITEM_TYPE_I4 = 7;
+  ITEM_TYPE_I8 = 8;
+  ITEM_TYPE_U1 = 9;
+  ITEM_TYPE_U2 = 10;
+  ITEM_TYPE_U4 = 11;
+  ITEM_TYPE_U8 = 12;
+  ITEM_TYPE_F4 = 13;
+  ITEM_TYPE_F8 = 14;
+}
+
+message HsmsConfig {
+  optional string ip = 1;
+  optional uint32 port = 2;
+  optional uint32 session_id = 3;
+  optional bool passive = 4;
+  optional bool auto_reconnect = 5;
+  optional uint32 t3_ms = 6;
+  optional uint32 t5_ms = 7;
+  optional uint32 t6_ms = 8;
+  optional uint32 t7_ms = 9;
+  optional uint32 t8_ms = 10;
+}
+
+message Secs1Config {
+  optional string serial_path = 1;
+  optional int32 baud = 2;
+  optional uint32 device_id = 3;
+  optional bool reverse_bit = 4;
+  optional bool equipment_role = 5;
+}
+
+message TransportConfig {
+  optional TransportKind kind = 1;
+  optional HsmsConfig hsms = 2;
+  optional Secs1Config secs1 = 3;
+}
+
+message SessionRuntimeConfig {
+  optional uint32 request_timeout_ms = 1;
+  optional uint32 poll_interval_ms = 2;
+  optional uint32 max_pending_requests = 3;
+  optional bool enable_dump = 4;
+  optional bool dump_tx = 5;
+  optional bool dump_rx = 6;
+  optional bool enable_secs2_decode_in_dump = 7;
+}
+
+message SessionInfo {
+  optional string session_id = 1;
+  optional string name = 2;
+  optional SessionState state = 3;
+  optional bool running = 4;
+  optional uint64 selected_generation = 5;
+  optional TransportConfig transport = 6;
+  optional SessionRuntimeConfig runtime = 7;
+  optional RpcError last_error = 8;
+}
+
+message ItemNode {
+  optional ItemType type = 1;
+  repeated ItemNode items = 2;
+  optional string ascii_value = 3;
+  optional bytes binary_value = 4;
+  repeated bool bool_values = 5;
+  repeated sint32 i1_values = 6;
+  repeated sint32 i2_values = 7;
+  repeated sint32 i4_values = 8;
+  repeated sint64 i8_values = 9;
+  repeated uint32 u1_values = 10;
+  repeated uint32 u2_values = 11;
+  repeated uint32 u4_values = 12;
+  repeated uint64 u8_values = 13;
+  repeated float f4_values = 14;
+  repeated double f8_values = 15;
+}
+
+message MessageEnvelope {
+  optional uint32 stream = 1;
+  optional uint32 function = 2;
+  optional bool w_bit = 3;
+  optional uint32 system_bytes = 4;
+  optional bytes body = 5;
+  optional ItemNode decoded_item = 6;
+}
+
+message GetLibraryInfoRequest {}
+
+message GetLibraryInfoResponse {
+  optional RpcStatus status = 1;
+  optional string version = 2;
+  repeated string supported_transports = 3;
+  repeated string supported_features = 4;
+}
+
+message CreateSessionRequest {
+  optional string name = 1;
+  optional TransportConfig transport = 2;
+  optional SessionRuntimeConfig runtime = 3;
+}
+
+message CreateSessionResponse {
+  optional RpcStatus status = 1;
+  optional SessionInfo session = 2;
+}
+
+message GetSessionRequest {
+  optional string session_id = 1;
+}
+
+message GetSessionResponse {
+  optional RpcStatus status = 1;
+  optional SessionInfo session = 2;
+}
+
+message ListSessionsRequest {}
+
+message ListSessionsResponse {
+  optional RpcStatus status = 1;
+  repeated SessionInfo sessions = 2;
+}
+
+message StartSessionRequest {
+  optional string session_id = 1;
+}
+
+message StartSessionResponse {
+  optional RpcStatus status = 1;
+  optional SessionInfo session = 2;
+}
+
+message StopSessionRequest {
+  optional string session_id = 1;
+  optional string reason = 2;
+}
+
+message StopSessionResponse {
+  optional RpcStatus status = 1;
+  optional SessionInfo session = 2;
+}
+
+message DeleteSessionRequest {
+  optional string session_id = 1;
+}
+
+message DeleteSessionResponse {
+  optional RpcStatus status = 1;
+  optional SessionInfo session = 2;
+}
+
+message SendRequest {
+  optional string session_id = 1;
+  optional MessageEnvelope message = 2;
+}
+
+message SendResponse {
+  optional RpcStatus status = 1;
+  optional MessageEnvelope accepted = 2;
+}
+
+message RequestRequest {
+  optional string session_id = 1;
+  optional MessageEnvelope request = 2;
+  optional uint32 timeout_ms = 3;
+}
+
+message RequestResponse {
+  optional RpcStatus status = 1;
+  optional MessageEnvelope reply = 2;
+}
+
+service LibraryService {
+  rpc GetLibraryInfo(GetLibraryInfoRequest) returns (GetLibraryInfoResponse);
+}
+
+service SessionService {
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc StartSession(StartSessionRequest) returns (StartSessionResponse);
+  rpc StopSession(StopSessionRequest) returns (StopSessionResponse);
+  rpc DeleteSession(DeleteSessionRequest) returns (DeleteSessionResponse);
+}
+
+service MessagingService {
+  rpc Send(SendRequest) returns (SendResponse);
+  rpc Request(RequestRequest) returns (RequestResponse);
+}

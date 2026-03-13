@@ -21,6 +21,7 @@ option(SECS_BUILD_EXAMPLES "Build example programs" ${SECS_PROJECT_IS_TOP_LEVEL}
 option(SECS_BUILD_TOOLS "Build CLI tools" ${SECS_PROJECT_IS_TOP_LEVEL})
 option(SECS_BUILD_BENCHMARKS "Build performance benchmarks" OFF)
 option(SECS_ENABLE_WERROR "Treat warnings as errors" ${SECS_PROJECT_IS_TOP_LEVEL})
+option(SECS_ENABLE_RPC "Enable RPC dependency scaffolding (brpc + protobuf)" OFF)
 
 option(SECS_ENABLE_INSTALL "Enable install() rules and find_package() config" ${SECS_PROJECT_IS_TOP_LEVEL})
 
@@ -279,6 +280,56 @@ foreach(secs_target IN ITEMS secs_core secs_secs1 secs_hsms secs_protocol secs_c
   secs_link_spdlog(${secs_target})
 endforeach()
 
+if(SECS_ENABLE_RPC)
+  find_package(Protobuf REQUIRED)
+
+  if(NOT TARGET secs_protobuf)
+    add_library(secs_protobuf INTERFACE)
+    add_library(secs::protobuf ALIAS secs_protobuf)
+    target_compile_features(secs_protobuf INTERFACE cxx_std_20)
+
+    if(TARGET protobuf::libprotobuf)
+      target_link_libraries(secs_protobuf INTERFACE protobuf::libprotobuf)
+    elseif(TARGET protobuf::protobuf)
+      target_link_libraries(secs_protobuf INTERFACE protobuf::protobuf)
+    else()
+      if(DEFINED Protobuf_INCLUDE_DIRS AND NOT "${Protobuf_INCLUDE_DIRS}" STREQUAL "")
+        target_include_directories(secs_protobuf SYSTEM INTERFACE "${Protobuf_INCLUDE_DIRS}")
+      elseif(DEFINED PROTOBUF_INCLUDE_DIRS AND NOT "${PROTOBUF_INCLUDE_DIRS}" STREQUAL "")
+        target_include_directories(secs_protobuf SYSTEM INTERFACE "${PROTOBUF_INCLUDE_DIRS}")
+      endif()
+
+      if(DEFINED Protobuf_LIBRARIES AND NOT "${Protobuf_LIBRARIES}" STREQUAL "")
+        target_link_libraries(secs_protobuf INTERFACE "${Protobuf_LIBRARIES}")
+      elseif(DEFINED PROTOBUF_LIBRARIES AND NOT "${PROTOBUF_LIBRARIES}" STREQUAL "")
+        target_link_libraries(secs_protobuf INTERFACE "${PROTOBUF_LIBRARIES}")
+      else()
+        message(FATAL_ERROR
+          "Protobuf was found, but no usable CMake target or library list is available.\n"
+          "Expected protobuf::libprotobuf / protobuf::protobuf / Protobuf_LIBRARIES.\n"
+        )
+      endif()
+    endif()
+  endif()
+
+  include("${PROJECT_SOURCE_DIR}/cmake/BRPC.cmake")
+  secs_ensure_brpc_target()
+
+  if(NOT TARGET secs_rpc_deps)
+    add_library(secs_rpc_deps INTERFACE)
+    target_compile_features(secs_rpc_deps INTERFACE cxx_std_20)
+    target_link_libraries(secs_rpc_deps INTERFACE
+      secs_protocol
+      secs_sml
+      secs_utils
+      secs_protobuf
+      secs_brpc
+    )
+  endif()
+
+  add_subdirectory(src/rpc)
+endif()
+
 include(CodeCoverage)
 
 # 覆盖率：只对库添加编译标志（不加链接标志，避免污染示例和用户代码）
@@ -292,6 +343,9 @@ if(SECS_ENABLE_COVERAGE)
   secs_enable_coverage_compile(secs_utils)
   secs_enable_coverage_compile(secs_tools)
   secs_enable_coverage_compile(secs_c_api)
+  if(TARGET secs_rpc)
+    secs_enable_coverage_compile(secs_rpc)
+  endif()
 endif()
 
 if(SECS_ENABLE_TESTS OR SECS_ENABLE_INTEGRATION_TESTS)

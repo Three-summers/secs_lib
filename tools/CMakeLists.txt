@@ -20,6 +20,13 @@ add_executable(secs-hsms-bulk
 )
 target_link_libraries(secs-hsms-bulk PRIVATE secs_hsms secs_utils)
 
+if(TARGET secs_rpc)
+  add_executable(secs-rpc-server
+    secs_rpc_server.cpp
+  )
+  target_link_libraries(secs-rpc-server PRIVATE secs_rpc)
+endif()
+
 if(SECS_ENABLE_INSTALL)
   install(TARGETS secs-sml-check
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
@@ -30,4 +37,9 @@ if(SECS_ENABLE_INSTALL)
   install(TARGETS secs-hsms-bulk
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   )
+  if(TARGET secs-rpc-server)
+    install(TARGETS secs-rpc-server
+      RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+  endif()
 endif()

@@ -151,6 +151,29 @@ if(TARGET secs-sml-check)
   )
 endif()
 
+if(TARGET secs_rpc)
+  add_executable(test_rpc_hsms_peer test_rpc_hsms_peer.cpp)
+  target_link_libraries(test_rpc_hsms_peer PRIVATE secs_protocol)
+
+  add_executable(test_rpc_smoke test_rpc_smoke.cpp)
+  target_link_libraries(test_rpc_smoke PRIVATE secs_rpc)
+  add_test(NAME rpc_smoke COMMAND test_rpc_smoke)
+endif()
+
+if(TARGET secs-rpc-server AND TARGET test_rpc_hsms_peer AND Python3_Interpreter_FOUND)
+  add_test(NAME rpc_python_interop
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/test_rpc_python_interop.py
+      --server $<TARGET_FILE:secs-rpc-server>
+      --peer $<TARGET_FILE:test_rpc_hsms_peer>
+      --proto ${PROJECT_SOURCE_DIR}/src/rpc/proto/secs/rpc/v1/secs_rpc.proto
+  )
+  set_tests_properties(rpc_python_interop PROPERTIES
+    SKIP_RETURN_CODE 77
+    TIMEOUT 30
+  )
+endif()
+
 if(SECS_ENABLE_COVERAGE)
   secs_enable_coverage(test_core_buffer)
   secs_enable_coverage(test_core_event)
@@ -183,6 +206,9 @@ if(SECS_ENABLE_COVERAGE)
   secs_enable_coverage(test_tools_sml_check)
   secs_enable_coverage(test_ceid_layer)
   secs_enable_coverage(test_c_api_c)
+  if(TARGET test_rpc_smoke)
+    secs_enable_coverage(test_rpc_smoke)
+  endif()
   if(TARGET test_hsms_pipe_examples)
     secs_enable_coverage(test_hsms_pipe_examples)
   endif()

@@ -173,6 +173,12 @@ public:
                                                 std::uint8_t function,
                                                 secs::core::bytes_view body);
 
+    // 发送主消息（W=0，不等待回应），并返回实际发出的消息头（含 system_bytes）。
+    asio::awaitable<std::pair<std::error_code, DataMessage>>
+    async_send_primary(std::uint8_t stream,
+                       std::uint8_t function,
+                       secs::core::bytes_view body);
+
     // 发送主消息（W=1）并等待从消息（T3 超时）。
     asio::awaitable<std::pair<std::error_code, DataMessage>>
     async_request(std::uint8_t stream,

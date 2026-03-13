@@ -52,3 +52,5 @@ oom-*
 timeout-*
 verification.md
 coverage*
+__pycache__
+.cache
