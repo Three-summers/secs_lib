@@ -6,6 +6,7 @@
 #include "secs/ii/item.hpp"
 #include "secs/protocol/session.hpp"
 #include "secs/rpc/contracts.hpp"
+#include "rpc/internal.hpp"
 #include "secs/secs1/serial_port_link.hpp"
 #include "secs/secs1/state_machine.hpp"
 #include "secs/secs1/timer.hpp"
@@ -25,6 +26,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <exception>
 #include <future>
 #include <limits>
@@ -424,121 +426,93 @@ std::string next_session_id(std::uint64_t sequence) {
     return "rpc-session-" + std::to_string(sequence);
 }
 
-struct SessionRecord final : std::enable_shared_from_this<SessionRecord> {
-    SessionRecord(std::string session_id_value,
-                  std::string session_name,
-                  const v1::TransportConfig &transport_config,
-                  const v1::SessionRuntimeConfig &runtime_config)
-        : id(std::move(session_id_value)),
-          name(std::move(session_name)),
-          transport(transport_config),
-          runtime(runtime_config) {}
+} // namespace
 
-    std::string id;
-    std::string name;
-    v1::TransportConfig transport;
-    v1::SessionRuntimeConfig runtime;
+namespace detail {
 
-    std::mutex state_mu{};
-    std::mutex invoke_mu{};
-    v1::SessionState state{v1::SESSION_STATE_CREATED};
-    bool deleted{false};
-    bool has_last_error{false};
-    v1::RpcError last_error{};
-    std::uint64_t selected_generation_cache{0};
+SessionRecord::SessionRecord(std::string session_id_value,
+                             std::string session_name,
+                             const v1::TransportConfig &transport_config,
+                             const v1::SessionRuntimeConfig &runtime_config)
+    : id(std::move(session_id_value)),
+      name(std::move(session_name)),
+      transport(transport_config),
+      runtime(runtime_config) {}
 
-    std::unique_ptr<asio::io_context> io{};
-    std::optional<asio::executor_work_guard<asio::io_context::executor_type>>
-        work_guard{};
-    std::thread worker{};
+void SessionRecord::clear_last_error_locked() {
+    has_last_error = false;
+    last_error.Clear();
+}
 
-    std::unique_ptr<secs::protocol::Session> protocol{};
-    std::unique_ptr<secs::hsms::Session> hsms{};
-    std::unique_ptr<asio::ip::tcp::acceptor> acceptor{};
-    std::unique_ptr<secs::secs1::Link> secs1_link{};
-    std::unique_ptr<secs::secs1::StateMachine> secs1_state_machine{};
+void SessionRecord::set_last_error_locked(const std::error_code &ec,
+                                          std::string_view override_message) {
+    has_last_error = true;
+    fill_rpc_error(&last_error, ec, override_message);
+}
 
-    void clear_last_error_locked() {
-        has_last_error = false;
-        last_error.Clear();
+v1::SessionInfo SessionRecord::snapshot_locked() {
+    v1::SessionInfo info;
+    info.set_session_id(id);
+    info.set_name(name);
+    info.set_state(state);
+    info.set_running(state == v1::SESSION_STATE_RUNNING);
+    if (hsms) {
+        selected_generation_cache = hsms->selected_generation();
     }
-
-    void set_last_error_locked(const std::error_code &ec,
-                               std::string_view override_message = {}) {
-        has_last_error = true;
-        fill_rpc_error(&last_error, ec, override_message);
+    info.set_selected_generation(selected_generation_cache);
+    *info.mutable_transport() = transport;
+    *info.mutable_runtime() = runtime;
+    if (has_last_error) {
+        *info.mutable_last_error() = last_error;
     }
+    return info;
+}
 
-    v1::SessionInfo snapshot_locked() {
-        v1::SessionInfo info;
-        info.set_session_id(id);
-        info.set_name(name);
-        info.set_state(state);
-        info.set_running(state == v1::SESSION_STATE_RUNNING);
-        if (hsms) {
-            selected_generation_cache = hsms->selected_generation();
-        }
-        info.set_selected_generation(selected_generation_cache);
-        *info.mutable_transport() = transport;
-        *info.mutable_runtime() = runtime;
-        if (has_last_error) {
-            *info.mutable_last_error() = last_error;
-        }
-        return info;
+v1::SessionInfo SessionRecord::snapshot() {
+    std::lock_guard lk(state_mu);
+    return snapshot_locked();
+}
+
+std::shared_ptr<SessionRecord>
+SessionRegistry::create(const v1::CreateSessionRequest &request,
+                        const std::string &session_id,
+                        const std::string &session_name) {
+    auto record = std::make_shared<SessionRecord>(
+        session_id, session_name, request.transport(), request.runtime());
+    std::lock_guard lk(mu_);
+    sessions_.emplace(session_id, record);
+    return record;
+}
+
+std::shared_ptr<SessionRecord>
+SessionRegistry::find(std::string_view session_id) const {
+    std::lock_guard lk(mu_);
+    const auto it = sessions_.find(std::string(session_id));
+    if (it == sessions_.end()) {
+        return nullptr;
     }
+    return it->second;
+}
 
-    v1::SessionInfo snapshot() {
-        std::lock_guard lk(state_mu);
-        return snapshot_locked();
+std::vector<std::shared_ptr<SessionRecord>> SessionRegistry::list() const {
+    std::vector<std::shared_ptr<SessionRecord>> records;
+    std::lock_guard lk(mu_);
+    records.reserve(sessions_.size());
+    for (const auto &[_, record] : sessions_) {
+        records.push_back(record);
     }
-};
+    std::sort(records.begin(),
+              records.end(),
+              [](const auto &lhs, const auto &rhs) {
+                  return lhs->id < rhs->id;
+              });
+    return records;
+}
 
-class SessionRegistry final {
-public:
-    std::shared_ptr<SessionRecord>
-    create(const v1::CreateSessionRequest &request,
-           const std::string &session_id,
-           const std::string &session_name) {
-        auto record = std::make_shared<SessionRecord>(
-            session_id, session_name, request.transport(), request.runtime());
-        std::lock_guard lk(mu_);
-        sessions_.emplace(session_id, record);
-        return record;
-    }
-
-    std::shared_ptr<SessionRecord> find(std::string_view session_id) const {
-        std::lock_guard lk(mu_);
-        const auto it = sessions_.find(std::string(session_id));
-        if (it == sessions_.end()) {
-            return nullptr;
-        }
-        return it->second;
-    }
-
-    std::vector<std::shared_ptr<SessionRecord>> list() const {
-        std::vector<std::shared_ptr<SessionRecord>> records;
-        std::lock_guard lk(mu_);
-        records.reserve(sessions_.size());
-        for (const auto &[_, record] : sessions_) {
-            records.push_back(record);
-        }
-        std::sort(records.begin(),
-                  records.end(),
-                  [](const auto &lhs, const auto &rhs) {
-                      return lhs->id < rhs->id;
-                  });
-        return records;
-    }
-
-    bool erase(std::string_view session_id) {
-        std::lock_guard lk(mu_);
-        return sessions_.erase(std::string(session_id)) != 0U;
-    }
-
-private:
-    mutable std::mutex mu_{};
-    std::unordered_map<std::string, std::shared_ptr<SessionRecord>> sessions_{};
-};
+bool SessionRegistry::erase(std::string_view session_id) {
+    std::lock_guard lk(mu_);
+    return sessions_.erase(std::string(session_id)) != 0U;
+}
 
 Duration milliseconds_to_duration(std::uint32_t value) {
     return std::chrono::milliseconds{value};
@@ -670,6 +644,10 @@ std::error_code validate_transport_config(const v1::TransportConfig &transport,
             detail.assign("hsms.ip must be a valid IP address");
             return address_ec;
         }
+        if (config.has_session_id() && config.session_id() > 0x7FFFU) {
+            detail.assign("hsms.session_id must be in range [0, 32767]");
+            return std::make_error_code(std::errc::invalid_argument);
+        }
         return {};
     }
     case v1::TRANSPORT_KIND_SECS1: {
@@ -758,6 +736,75 @@ void stop_runtime(SessionRecord &record) {
     clear_runtime_objects(record);
 }
 
+void wait_for_no_active_calls(SessionRecord &record) {
+    std::unique_lock lk(record.state_mu);
+    record.rpc_calls_cv.wait(lk, [&record] {
+        return record.active_rpc_calls == 0U;
+    });
+}
+
+std::error_code begin_message_call(SessionRecord &record,
+                                   secs::protocol::Session *&protocol_out,
+                                   asio::io_context *&io_out,
+                                   std::string &detail) {
+    std::lock_guard lk(record.state_mu);
+    if (record.deleted) {
+        detail.assign("session not found");
+        return std::make_error_code(std::errc::no_such_file_or_directory);
+    }
+    if (record.state != v1::SESSION_STATE_RUNNING || !record.protocol ||
+        !record.io) {
+        detail.assign("session is not running");
+        return std::make_error_code(std::errc::operation_not_permitted);
+    }
+    if (!record.accepting_rpc_calls) {
+        detail.assign("session is stopping");
+        return std::make_error_code(std::errc::operation_canceled);
+    }
+
+    ++record.active_rpc_calls;
+    protocol_out = record.protocol.get();
+    io_out = record.io.get();
+    return {};
+}
+
+void end_message_call(SessionRecord &record) noexcept {
+    std::lock_guard lk(record.state_mu);
+    if (record.active_rpc_calls == 0U) {
+        return;
+    }
+    --record.active_rpc_calls;
+    if (record.active_rpc_calls == 0U) {
+        record.rpc_calls_cv.notify_all();
+    }
+}
+
+bool requires_serial_message_calls(const SessionRecord &record) noexcept {
+    return record.transport.kind() == v1::TRANSPORT_KIND_SECS1;
+}
+
+void shutdown_record(SessionRecord &record) {
+    std::lock_guard invoke_lk(record.invoke_mu);
+    {
+        std::lock_guard state_lk(record.state_mu);
+        record.accepting_rpc_calls = false;
+        if (record.hsms) {
+            record.selected_generation_cache = record.hsms->selected_generation();
+        }
+        if (record.state == v1::SESSION_STATE_RUNNING) {
+            record.state = v1::SESSION_STATE_STOPPED;
+        }
+    }
+    wait_for_no_active_calls(record);
+    stop_runtime(record);
+}
+
+void shutdown_registry(SessionRegistry &registry) {
+    for (const auto &record : registry.list()) {
+        shutdown_record(*record);
+    }
+}
+
 void mark_background_exit(const std::shared_ptr<SessionRecord> &record,
                           const std::error_code &ec) {
     {
@@ -766,6 +813,7 @@ void mark_background_exit(const std::shared_ptr<SessionRecord> &record,
             record->selected_generation_cache = record->hsms->selected_generation();
         }
         record->state = v1::SESSION_STATE_STOPPED;
+        record->accepting_rpc_calls = false;
         if (ec && ec != std::make_error_code(std::errc::operation_canceled) &&
             ec != secs::core::make_error_code(secs::core::errc::cancelled)) {
             record->set_last_error_locked(ec);
@@ -946,6 +994,55 @@ std::error_code start_session_runtime(const std::shared_ptr<SessionRecord> &reco
     }
 }
 
+} // namespace detail
+
+namespace {
+
+using detail::SessionRecord;
+using detail::SessionRegistry;
+using detail::begin_message_call;
+using detail::cleanup_finished_worker;
+using detail::end_message_call;
+using detail::requires_serial_message_calls;
+using detail::shutdown_registry;
+using detail::stop_runtime;
+using detail::validate_transport_config;
+using detail::wait_for_no_active_calls;
+
+class ActiveRpcCallGuard final {
+public:
+    explicit ActiveRpcCallGuard(SessionRecord &record) noexcept
+        : record_(&record) {}
+
+    ActiveRpcCallGuard(const ActiveRpcCallGuard &) = delete;
+    ActiveRpcCallGuard &operator=(const ActiveRpcCallGuard &) = delete;
+
+    ActiveRpcCallGuard(ActiveRpcCallGuard &&other) noexcept
+        : record_(std::exchange(other.record_, nullptr)) {}
+
+    ActiveRpcCallGuard &operator=(ActiveRpcCallGuard &&other) noexcept {
+        if (this == &other) {
+            return *this;
+        }
+        release();
+        record_ = std::exchange(other.record_, nullptr);
+        return *this;
+    }
+
+    ~ActiveRpcCallGuard() { release(); }
+
+    void release() noexcept {
+        if (!record_) {
+            return;
+        }
+        end_message_call(*record_);
+        record_ = nullptr;
+    }
+
+private:
+    SessionRecord *record_{nullptr};
+};
+
 class LibraryServiceImpl final : public v1::LibraryService {
 public:
     void GetLibraryInfo(::google::protobuf::RpcController *controller,
@@ -1067,8 +1164,6 @@ public:
         }
 
         std::lock_guard invoke_lk(record->invoke_mu);
-        cleanup_finished_worker(*record);
-
         {
             std::lock_guard state_lk(record->state_mu);
             if (record->deleted) {
@@ -1083,16 +1178,20 @@ public:
                 return;
             }
             record->clear_last_error_locked();
-            record->state = v1::SESSION_STATE_RUNNING;
+            record->accepting_rpc_calls = false;
         }
 
+        wait_for_no_active_calls(*record);
+        cleanup_finished_worker(*record);
+
         std::string detail;
-        const auto ec = start_session_runtime(record, detail);
+        const auto ec = detail::start_session_runtime(record, detail);
         if (ec) {
             stop_runtime(*record);
             {
                 std::lock_guard state_lk(record->state_mu);
                 record->state = v1::SESSION_STATE_STOPPED;
+                record->accepting_rpc_calls = false;
                 record->set_last_error_locked(ec, detail);
                 fill_error_status(response->mutable_status(), ec, detail);
                 *response->mutable_session() = record->snapshot_locked();
@@ -1100,8 +1199,13 @@ public:
             return;
         }
 
-        fill_ok_status(response->mutable_status());
-        *response->mutable_session() = record->snapshot();
+        {
+            std::lock_guard state_lk(record->state_mu);
+            record->state = v1::SESSION_STATE_RUNNING;
+            record->accepting_rpc_calls = true;
+            fill_ok_status(response->mutable_status());
+            *response->mutable_session() = record->snapshot_locked();
+        }
     }
 
     void StopSession(::google::protobuf::RpcController *controller,
@@ -1120,6 +1224,7 @@ public:
         }
 
         std::lock_guard invoke_lk(record->invoke_mu);
+        bool was_running = false;
         {
             std::lock_guard state_lk(record->state_mu);
             if (record->deleted) {
@@ -1131,15 +1236,15 @@ public:
             if (record->hsms) {
                 record->selected_generation_cache = record->hsms->selected_generation();
             }
-            if (record->state != v1::SESSION_STATE_RUNNING) {
-                fill_ok_status(response->mutable_status());
-                *response->mutable_session() = record->snapshot_locked();
-                return;
+            was_running = record->state == v1::SESSION_STATE_RUNNING;
+            record->accepting_rpc_calls = false;
+            if (was_running) {
+                record->state = v1::SESSION_STATE_STOPPED;
+                record->clear_last_error_locked();
             }
-            record->state = v1::SESSION_STATE_STOPPED;
-            record->clear_last_error_locked();
         }
 
+        wait_for_no_active_calls(*record);
         stop_runtime(*record);
 
         fill_ok_status(response->mutable_status());
@@ -1167,12 +1272,14 @@ public:
             {
                 std::lock_guard state_lk(record->state_mu);
                 record->deleted = true;
+                record->accepting_rpc_calls = false;
                 if (record->hsms) {
                     record->selected_generation_cache =
                         record->hsms->selected_generation();
                 }
                 record->state = v1::SESSION_STATE_STOPPED;
             }
+            wait_for_no_active_calls(*record);
             stop_runtime(*record);
             deleted_info = record->snapshot();
         }
@@ -1227,36 +1334,31 @@ public:
             return;
         }
 
-        std::lock_guard invoke_lk(record->invoke_mu);
-        {
-            std::lock_guard state_lk(record->state_mu);
-            if (record->deleted) {
-                set_error(response,
-                          std::make_error_code(std::errc::no_such_file_or_directory),
-                          "session not found");
-                return;
-            }
-            if (record->state != v1::SESSION_STATE_RUNNING || !record->protocol ||
-                !record->io) {
-                set_error(response,
-                          std::make_error_code(std::errc::operation_not_permitted),
-                          "session is not running");
-                return;
-            }
+        secs::protocol::Session *protocol = nullptr;
+        asio::io_context *io = nullptr;
+        ec = begin_message_call(*record, protocol, io, detail);
+        if (ec) {
+            set_error(response, ec, detail);
+            return;
+        }
+        ActiveRpcCallGuard call_guard(*record);
+        std::unique_lock<std::mutex> transport_call_lk;
+        if (requires_serial_message_calls(*record)) {
+            transport_call_lk = std::unique_lock<std::mutex>(record->transport_call_mu);
         }
 
         std::pair<std::error_code, secs::protocol::DataMessage> send_result{};
         try {
-            send_result = run_on_executor<
+            send_result = detail::run_on_executor<
                 std::pair<std::error_code, secs::protocol::DataMessage>>(
-                *record->io,
-                [record,
+                *io,
+                [protocol,
                  stream = static_cast<std::uint8_t>(request->message().stream()),
                  function = static_cast<std::uint8_t>(request->message().function()),
                  body = std::move(body)]() mutable
                     -> asio::awaitable<std::pair<std::error_code,
                                                  secs::protocol::DataMessage>> {
-                    co_return co_await record->protocol->async_send_primary(
+                    co_return co_await protocol->async_send_primary(
                         stream,
                         function,
                         secs::core::bytes_view{body.data(), body.size()});
@@ -1310,36 +1412,32 @@ public:
             return;
         }
 
-        std::lock_guard invoke_lk(record->invoke_mu);
-        {
-            std::lock_guard state_lk(record->state_mu);
-            if (record->deleted) {
-                set_error(response,
-                          std::make_error_code(std::errc::no_such_file_or_directory),
-                          "session not found");
-                return;
-            }
-            if (record->state != v1::SESSION_STATE_RUNNING || !record->protocol ||
-                !record->io) {
-                set_error(response,
-                          std::make_error_code(std::errc::operation_not_permitted),
-                          "session is not running");
-                return;
-            }
+        secs::protocol::Session *protocol = nullptr;
+        asio::io_context *io = nullptr;
+        ec = begin_message_call(*record, protocol, io, detail);
+        if (ec) {
+            set_error(response, ec, detail);
+            return;
+        }
+        ActiveRpcCallGuard call_guard(*record);
+        std::unique_lock<std::mutex> transport_call_lk;
+        if (requires_serial_message_calls(*record)) {
+            transport_call_lk = std::unique_lock<std::mutex>(record->transport_call_mu);
         }
 
         std::pair<std::error_code, secs::protocol::DataMessage> result{};
         try {
-            result = run_on_executor<std::pair<std::error_code, secs::protocol::DataMessage>>(
-                *record->io,
-                [record,
+            result = detail::run_on_executor<
+                std::pair<std::error_code, secs::protocol::DataMessage>>(
+                *io,
+                [protocol,
                  timeout = effective_request_timeout(*record, *request),
                  stream = static_cast<std::uint8_t>(request->request().stream()),
                  function = static_cast<std::uint8_t>(request->request().function()),
                  body = std::move(body)]() mutable
                     -> asio::awaitable<std::pair<std::error_code,
                                                  secs::protocol::DataMessage>> {
-                    co_return co_await record->protocol->async_request(
+                    co_return co_await protocol->async_request(
                         stream,
                         function,
                         secs::core::bytes_view{body.data(), body.size()},
@@ -1457,6 +1555,7 @@ void Server::join() noexcept {
         return;
     }
     impl_->server.Join();
+    shutdown_registry(impl_->registry);
     impl_->joined = true;
 }
 
