@@ -1,0 +1,92 @@
+# secs-sdk: ARM 交叉编译 SDK 镜像（内置 glibc 2.26 sysroot + secs_lib + glibc_compat）
+#
+# 用法（构建镜像）：
+#   SYSROOT_SRC=/path/to/recipe-sysroot SECS_LIB_SRC=/path/to/secs_lib bash docker/build-sdk-image.sh
+#
+# 用法（编译任意项目）：
+#   docker run --rm -t -v "$PWD:/work/src" -w /work/src secs-sdk:glibc226 secs-build
+
+FROM ubuntu:22.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    cmake \
+    ninja-build \
+    make \
+    git \
+    python3 \
+    pkg-config \
+    gcc-arm-linux-gnueabihf \
+    g++-arm-linux-gnueabihf \
+    binutils-arm-linux-gnueabihf \
+  && rm -rf /var/lib/apt/lists/*
+
+ENV SECS_SDK_ROOT=/opt/secs-sdk
+ENV SECS_SDK_SYSROOT=/opt/secs-sdk/sysroot
+ENV SECS_SDK_PREFIX=/opt/secs-sdk/arm-linux-gnueabihf
+ENV SECS_SDK_TOOLCHAIN=/opt/secs-sdk/toolchains/arm-linux-gnueabihf-glibc226.cmake
+
+WORKDIR /work/src
+
+# 由 build-sdk-image.sh 在 build context 根目录生成并提供：
+COPY sysroot.tar.gz /tmp/sysroot.tar.gz
+COPY secs_lib.tar.gz /tmp/secs_lib.tar.gz
+COPY sdk-assets/ /tmp/sdk-assets/
+
+RUN mkdir -p "${SECS_SDK_SYSROOT}" "${SECS_SDK_PREFIX}" "${SECS_SDK_ROOT}/toolchains" "${SECS_SDK_ROOT}/src" \
+  && tar -xzf /tmp/sysroot.tar.gz -C "${SECS_SDK_SYSROOT}" \
+  && test -f "${SECS_SDK_SYSROOT}/lib/libc.so.6" \
+  && mkdir -p "${SECS_SDK_ROOT}/src/secs_lib" \
+  && tar -xzf /tmp/secs_lib.tar.gz -C "${SECS_SDK_ROOT}/src/secs_lib" \
+  && test -f "${SECS_SDK_ROOT}/src/secs_lib/CMakeLists.txt" \
+  && cp -f /tmp/sdk-assets/toolchains/arm-linux-gnueabihf-glibc226.cmake "${SECS_SDK_TOOLCHAIN}" \
+  && cp -f /tmp/sdk-assets/src/glibc_compat.c "${SECS_SDK_ROOT}/src/glibc_compat.c" \
+  && rm -rf /tmp/sysroot.tar.gz /tmp/secs_lib.tar.gz
+
+# 1) 交叉编译 glibc_compat（提供 __libc_single_threaded weak）并安装为静态库
+RUN mkdir -p "${SECS_SDK_PREFIX}/lib" \
+  && arm-linux-gnueabihf-gcc -c -O2 -fno-pic -o /tmp/glibc_compat.o "${SECS_SDK_ROOT}/src/glibc_compat.c" \
+  && arm-linux-gnueabihf-ar rcs "${SECS_SDK_PREFIX}/lib/libsecs_glibc_compat.a" /tmp/glibc_compat.o \
+  && rm -f /tmp/glibc_compat.o
+
+# 2) 交叉编译并安装 secs_lib 到 SDK prefix（提供 find_package(secs CONFIG REQUIRED)）
+RUN set -eu; \
+    ASIO1="${SECS_SDK_ROOT}/src/secs_lib/third_party/asio/asio/include"; \
+    ASIO2="${SECS_SDK_ROOT}/src/secs_lib/third_party/asio/asio/asio/include"; \
+    if [ -f "${ASIO1}/asio.hpp" ] && [ -f "${ASIO1}/asio/awaitable.hpp" ]; then \
+      SECS_ASIO_ROOT="${ASIO1}"; \
+    elif [ -f "${ASIO2}/asio.hpp" ] && [ -f "${ASIO2}/asio/awaitable.hpp" ]; then \
+      SECS_ASIO_ROOT="${ASIO2}"; \
+    else \
+      echo "ERROR: Asio headers not found under secs_lib/third_party/asio" >&2; \
+      exit 1; \
+    fi; \
+    cmake -S "${SECS_SDK_ROOT}/src/secs_lib" -B /tmp/build-secs -G Ninja \
+    -DCMAKE_TOOLCHAIN_FILE="${SECS_SDK_TOOLCHAIN}" \
+    -DCMAKE_SYSROOT="${SECS_SDK_SYSROOT}" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX="${SECS_SDK_PREFIX}" \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DSECS_ENABLE_INSTALL=ON \
+    -DSECS_ENABLE_TESTS=OFF \
+    -DSECS_ENABLE_INTEGRATION_TESTS=OFF \
+    -DSECS_BUILD_EXAMPLES=OFF \
+    -DSECS_BUILD_BENCHMARKS=OFF \
+    -DSECS_ENABLE_WERROR=OFF \
+    -DSECS_FETCH_ASIO=OFF \
+    -DSECS_ASIO_ROOT="${SECS_ASIO_ROOT}" \
+    -DSECS_STATIC_CPP_RUNTIME=ON \
+  && cmake --build /tmp/build-secs --target install -v \
+  && rm -rf /tmp/build-secs
+
+# 3) 安装一个“胶水包”：secs_sdk（目标 secs_sdk::c_api = secs::c_api + glibc_compat）
+RUN mkdir -p "${SECS_SDK_PREFIX}/lib/cmake/secs_sdk" \
+  && cp -f /tmp/sdk-assets/cmake/secs_sdkConfig.cmake "${SECS_SDK_PREFIX}/lib/cmake/secs_sdk/secs_sdkConfig.cmake"
+
+# 4) 安装容器内统一入口脚本（避免每个项目都传 toolchain/sysroot/prefix）
+RUN install -m 0755 /tmp/sdk-assets/bin/secs-build /usr/local/bin/secs-build \
+  && rm -rf /tmp/sdk-assets
+CMD ["bash", "-lc", "echo 'SDK ready. Use: secs-build (mount your project to /work/src)'"]

@@ -30,8 +30,7 @@ using secs::core::errc;
 using secs::core::make_error_code;
 
 struct Options final {
-    std::string listen_address{"127.0.0.1:50061"};
-    std::uint16_t session_id{1};
+    std::string listen_address{"127.0.0.1:50061"}; std::uint16_t session_id{1};
 };
 
 bool parse_u16(std::string_view text, std::uint16_t &out) {
