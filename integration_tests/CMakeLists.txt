@@ -103,3 +103,20 @@ if(SECS_DOTNET_EXECUTABLE)
   set_tests_properties(integration_hsms_tcp_with_secs4net PROPERTIES SKIP_RETURN_CODE 77)
   set_tests_properties(integration_hsms_tcp_extended_with_secs4net PROPERTIES SKIP_RETURN_CODE 77)
 endif()
+
+find_program(SECS_CARGO_EXECUTABLE cargo)
+if(SECS_ENABLE_RPC AND SECS_CARGO_EXECUTABLE
+   AND TARGET secs-rpc-server AND TARGET test_rpc_hsms_peer)
+  add_test(NAME rpc_rust_tonic_interop
+    COMMAND ${CMAKE_COMMAND} -E env
+      CARGO_HOME=${PROJECT_BINARY_DIR}/cargo-home
+      CARGO_TARGET_DIR=${PROJECT_BINARY_DIR}/rust-rpc-target
+      ${SECS_CARGO_EXECUTABLE} run --locked --quiet
+      --manifest-path
+        ${CMAKE_CURRENT_SOURCE_DIR}/rpc/rust_tonic_client/Cargo.toml
+      --
+      --server $<TARGET_FILE:secs-rpc-server>
+      --peer $<TARGET_FILE:test_rpc_hsms_peer>
+  )
+  set_tests_properties(rpc_rust_tonic_interop PROPERTIES TIMEOUT 120)
+endif()

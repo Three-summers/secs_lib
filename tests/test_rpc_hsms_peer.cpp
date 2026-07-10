@@ -10,10 +10,12 @@
 #include <asio/io_context.hpp>
 #include <asio/ip/address.hpp>
 #include <asio/ip/tcp.hpp>
+#include <asio/steady_timer.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 
 #include <charconv>
+#include <chrono>
 #include <cstdint>
 #include <iostream>
 #include <optional>
@@ -30,7 +32,10 @@ using secs::core::errc;
 using secs::core::make_error_code;
 
 struct Options final {
-    std::string listen_address{"127.0.0.1:50061"}; std::uint16_t session_id{1};
+    std::string listen_address{"127.0.0.1:50061"};
+    std::uint16_t session_id{1};
+    std::uint32_t reply_delay_ms{0};
+    bool drop_s1f1{false};
 };
 
 bool parse_u16(std::string_view text, std::uint16_t &out) {
@@ -42,6 +47,18 @@ bool parse_u16(std::string_view text, std::uint16_t &out) {
         return false;
     }
     out = static_cast<std::uint16_t>(value);
+    return true;
+}
+
+bool parse_u32(std::string_view text, std::uint32_t &out) {
+    std::uint32_t value = 0;
+    const auto *begin = text.data();
+    const auto *end = text.data() + text.size();
+    const auto [ptr, ec] = std::from_chars(begin, end, value);
+    if (ec != std::errc{} || ptr != end) {
+        return false;
+    }
+    out = value;
     return true;
 }
 
@@ -74,8 +91,23 @@ std::optional<Options> parse_args(int argc, char **argv) {
             }
             continue;
         }
+        if (arg == "--reply-delay-ms") {
+            const char *value = need_value("--reply-delay-ms");
+            if (!value || !parse_u32(value, options.reply_delay_ms)) {
+                std::cerr << "invalid value for --reply-delay-ms\n";
+                return std::nullopt;
+            }
+            continue;
+        }
+        if (arg == "--drop-s1f1") {
+            options.drop_s1f1 = true;
+            continue;
+        }
         if (arg == "-h" || arg == "--help") {
-            std::cout << "usage: test_rpc_hsms_peer --listen <ip:port> [--session-id <u16>]\n";
+            std::cout
+                << "usage: test_rpc_hsms_peer --listen <ip:port> "
+                   "[--session-id <u16>] [--reply-delay-ms <u32>] "
+                   "[--drop-s1f1]\n";
             return std::nullopt;
         }
         std::cerr << "unknown option: " << arg << "\n";
@@ -108,7 +140,24 @@ parse_endpoint(std::string_view listen_address) {
 }
 
 asio::awaitable<secs::protocol::HandlerResult>
-handle_s1f1(const secs::protocol::DataMessage &message) {
+handle_s1f1(const secs::protocol::DataMessage &message,
+            std::uint32_t reply_delay_ms,
+            bool drop_s1f1) {
+    if (reply_delay_ms > 0) {
+        const auto ex = co_await asio::this_coro::executor;
+        asio::steady_timer timer(ex);
+        timer.expires_after(std::chrono::milliseconds{reply_delay_ms});
+        auto [delay_ec] =
+            co_await timer.async_wait(asio::as_tuple(asio::use_awaitable));
+        if (delay_ec) {
+            co_return secs::protocol::HandlerResult{delay_ec, {}};
+        }
+    }
+    if (drop_s1f1) {
+        co_return secs::protocol::HandlerResult{
+            std::make_error_code(std::errc::operation_canceled), {}};
+    }
+
     secs::ii::Item request_item = secs::ii::Item::list({});
     if (!message.body.empty()) {
         std::size_t consumed = 0;
@@ -172,7 +221,16 @@ asio::awaitable<int> run_peer(const Options &options) {
     protocol_options.poll_interval = std::chrono::milliseconds{10};
 
     secs::protocol::Session protocol(hsms, options.session_id, protocol_options);
-    protocol.router().set(1, 1, handle_s1f1);
+    protocol.router().set(
+        1,
+        1,
+        [reply_delay_ms = options.reply_delay_ms,
+         drop_s1f1 = options.drop_s1f1](
+            const secs::protocol::DataMessage &message)
+            -> asio::awaitable<secs::protocol::HandlerResult> {
+            co_return co_await handle_s1f1(
+                message, reply_delay_ms, drop_s1f1);
+        });
 
     std::cout << "secs-rpc-hsms-peer selected\n";
     std::cout.flush();

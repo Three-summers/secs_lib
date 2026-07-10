@@ -1177,7 +1177,13 @@ Session::State::async_run_active(const asio::ip::tcp::endpoint &endpoint) {
         // 等待断线，然后按 T5 退避后重连。
         (void)co_await disconnected_event_.async_wait(std::nullopt);
         if (!options_.auto_reconnect || stop_requested_) {
-            co_return std::error_code{};
+            if (stop_requested_) {
+                co_return std::error_code{};
+            }
+            if (disconnected_reason_.has_value()) {
+                co_return *disconnected_reason_;
+            }
+            co_return std::make_error_code(std::errc::connection_aborted);
         }
 
         Timer timer(executor_);
