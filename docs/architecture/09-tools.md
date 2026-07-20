@@ -7,6 +7,7 @@
 
 - **SML 检查器**：`secs-sml-check`（语法/引用/类型一致性）
 - **HSMS 录制与回放**：`secs-recorder` / `secs-player`（JSONL）
+- **HSMS 联调探针**：`secs-hsms-probe`（Active Client：连接设备、发测试报文、看收发）
 - **编译期资源嵌入**：`secs_embed_text_as_c()`（把 `.sml` 等文本编译进可执行文件）
 
 这些工具的目标是让你在联调、抓包回放、以及“部署环境不能持久化文件（重启清空）”的场景下，仍然能保持良好的开发体验。
@@ -22,13 +23,14 @@
 │  secs-sml-check  : 静态检查 SML 语法/语义（无需运行程序）            │
 │  secs-recorder   : HSMS 透明代理 + 录制 DataMessage 为 JSONL         │
 │  secs-player     : 读取 JSONL，连接 HSMS 并按策略回放/校验           │
+│  secs-hsms-probe : HSMS Active Client 联调（--connect + --send）     │
 │  embed_text_as_c : 构建期把文本文件转成 C 头文件（字符串常量）       │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
 构建目标（默认顶层工程开启）：
 
-- `secs-sml-check`、`secs-recorder`、`secs-player`：见 `tools/CMakeLists.txt`
+- `secs-sml-check`、`secs-recorder`、`secs-player`、`secs-hsms-probe`：见 `tools/CMakeLists.txt`
 - 资源嵌入函数：`cmake/EmbedTextAsC.cmake` + `tools/embed_text_as_c.py`
 
 ---
@@ -63,7 +65,54 @@ options:
 
 ---
 
-## 3. secs-recorder / secs-player：录制与回放（JSONL）
+## 3. secs-hsms-probe：HSMS Active Client 联调
+
+### 3.1 目的
+
+开发板通常作为 **HSMS Passive Server** 监听端口；PC 侧需要一个轻量 **Active Client** 用 IP 主动连接，用于：
+
+- 确认 TCP + SELECT 是否成功
+- 发送测试主消息（`--send s1f1` 等）并等待 secondary
+- 实时 dump 收发 DataMessage（SECS-II 解码 / 可选 hex）
+- 对板端主动上报且 `W=1` 的 primary 自动回空 secondary（避免板端 T3 超时）
+
+### 3.2 用法
+
+```
+secs-hsms-probe --connect <ip:port> [options]
+
+常用选项：
+  --session-id <u16>          默认 0x0001
+  --send <SxFy|s=N,f=M>       发送一条主消息（例如 s1f1）
+  --body-hex <hex>            body 字节（默认空）
+  --w <0|1>                   Wait bit（默认 1；W=1 等待 reply）
+  --timeout-ms <u32>          等 reply 超时（默认 5000）
+  --linktest                  SELECT 后先 LINKTEST
+  --hold                      发送后保持连接观察（无 --send 时默认 hold）
+  --auto-reply <empty|none>   入站 primary(W=1) 自动回包（默认 empty）
+  --record <file.jsonl>       录制 DataMessage
+  --hex / --no-secs2 / --color
+```
+
+示例：
+
+```bash
+# 连接开发板并持续观察
+./secs-hsms-probe --connect 192.168.1.50:5000 --session-id 0x0001
+
+# 发 S1F1(W=1)，等 S1F2 后退出
+./secs-hsms-probe --connect 192.168.1.50:5000 --send s1f1
+
+# 发自定义 body，单向发送后保持连接
+./secs-hsms-probe --connect 192.168.1.50:5000 --send s6f11 --w 0 \
+  --body-hex "..." --hold
+```
+
+实现：`tools/secs_hsms_probe.cpp`。
+
+---
+
+## 4. secs-recorder / secs-player：录制与回放（JSONL）
 
 ### 3.1 设计目标
 
@@ -105,7 +154,7 @@ options:
 
 ---
 
-## 4. 编译期资源嵌入：secs_embed_text_as_c()
+## 5. 编译期资源嵌入：secs_embed_text_as_c()
 
 ### 4.1 场景与动机
 
@@ -171,7 +220,7 @@ secs_embed_text_as_c(
 
 ---
 
-## 5. 工程化建议
+## 6. 工程化建议
 
 ### 5.1 CI 建议
 
