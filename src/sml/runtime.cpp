@@ -720,8 +720,9 @@ bool Runtime::match_condition_impl(const Condition &cond,
         return &item;
     };
 
-    // 旧语义：仅当指定了索引/下标时才对 `==<...>` 做比较。
-    if (has_selection && cond.expected) {
+    // 当 cond.expected 存在时即与选中元素做比较；未指定 index/list_path 时
+    // select_elem() 返回根 item，因此 `==<...>` 直接比对整个消息体也生效。
+    if (cond.expected) {
         const ii::Item *elem = select_elem();
         if (!elem) {
             return false;

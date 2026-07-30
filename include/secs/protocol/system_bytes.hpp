@@ -2,7 +2,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <limits>
 #include <mutex>
 #include <system_error>
@@ -11,14 +10,16 @@
 namespace secs::protocol {
 
 /**
- * @brief SystemBytes 分配器：负责唯一性、在用追踪、释放重用与 wrap-around
- * 处理。
+ * @brief SystemBytes 分配器：负责唯一性、在用追踪与 wrap-around 处理。
  *
  * 说明：
  * - SystemBytes 在 HSMS/SECS-I 中用于请求-响应关联（response 回显 request 的
  * SystemBytes）。
  * - 本分配器仅保证“本端发出的消息”在 in_use
  * 集合中的唯一性；不尝试与对端全局去重。
+ * - 分配采用单调递增计数器；释放的值不会被立即复用，只有计数器回绕一整圈
+ * 后才可能再次分配。这样 T3 超时后释放的 SystemBytes 不会立刻分配给下一个
+ * 请求（常见于同 S/F 重试），避免迟到的旧应答被错配到新请求。
  * - 默认假设在同一执行器/线程语境下使用；若跨线程使用，本类内部使用 mutex
  * 保护数据结构。
  */
@@ -62,7 +63,6 @@ private:
     mutable std::mutex mu_{};
     std::uint32_t next_{1U};
     std::uint32_t max_{std::numeric_limits<std::uint32_t>::max()};
-    std::deque<std::uint32_t> free_{};
     std::unordered_set<std::uint32_t> in_use_{};
 };
 

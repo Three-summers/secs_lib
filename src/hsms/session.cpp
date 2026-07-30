@@ -474,7 +474,11 @@ void Session::State::on_disconnected_(std::error_code reason) noexcept {
     selected_event_.reset();
     inbound_event_.cancel();
     inbound_event_.reset();
-    reader_running_ = false;
+    // reader_running_ 不能在这里设 false —— reader_loop_ 可能还挂在
+    // async_read_message 上（connection_ 尚未恢复到发出错误），立即清零
+    // 会让下一个 async_open_* 跳过"等待旧协程退出"的检查，导致 zombie
+    // reader 在恢复时 cancel 或关闭新的 connection。
+    // reader_running_ 仅由 reader_loop_ 自行在退出时设为 false。
     disconnected_event_.set();
 
     for (auto &[_, pending] : pending_) {
@@ -1045,15 +1049,18 @@ Session::State::async_open_active(Connection connection) {
                         options_.session_id);
 
     if (reader_running_) {
-        // 若旧连接的 reader_loop_ 仍在跑，先关闭旧连接并等待其退出，避免两个
-        // reader 同时读不同连接造成状态混乱。
+        // 若旧连接的 reader_loop_ 仍在跑，先关闭旧连接并等待 reader 协程
+        // 真正退出，避免两个 reader 同时读不同连接造成状态混乱。
         (void)co_await connection_.async_close();
-        (void)co_await disconnected_event_.async_wait(options_.t6);
+        auto wait_ec = co_await reader_stopped_event_.async_wait(options_.t6);
+        if (wait_ec) {
+            co_return wait_ec;
+        }
     }
 
     connection_ = std::move(connection);
     reset_state_();
-
+    stop_requested_ = false;
     start_reader_();
 
     Message req =
@@ -1127,13 +1134,16 @@ Session::State::async_open_passive(Connection connection) {
                         options_.session_id);
 
     if (reader_running_) {
-        // 同主动端：确保不会有“两个 reader_loop_ 同时存在”。
         (void)co_await connection_.async_close();
-        (void)co_await disconnected_event_.async_wait(options_.t6);
+        auto wait_ec = co_await reader_stopped_event_.async_wait(options_.t6);
+        if (wait_ec) {
+            co_return wait_ec;
+        }
     }
 
     connection_ = std::move(connection);
     reset_state_();
+    stop_requested_ = false;
     start_reader_();
 
     auto ec = co_await selected_event_.async_wait(options_.t7);

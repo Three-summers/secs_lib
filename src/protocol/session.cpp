@@ -400,10 +400,9 @@ void Session::State::stop() noexcept {
             self->stop_requested_ = true;
             self->cancel_all_pending_(make_error_code(errc::cancelled));
 
-            // HSMS 后端：主动取消底层阻塞读，避免依赖 poll_interval 轮询退出。
-            if (self->backend_ == Backend::hsms && self->hsms_) {
-                self->hsms_->stop();
-            }
+            // 不调用 hsms_->stop()：protocol::Session 只是 hsms::Session
+            // 的一个用户，不应永久停用底层传输。run loop 在下一轮 poll
+            // 时检查 stop_requested_ 自行退出（最迟 poll_interval 后）。
         });
     } catch (...) {
         // best-effort：dispatch/post 失败通常意味着资源不足，此处不抛异常。
@@ -436,14 +435,18 @@ asio::awaitable<void> Session::State::async_run_impl_() {
         ~Reset() { self->run_loop_active_ = false; }
     } reset{this};
 
-    // HSMS：stop() 会主动取消底层读，因此 run loop 可使用“无超时等待”，避免空闲轮询。
-    // SECS-I：底层 Link/StateMachine 当前不支持跨线程 cancel，因此仍保留 poll_interval。
-    const auto timeout =
-        (backend_ == Backend::hsms) ? std::nullopt
-                                    : normalize_timeout(options_.poll_interval);
+    // 两种后端均使用 poll_interval 轮询超时：stop() 不会主动取消底层传输的
+    // 阻塞读（protocol::Session 只是底层传输的一个用户，不应停用它），run
+    // loop 依靠周期性超时唤醒检查 stop_requested_ 后退出。
+    const auto timeout = normalize_timeout(options_.poll_interval);
 
     while (!stop_requested_) {
         auto [ec, msg] = co_await async_receive_message_(timeout);
+        if (stop_requested_) {
+            // stop() 发生在本轮等待期间：直接退出，不再把刚收到的消息派发给
+            // handler（挂起请求已在 stop() 中统一取消）。
+            break;
+        }
         if (ec == make_error_code(errc::timeout)) {
             continue;
         }
@@ -1059,6 +1062,46 @@ asio::awaitable<void> Session::State::handle_inbound_(DataMessage msg) {
                         msg.w_bit ? 1 : 0,
                         msg.system_bytes,
                         msg.body.size());
+    // HSMS 全双工后端：将 handler 移到独立协程，避免 handler 内调用
+    // async_request 阻塞整个 receive loop（自死锁直到 T3 超时）。
+    // SECS1 半双工后端保持内联调用，避免在发送/接收竞争半双工链路。
+    if (backend_ == Backend::hsms) {
+        auto self = shared_from_this();
+        asio::co_spawn(
+            executor_,
+            [handler = std::move(handler),
+             msg = std::move(msg),
+             self]() mutable -> asio::awaitable<void> {
+                auto [ec, rsp_body] = co_await handler(msg);
+                if (ec) {
+                    SPDLOG_LOGGER_DEBUG(
+                        secs::core::spdlog_logger_raw(),
+                        "protocol handler error: S{}F{} sb={} ec={}",
+                        static_cast<int>(msg.stream),
+                        static_cast<int>(msg.function),
+                        msg.system_bytes,
+                        ec.value());
+                    co_return;
+                }
+                if (!msg.w_bit) {
+                    co_return;
+                }
+                if (!can_compute_secondary_function(msg.function)) {
+                    co_return;
+                }
+                DataMessage rsp{};
+                rsp.stream = msg.stream;
+                rsp.function = secondary_function(msg.function);
+                rsp.w_bit = false;
+                rsp.system_bytes = msg.system_bytes;
+                rsp.body = std::move(rsp_body);
+                (void)co_await self->async_send_message_(rsp);
+            },
+            asio::detached);
+        co_return;
+    }
+
+    // SECS1 路径：保持内联调用（半双工链路不能并发）。
     auto [ec, rsp_body] = co_await handler(msg);
     if (ec) {
         SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),

@@ -225,13 +225,19 @@ private:
     std::size_t pos_{0};
 };
 
-std::error_code encode_item(const Item &item, SpanWriter &w) noexcept;
+// 编码侧递归深度上限：仅作为栈保护（解码侧由 DecodeLimits::max_depth 控制，
+// 这里取一个远大于常规配置的固定值，避免程序化构造的深层嵌套 List 递归爆栈）。
+constexpr std::size_t kMaxEncodeDepth = 1024;
+
 std::error_code
-decode_item(SpanReader &r,
-            Item &out,
-            std::size_t depth,
-            DecodeBudget &budget,
-            const DecodeLimits &limits) noexcept;
+encode_item(const Item &item, SpanWriter &w, std::size_t depth) noexcept;
+// 注意：decode 侧的内部 helper 不能标 noexcept —— 它们会做抛出型分配
+// （vector/string），bad_alloc 需要传播到 decode_one 的 catch 转成错误码。
+std::error_code decode_item(SpanReader &r,
+                            Item &out,
+                            std::size_t depth,
+                            DecodeBudget &budget,
+                            const DecodeLimits &limits);
 
 std::error_code encode_header_and_length(format_code code,
                                          std::uint32_t length,
@@ -301,7 +307,11 @@ std::error_code numeric_payload_length(std::size_t count,
 }
 
 std::error_code encoded_size_impl(const Item &item,
-                                  std::size_t &out_size) noexcept {
+                                  std::size_t &out_size,
+                                  std::size_t depth) noexcept {
+    if (depth > kMaxEncodeDepth) {
+        return make_error_code(errc::invalid_header);
+    }
     std::size_t payload_size = 0;
     std::uint32_t length_value = 0;
 
@@ -315,7 +325,8 @@ std::error_code encoded_size_impl(const Item &item,
                 length_value = static_cast<std::uint32_t>(v.size());
                 for (const auto &child : v) {
                     std::size_t child_size = 0;
-                    auto child_ec = encoded_size_impl(child, child_size);
+                    auto child_ec =
+                        encoded_size_impl(child, child_size, depth + 1);
                     if (child_ec) {
                         return child_ec;
                     }
@@ -446,7 +457,8 @@ std::error_code encoded_size_impl(const Item &item,
     return {};
 }
 
-std::error_code encode_payload(const Item &item, SpanWriter &w) noexcept {
+std::error_code
+encode_payload(const Item &item, SpanWriter &w, std::size_t depth) noexcept {
     return std::visit(
         [&](const auto &v) -> std::error_code {
             using T = std::decay_t<decltype(v)>;
@@ -454,7 +466,7 @@ std::error_code encode_payload(const Item &item, SpanWriter &w) noexcept {
                 // List 的 Length
                 // 表示“子元素个数”，因此这里直接递归编码每个子元素。
                 for (const auto &child : v) {
-                    auto ec = encode_item(child, w);
+                    auto ec = encode_item(child, w, depth + 1);
                     if (ec) {
                         return ec;
                     }
@@ -569,7 +581,11 @@ std::error_code encode_payload(const Item &item, SpanWriter &w) noexcept {
         item.storage());
 }
 
-std::error_code encode_item(const Item &item, SpanWriter &w) noexcept {
+std::error_code
+encode_item(const Item &item, SpanWriter &w, std::size_t depth) noexcept {
+    if (depth > kMaxEncodeDepth) {
+        return make_error_code(errc::invalid_header);
+    }
     const auto code = item_code(item);
 
     std::uint32_t length_value = 0;
@@ -643,7 +659,7 @@ std::error_code encode_item(const Item &item, SpanWriter &w) noexcept {
     if (ec) {
         return ec;
     }
-    return encode_payload(item, w);
+    return encode_payload(item, w, depth);
 }
 
 std::optional<format_code> format_code_from_bits(std::uint8_t bits) noexcept {
@@ -678,9 +694,8 @@ UInt read_be_uint(bytes_view payload, std::size_t offset) noexcept {
 }
 
 template <class Unsigned>
-std::error_code
-decode_unsigned_vector(bytes_view payload,
-                       std::vector<Unsigned> &out_vec) noexcept {
+std::error_code decode_unsigned_vector(bytes_view payload,
+                                       std::vector<Unsigned> &out_vec) {
     if (payload.size() % sizeof(Unsigned) != 0) {
         return make_error_code(errc::length_mismatch);
     }
@@ -696,7 +711,7 @@ decode_unsigned_vector(bytes_view payload,
 
 template <class Signed, class Unsigned>
 std::error_code decode_signed_vector(bytes_view payload,
-                                     std::vector<Signed> &out_vec) noexcept {
+                                     std::vector<Signed> &out_vec) {
     static_assert(sizeof(Signed) == sizeof(Unsigned));
     if (payload.size() % sizeof(Unsigned) != 0) {
         return make_error_code(errc::length_mismatch);
@@ -711,12 +726,11 @@ std::error_code decode_signed_vector(bytes_view payload,
     return {};
 }
 
-std::error_code
-decode_item(SpanReader &r,
-            Item &out,
-            std::size_t depth,
-            DecodeBudget &budget,
-            const DecodeLimits &limits) noexcept {
+std::error_code decode_item(SpanReader &r,
+                            Item &out,
+                            std::size_t depth,
+                            DecodeBudget &budget,
+                            const DecodeLimits &limits) {
     if (depth > limits.max_depth) {
         return make_error_code(errc::invalid_header);
     }
@@ -764,7 +778,10 @@ decode_item(SpanReader &r,
             return make_error_code(errc::total_budget_exceeded);
         }
         List items;
-        items.reserve(length);
+        // reserve 上限用剩余字节数约束（每个子项至少 2 字节：格式字节 + 1
+        // 个长度字节），避免恶意头部宣称超大 count 触发放大预分配。
+        items.reserve(std::min<std::size_t>(
+            length, r.remaining() / 2 + 1));
         for (std::uint32_t i = 0; i < length; ++i) {
             // Item 禁止默认构造：这里用一个占位值承接递归输出，随后会被
             // decode_item 覆盖。
@@ -933,7 +950,7 @@ std::error_code make_error_code(errc e) noexcept {
 }
 
 std::error_code encoded_size(const Item &item, std::size_t &out_size) noexcept {
-    return encoded_size_impl(item, out_size);
+    return encoded_size_impl(item, out_size, 0);
 }
 
 std::error_code
@@ -941,7 +958,7 @@ encode_to_impl_(mutable_bytes_view out,
                 const Item &item,
                 std::size_t &written) noexcept {
     SpanWriter w(out);
-    auto ec = encode_item(item, w);
+    auto ec = encode_item(item, w, 0);
     written = w.written();
     return ec;
 }
@@ -966,7 +983,6 @@ std::error_code encode(const Item &item, std::vector<byte> &out) noexcept {
     // - encode_to 会写入固定 span，避免反复 push_back 带来的 realloc/拷贝
     // - 失败时回滚 out 的 size，保证调用方看到的 out 仍是“原子追加”的结果
     try {
-        out.reserve(offset + size);
         out.resize(offset + size);
     } catch (const std::bad_alloc &) {
         secs::core::metrics_counter("secs.ii.encode.errors", 1);

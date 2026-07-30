@@ -154,8 +154,9 @@ std::error_code parse_hex(std::string_view text,
             continue;
         }
 
-        // 支持可选 0x/0X 前缀：忽略 '0' 后紧跟的 'x'/'X'。
-        if (c == '0' && (i + 1) < text.size()) {
+        // 支持可选 0x/0X 前缀：仅当位于字节边界（无未配对高半字节）时才识别，
+        // 避免 mid-byte 的 "0x" 被误吞为前缀（例如 "a0xb" 应报错而非解析为 0xAB）。
+        if (hi_nibble < 0 && c == '0' && (i + 1) < text.size()) {
             const auto n = static_cast<unsigned char>(text[i + 1]);
             if (n == 'x' || n == 'X') {
                 ++i;

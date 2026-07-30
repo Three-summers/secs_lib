@@ -221,7 +221,11 @@ void test_system_bytes_unique_release_reuse_and_wrap() {
 
     std::uint32_t b2 = 0;
     TEST_EXPECT_OK(sb.allocate(b2));
-    TEST_EXPECT_EQ(b2, b); // 释放后应可重用
+    // 释放的值不会被立即复用（防止 T3 超时后的重试请求拿到相同
+    // SystemBytes，被迟到的旧应答错配）；分配继续走单调递增计数器。
+    TEST_EXPECT(b2 != b);
+    TEST_EXPECT(b2 != a);
+    TEST_EXPECT(b2 != c);
     TEST_EXPECT_EQ(sb.in_use_count(), 3U);
 
     sb.release(a);
@@ -269,7 +273,8 @@ void test_system_bytes_exhaustion_small_space() {
     TEST_EXPECT_EQ(sb.allocate(d), make_error_code(errc::buffer_overflow));
     TEST_EXPECT_EQ(sb.in_use_count(), 3U);
 
-    // 释放后应能复用。
+    // 释放后计数器回绕恰好分配到释放的值（不是即时复用，是计数器
+    // 绕满一圈后的自然回归）。
     sb.release(b);
     std::uint32_t b2 = 0;
     TEST_EXPECT_OK(sb.allocate(b2));
@@ -1304,6 +1309,121 @@ void test_hsms_protocol_run_without_poll_interval() {
     TEST_EXPECT(done);
 }
 
+void test_hsms_protocol_stop_exits_run_loop_and_keeps_transport() {
+    // 回归测试：protocol::Session::stop() 不调用 hsms_->stop()（不停用共享的
+    // 底层传输），run loop 依靠 poll_interval 轮询退出。验证：
+    // 1) stop() 后 async_run 在有限时间内返回（此前 HSMS 后端用“无超时等待”，
+    //    stop 后 run loop 会一直挂在 async_receive_data 上收不到唤醒）；
+    // 2) 底层 hsms 会话仍保持 selected，且此后入站消息可由 hsms 层直接接收
+    //    （run loop 已退出，不再抢占消费）。
+    asio::io_context ioc;
+    const std::uint16_t session_id = 0x101A;
+
+    secs::core::Event server_opened{};
+    secs::core::Event client_opened{};
+    secs::core::Event run_done{};
+
+    secs::hsms::Session server(ioc.get_executor(),
+                               secs::hsms::SessionOptions{
+                                   .session_id = session_id,
+                                   .t3 = 200ms,
+                                   .t5 = 10ms,
+                                   .t6 = 50ms,
+                                   .t7 = 50ms,
+                                   .t8 = 0ms,
+                                   .linktest_interval = 0ms,
+                                   .auto_reconnect = false,
+                               });
+
+    secs::hsms::Session client(ioc.get_executor(),
+                               secs::hsms::SessionOptions{
+                                   .session_id = session_id,
+                                   .t3 = 200ms,
+                                   .t5 = 10ms,
+                                   .t6 = 50ms,
+                                   .t7 = 50ms,
+                                   .t8 = 0ms,
+                                   .linktest_interval = 0ms,
+                                   .auto_reconnect = false,
+                               });
+
+    Session proto_client(
+        client, session_id, SessionOptions{.t3 = 200ms, .poll_interval = 1ms});
+
+    auto duplex = make_memory_duplex(ioc.get_executor());
+    Connection server_conn(std::move(duplex.server_stream));
+    Connection client_conn(std::move(duplex.client_stream));
+
+    asio::co_spawn(
+        ioc,
+        [&, server_conn = std::move(server_conn)]() mutable
+        -> asio::awaitable<void> {
+            auto ec =
+                co_await server.async_open_passive(std::move(server_conn));
+            TEST_EXPECT_OK(ec);
+            server_opened.set();
+        },
+        asio::detached);
+
+    asio::co_spawn(
+        ioc,
+        [&, client_conn = std::move(client_conn)]() mutable
+        -> asio::awaitable<void> {
+            auto ec = co_await client.async_open_active(std::move(client_conn));
+            TEST_EXPECT_OK(ec);
+            client_opened.set();
+        },
+        asio::detached);
+
+    std::atomic<bool> done{false};
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            TEST_EXPECT_OK(co_await server_opened.async_wait(200ms));
+            TEST_EXPECT_OK(co_await client_opened.async_wait(200ms));
+
+            asio::co_spawn(
+                ioc,
+                [&]() -> asio::awaitable<void> {
+                    co_await proto_client.async_run();
+                    run_done.set();
+                },
+                asio::detached);
+
+            // 等 run loop 真正进入接收等待后再 stop，确保覆盖“stop 时
+            // run loop 正挂在底层读上”的路径。
+            asio::steady_timer t(ioc.get_executor());
+            t.expires_after(20ms);
+            (void)co_await t.async_wait(asio::as_tuple(asio::use_awaitable));
+
+            proto_client.stop();
+            // run loop 应在 poll_interval 量级内退出（上限放宽到 500ms）。
+            TEST_EXPECT_OK(co_await run_done.async_wait(500ms));
+
+            // 底层传输未被停用：仍处于 selected。
+            TEST_EXPECT(client.state() == secs::hsms::SessionState::selected);
+
+            // run loop 已退出：对端此后发来的消息由 hsms 层直接接收。
+            const auto probe = secs::hsms::make_data_message(
+                session_id, 5, 1, false, server.allocate_system_bytes(),
+                as_bytes("probe"));
+            TEST_EXPECT_OK(co_await server.async_send(probe));
+
+            auto [rx_ec, rx] = co_await client.async_receive_data(200ms);
+            TEST_EXPECT_OK(rx_ec);
+            TEST_EXPECT_EQ(rx.stream(), 5u);
+            TEST_EXPECT_EQ(rx.function(), 1u);
+
+            client.stop();
+            server.stop();
+            done = true;
+        },
+        asio::detached);
+
+    ioc.run();
+    TEST_EXPECT(done);
+}
+
 void test_hsms_protocol_echo_1000() {
     asio::io_context ioc;
     const std::uint16_t session_id = 0x1001;
@@ -2315,6 +2435,7 @@ int main() {
     test_hsms_protocol_reconnect_after_separate_keeps_run_loop_alive();
     test_hsms_protocol_reconnect_after_deselect_and_separate_keeps_run_loop_alive();
     test_hsms_protocol_run_without_poll_interval();
+    test_hsms_protocol_stop_exits_run_loop_and_keeps_transport();
     test_hsms_protocol_echo_1000();
     test_hsms_protocol_both_sides_can_initiate_primary();
     test_hsms_protocol_t3_timeout();

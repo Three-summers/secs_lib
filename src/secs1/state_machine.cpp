@@ -83,6 +83,14 @@ StateMachine::async_send(const Header &header, secs::core::bytes_view body) {
 
     // SECS-I 规定单个块的数据最大 244 字节：这里把 body 切分并编码成多个帧。
     auto frames = fragment_message(header, body);
+    if (!body.empty() && frames.empty()) {
+        SPDLOG_LOGGER_DEBUG(secs::core::spdlog_logger_raw(),
+                            "secs1 async_send fragment_message failed:"
+                            " device_id={}",
+                            header.device_id);
+        state_ = State::idle;
+        co_return make_error_code(secs::core::errc::invalid_argument);
+    }
 
     for (const auto &frame : frames) {
         // 注意：兼容更多 SECS-I 实现，这里按“每个块都执行一次 ENQ/EOT 握手”的方式
@@ -124,12 +132,14 @@ StateMachine::async_send(const Header &header, secs::core::bytes_view body) {
                 state_ = State::idle;
                 co_return rec_ec;
             }
-            state_ = State::idle;
+            // 非 EOT/ACK/NAK 的意外字节（线路噪声或迟到的旧控制字节）：
+            // 按 E4 语义视为本次尝试失败，依靠外层 retry_limit 循环重试。
             SPDLOG_LOGGER_DEBUG(
                 secs::core::spdlog_logger_raw(),
-                "secs1 async_send handshake protocol_error (resp=0x{:02X})",
+                "secs1 async_send handshake unexpected byte (resp=0x{:02X}),"
+                " retrying",
                 static_cast<unsigned int>(resp));
-            co_return make_error_code(errc::protocol_error);
+            continue;
         }
 
         if (!handshake_ok) {
@@ -184,12 +194,20 @@ StateMachine::async_send(const Header &header, secs::core::bytes_view body) {
                 state_ = State::idle;
                 co_return rec_ec;
             }
-            state_ = State::idle;
+            // 收到非 ACK/NAK 字节（例如线路噪声、迟到的上一轮 EOT/ENQ）：
+            // 按 E4 语义视为本次尝试失败，重试直至 RTY 上限。
+            ++attempts;
             SPDLOG_LOGGER_DEBUG(
                 secs::core::spdlog_logger_raw(),
-                "secs1 async_send frame protocol_error (resp=0x{:02X})",
-                static_cast<unsigned int>(resp));
-            co_return make_error_code(errc::protocol_error);
+                "secs1 async_send frame unexpected byte (resp=0x{:02X}),"
+                " retry {}/{}",
+                static_cast<unsigned int>(resp),
+                attempts,
+                retry_limit_);
+            if (attempts >= retry_limit_) {
+                state_ = State::idle;
+                co_return make_error_code(errc::too_many_retries);
+            }
         }
     }
 
@@ -337,6 +355,7 @@ StateMachine::async_receive(std::optional<secs::core::duration> timeout) {
 
         const auto length = static_cast<std::size_t>(len_b);
         if (length < kHeaderSize || length > kMaxBlockLength) {
+            // 送 NAK 后再报错退出：对端可据此重新握手而不会因无响应而超时。
             (void)co_await async_send_control(kNak);
             in_flight_.clear();
             state_ = State::idle;
@@ -361,6 +380,9 @@ StateMachine::async_receive(std::optional<secs::core::duration> timeout) {
                     "secs1 async_receive frame byte read failed: ec={}({})",
                     b_ec.value(),
                     b_ec.message());
+                // T1 字符间超时或读错误：送 NAK 后再退出，对端知道该块失败
+                // 可重发，不会因本端静默而误判。
+                (void)co_await async_send_control(kNak);
                 in_flight_.clear();
                 state_ = State::idle;
                 co_return std::pair{b_ec, ReceivedMessage{}};

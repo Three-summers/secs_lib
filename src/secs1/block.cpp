@@ -203,7 +203,11 @@ fragment_message(Header base_header, secs::core::bytes_view payload) {
         base_header.block_number = 1;
         base_header.end_bit = true;
         out.emplace_back();
-        (void)encode_block(base_header, secs::core::bytes_view{}, out.back());
+        auto ec = encode_block(base_header, secs::core::bytes_view{}, out.back());
+        if (ec) {
+            out.clear();
+            return out;
+        }
         return out;
     }
 
@@ -220,7 +224,11 @@ fragment_message(Header base_header, secs::core::bytes_view payload) {
         hdr.end_bit = is_last;
 
         out.emplace_back();
-        (void)encode_block(hdr, payload.subspan(offset, chunk), out.back());
+        auto ec = encode_block(hdr, payload.subspan(offset, chunk), out.back());
+        if (ec) {
+            out.clear();
+            return out;
+        }
 
         offset += chunk;
         ++block_number;

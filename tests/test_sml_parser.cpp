@@ -1491,7 +1491,7 @@ void test_parse_sml_exercises_all_item_types() {
     /* 覆盖尽可能多的 Item 类型与语法分支 */
 
     all: S1F1 W
-    <L[0]
+    <L
       <A "hello">
       <A>
       <B 0x00 0x01 2 0xFF>

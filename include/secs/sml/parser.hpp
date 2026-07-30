@@ -18,6 +18,7 @@ enum class parser_errc : int {
     invalid_stream_function = 5,
     unclosed_item = 6,
     invalid_condition = 7,
+    nesting_too_deep = 8,
 };
 
 const std::error_category &parser_error_category() noexcept;
@@ -90,6 +91,8 @@ private:
 
     std::vector<Token> tokens_;
     std::size_t current_{0};
+    // parse_item/parse_pattern_item 的递归嵌套深度（防御恶意深层嵌套导致爆栈）
+    std::size_t item_depth_{0};
 
     Document document_;
     std::error_code ec_;

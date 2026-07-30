@@ -49,6 +49,8 @@ public:
             return "unclosed item";
         case parser_errc::invalid_condition:
             return "invalid condition";
+        case parser_errc::nesting_too_deep:
+            return "item nesting too deep";
         }
         return "unknown parser error";
     }
@@ -85,7 +87,11 @@ bool parse_sf_string(std::string_view text,
     auto [ptr2, ec2] =
         std::from_chars(func_str.data(), func_str.data() + func_str.size(), f);
 
-    if (ec1 != std::errc{} || ec2 != std::errc{})
+    // ptr 必须消费到字符串末尾：拒绝 “S1F13x” 这类带尾随垃圾的写法，
+    // 与 runtime/sml_check 的同名实现保持一致。
+    if (ec1 != std::errc{} || ec2 != std::errc{} ||
+        ptr1 != stream_str.data() + stream_str.size() ||
+        ptr2 != func_str.data() + func_str.size())
         return false;
     if (s < 0 || s > 127 || f < 0 || f > 255)
         return false;
@@ -178,10 +184,27 @@ std::error_code make_error_code(parser_errc e) noexcept {
 }
 
 Parser::Parser(std::vector<Token> tokens) noexcept
-    : tokens_(std::move(tokens)) {}
+    : tokens_(std::move(tokens)) {
+    // 防御外部直接构造 Parser 时传入空 token 序列或缺少 Eof 结尾：
+    // peek() 无条件读 tokens_[current_]，缺少 Eof 会越界。
+    try {
+        if (tokens_.empty() || tokens_.back().type != TokenType::Eof) {
+            Token eof{};
+            eof.type = TokenType::Eof;
+            tokens_.push_back(std::move(eof));
+        }
+    } catch (...) {
+        tokens_.clear();
+        had_error_ = true;
+        ec_ = make_error_code(parser_errc::unexpected_token);
+        error_message_ = "out of memory while preparing token stream";
+    }
+}
 
 ParseResult Parser::parse() noexcept {
-    while (!at_end() && !had_error_) {
+    // 先判 had_error_：构造函数的 OOM 兜底路径可能留下空 token 序列，
+    // 此时不能再调用 at_end()/peek()。
+    while (!had_error_ && !at_end()) {
         parse_statement();
     }
 
@@ -394,7 +417,25 @@ bool Parser::parse_every_rule() noexcept {
     return true;
 }
 
+namespace {
+// parse_item/parse_pattern_item 的最大递归嵌套深度：远大于实际 SML
+// 的合理嵌套（ii 解码默认 max_depth=64），仅用于防御恶意输入爆栈。
+constexpr std::size_t kMaxItemNestingDepth = 256;
+
+struct ItemDepthGuard final {
+    std::size_t &depth;
+    ~ItemDepthGuard() { --depth; }
+};
+} // namespace
+
 std::optional<TemplateItem> Parser::parse_item() noexcept {
+    if (item_depth_ >= kMaxItemNestingDepth) {
+        error(parser_errc::nesting_too_deep, "item nesting too deep");
+        return std::nullopt;
+    }
+    ++item_depth_;
+    ItemDepthGuard depth_guard{item_depth_};
+
     if (!match(TokenType::LAngle)) {
         error(parser_errc::expected_item, "expected '<'");
         return std::nullopt;
@@ -452,12 +493,20 @@ std::optional<TemplateItem> Parser::parse_item() noexcept {
 std::optional<TemplateItem> Parser::parse_list() noexcept {
     advance(); // L（列表）
 
-    // 可选的 [n] 大小提示
+    // 可选的 [n] 大小提示：解析并与实际子项数量做一致性校验
+    //（与 parse_pattern_list 保持一致，拒绝括号内的垃圾 token）。
+    std::optional<std::size_t> size_hint;
     if (match(TokenType::LBracket)) {
-        // 跳过大小提示
-        while (!check(TokenType::RBracket) && !at_end()) {
-            advance();
+        if (!check(TokenType::Integer)) {
+            error(parser_errc::expected_number, "expected list size in '[n]'");
+            return std::nullopt;
         }
+        const auto n = parse_uint64_literal(advance().value);
+        if (!n.has_value() || *n > std::numeric_limits<std::size_t>::max()) {
+            error(parser_errc::expected_number, "list size out of range");
+            return std::nullopt;
+        }
+        size_hint = static_cast<std::size_t>(*n);
         if (!match(TokenType::RBracket)) {
             error("expected ']'");
             return std::nullopt;
@@ -471,6 +520,12 @@ std::optional<TemplateItem> Parser::parse_list() noexcept {
             return std::nullopt;
         }
         items.push_back(std::move(*item));
+    }
+
+    if (size_hint.has_value() && *size_hint != items.size()) {
+        error(parser_errc::expected_number,
+              "list size hint does not match number of children");
+        return std::nullopt;
     }
 
     return TemplateItem(std::move(items));
@@ -834,6 +889,13 @@ std::optional<TemplateItem> Parser::parse_float(TokenType type) noexcept {
 }
 
 std::optional<PatternItem> Parser::parse_pattern_item() noexcept {
+    if (item_depth_ >= kMaxItemNestingDepth) {
+        error(parser_errc::nesting_too_deep, "pattern item nesting too deep");
+        return std::nullopt;
+    }
+    ++item_depth_;
+    ItemDepthGuard depth_guard{item_depth_};
+
     if (!match(TokenType::LAngle)) {
         error(parser_errc::expected_item, "expected '<' for pattern item");
         return std::nullopt;

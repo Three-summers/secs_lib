@@ -985,6 +985,15 @@ typedef struct secs_hsms_session_options {
     int passive_accept_select;
 } secs_hsms_session_options_t;
 
+/*
+ * 出参消息结构（接收/请求类函数的 out_msg/out_reply）的所有权与复用约定：
+ * - 函数只负责“填充”该结构体，不会释放其中已有的 body 指针（无法区分
+ *   未初始化的垃圾指针与上次调用留下的合法指针）；
+ * - 首次使用前必须零初始化（如 `secs_hsms_data_message_t msg = {0};`）；
+ * - 复用同一结构体接收多条消息时，每次用完必须先调用
+ *   secs_hsms_data_message_free() 释放旧 body，否则会内存泄漏；
+ * - free 函数对 NULL 安全，释放后会把 body/body_n 置零，结构体可直接复用。
+ */
 typedef struct secs_hsms_data_message {
     uint16_t session_id;
     uint8_t stream;
@@ -1086,12 +1095,16 @@ secs_hsms_session_send_data_with_system_bytes(secs_hsms_session_t *sess,
                                               const uint8_t *body_bytes,
                                               size_t body_n);
 
-/* 接收下一条 data message（阻塞式，timeout_ms=0 表示无限等待）。 */
+/* 接收下一条 data message（阻塞式，timeout_ms=0 表示无限等待）。
+ * out_msg 须零初始化；复用前须先调 secs_hsms_data_message_free()，
+ * 详见 secs_hsms_data_message_t 的所有权约定。 */
 secs_error_t secs_hsms_session_receive_data(secs_hsms_session_t *sess,
                                             uint32_t timeout_ms,
                                             secs_hsms_data_message_t *out_msg);
 
-/* 发送主消息（W=1）并等待回应（阻塞式，timeout_ms=0 表示使用会话默认 T3）。 */
+/* 发送主消息（W=1）并等待回应（阻塞式，timeout_ms=0 表示使用会话默认 T3）。
+ * out_reply 须零初始化；复用前须先调 secs_hsms_data_message_free()，
+ * 详见 secs_hsms_data_message_t 的所有权约定。 */
 secs_error_t
 secs_hsms_session_request_data(secs_hsms_session_t *sess,
                                uint8_t stream,
@@ -1146,6 +1159,12 @@ typedef struct secs_data_message_view {
     size_t body_n;
 } secs_data_message_view_t;
 
+/*
+ * 出参消息结构（协议层 request 类函数的 out_reply）：所有权与复用约定同
+ * secs_hsms_data_message_t —— 函数只填充、不释放旧 body；首次使用前必须
+ * 零初始化，复用前必须先调用 secs_data_message_free()（对 NULL 安全，
+ * 释放后 body/body_n 置零）。
+ */
 typedef struct secs_data_message {
     uint8_t stream;
     uint8_t function;
@@ -1263,7 +1282,9 @@ secs_error_t secs_protocol_session_set_ceid_dispatcher(secs_protocol_session_t *
  * - 发送 request（W=1）并等待 reply（secondary）；
  * - 若 body 非空，则解码为 Item 并按 list path 提取 CEID；
  * - verify_equal!=0 时：要求 request/reply 的 CEID 均存在且相等，否则返回 invalid_argument；
- * - 即便校验失败，只要收包成功，out_reply 仍会被填充（便于排查）。
+ * - 即便校验失败，只要收包成功，out_reply 仍会被填充（便于排查）；
+ * - out_reply 须零初始化、复用前先调 secs_data_message_free()（见
+ *   secs_data_message_t 的所有权约定）。
  */
 secs_error_t secs_protocol_session_request_with_ceid_list_path(
     secs_protocol_session_t *sess,
@@ -1450,6 +1471,9 @@ secs_error_t secs_protocol_session_send(secs_protocol_session_t *sess,
                                         const uint8_t *body_bytes,
                                         size_t body_n);
 
+/* 发送主消息（W=1）并等待回应（阻塞式，timeout_ms=0 表示使用会话默认 T3）。
+ * out_reply 须零初始化；复用前须先调 secs_data_message_free()，
+ * 详见 secs_data_message_t 的所有权约定。 */
 secs_error_t secs_protocol_session_request(secs_protocol_session_t *sess,
                                            uint8_t stream,
                                            uint8_t function,

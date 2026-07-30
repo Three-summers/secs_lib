@@ -602,7 +602,9 @@ fill_hsms_out_message(const secs::hsms::Message &msg,
     if (!out) {
         return c_api_err(SECS_C_API_INVALID_ARGUMENT);
     }
-    secs_hsms_data_message_free(out);
+    // 不调用 secs_hsms_data_message_free(out)：调用方传入的 out 可能未
+    // 经零初始化，out->body 为垃圾指针时 free 会崩溃。调用方应自行在首次
+    // 使用前零初始化，或在复用前调用 *_message_free 释放旧 body。
 
     out->session_id = msg.header.session_id;
     out->stream = msg.stream();
@@ -632,7 +634,8 @@ fill_protocol_out_message(const secs::protocol::DataMessage &msg,
     if (!out) {
         return c_api_err(SECS_C_API_INVALID_ARGUMENT);
     }
-    secs_data_message_free(out);
+    // 同上：不 free out，避免未初始化的 body 指针。
+
 
     out->stream = msg.stream;
     out->function = msg.function;

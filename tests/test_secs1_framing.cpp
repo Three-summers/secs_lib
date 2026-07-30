@@ -970,11 +970,11 @@ void test_state_machine_send_receive_single_block() {
     TEST_EXPECT_EQ(done.load(), 2);
 }
 
-void test_state_machine_send_unexpected_handshake_byte_protocol_error_scripted() {
+void test_state_machine_send_unexpected_handshake_byte_retries_to_limit_scripted() {
     asio::io_context ioc;
     ScriptedLink link(ioc.get_executor());
 
-    link.push_read_ok(0x00); // 非 EOT/ACK/NAK
+    link.push_read_ok(0x00); // 非 EOT/ACK/NAK → 计为重试，retry_limit=1
 
     StateMachine sm(link, std::nullopt, Timeouts{}, 1);
     auto h = sample_header();
@@ -991,9 +991,11 @@ void test_state_machine_send_unexpected_handshake_byte_protocol_error_scripted()
         asio::detached);
 
     ioc.run();
+    // 握手阶段收到非 EOT/ACK/NAK 的意外字节，按 E4 语义应重试而非报
+    // protocol_error。retry_limit=1 → 重试耗尽 → too_many_retries。
     TEST_EXPECT_EQ(
         result,
-        secs::secs1::make_error_code(secs::secs1::errc::protocol_error));
+        secs::secs1::make_error_code(secs::secs1::errc::too_many_retries));
 }
 
 void test_state_machine_send_propagates_handshake_read_error_scripted() {
@@ -1118,12 +1120,12 @@ void test_state_machine_send_accepts_ack_as_handshake_response_scripted() {
     TEST_EXPECT_EQ(link.writes()[0][0], secs::secs1::kEnq);
 }
 
-void test_state_machine_send_unexpected_ack_response_protocol_error_scripted() {
+void test_state_machine_send_unexpected_response_retries_to_limit_scripted() {
     asio::io_context ioc;
     ScriptedLink link(ioc.get_executor());
 
     link.push_read_ok(secs::secs1::kEot); // 握手完成
-    link.push_read_ok(secs::secs1::kEot); // 非 ACK/NAK
+    link.push_read_ok(secs::secs1::kEot); // 非 ACK/NAK → 计为重试，retry_limit=1
 
     StateMachine sm(link, std::nullopt, Timeouts{}, 1);
     auto h = sample_header();
@@ -1138,9 +1140,11 @@ void test_state_machine_send_unexpected_ack_response_protocol_error_scripted() {
         asio::detached);
 
     ioc.run();
+    // 收帧过程中收到非 ACK/NAK 的意外字节，按 E4 语义不应报 protocol_error
+    // 而应视为本次尝试失败，重试直至 RTY 上限。
     TEST_EXPECT_EQ(
         result,
-        secs::secs1::make_error_code(secs::secs1::errc::protocol_error));
+        secs::secs1::make_error_code(secs::secs1::errc::too_many_retries));
 }
 
 void test_state_machine_send_propagates_ack_read_error_scripted() {
@@ -1359,7 +1363,7 @@ void test_state_machine_receive_invalid_length_returns_invalid_block() {
             TEST_EXPECT_OK(ec0);
             TEST_EXPECT_EQ(ch0, secs::secs1::kEot);
 
-            // 非法长度（<10）
+            // 非法长度（<10）→ receiver 回 NAK + 返回 invalid_block
             TEST_EXPECT_OK(co_await write_byte(a, 0x09));
             auto [ec1, resp] = co_await a.async_read_byte(200ms);
             TEST_EXPECT_OK(ec1);
@@ -2354,6 +2358,7 @@ void test_t1_intercharacter_timeout() {
         ioc,
         [&]() -> asio::awaitable<void> {
             auto [ec, _] = co_await receiver.async_receive(500ms);
+            // T1 字符间超时：发送 NAK 让对端知道该帧失败后返回 timeout。
             TEST_EXPECT_EQ(ec, make_error_code(errc::timeout));
             done = true;
             watchdog.cancel();
@@ -2707,13 +2712,13 @@ int main() {
     test_memory_link_read_two_bytes_paths();
     test_timer_cancelled();
     test_state_machine_send_receive_single_block();
-    test_state_machine_send_unexpected_handshake_byte_protocol_error_scripted();
+    test_state_machine_send_unexpected_handshake_byte_retries_to_limit_scripted();
     test_state_machine_send_propagates_handshake_read_error_scripted();
     test_state_machine_send_propagates_handshake_write_error_scripted();
     test_state_machine_send_propagates_frame_write_error_scripted();
     test_state_machine_send_rejects_too_large_body_without_io();
     test_state_machine_send_accepts_ack_as_handshake_response_scripted();
-    test_state_machine_send_unexpected_ack_response_protocol_error_scripted();
+    test_state_machine_send_unexpected_response_retries_to_limit_scripted();
     test_state_machine_send_propagates_ack_read_error_scripted();
     test_state_machine_send_block_timeout_retries_to_too_many_retries_scripted();
     test_state_machine_send_when_not_idle_returns_invalid_argument();

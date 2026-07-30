@@ -37,10 +37,12 @@ struct SessionOptions final {
     // 达到上限时，async_request(HSMS) 会快速失败，避免 pending_ 无界增长。
     std::size_t max_pending_requests{256};
 
-    // 接收循环的轮询间隔（仅 async_run/SECS-I 后端使用）：
-    // - SECS-I 底层 Link/StateMachine 当前不支持主动 cancel，因此 async_run 需要
-    //   通过轮询超时来检查 stop() 并避免永久阻塞。
-    // - HSMS 后端由 stop() 主动取消底层读，不依赖轮询。
+    // 接收循环的轮询间隔（async_run 两种后端均使用）：
+    // - stop() 不会主动取消底层传输的阻塞读（protocol::Session 只是底层传输
+    //   的一个用户），async_run 通过轮询超时检查 stop()，最迟 poll_interval
+    //   后退出。
+    // - 置为 0 表示无限等待：stop() 后 run loop 要等到下一条入站消息或断线
+    //   才能退出，一般不建议。
     secs::core::duration poll_interval{std::chrono::milliseconds{10}};
 
     // 仅对 SECS-I 后端有效：R-bit（reverse_bit）方向位。

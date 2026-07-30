@@ -116,6 +116,12 @@ LexerResult Lexer::tokenize() noexcept {
         result.tokens.push_back(std::move(token));
     }
 
+    // 在产生 Eof token 前更新位置到当前扫描点（source 末尾），
+    // 否则 Eof 的 line/column 会滞留在最后一个合法 token 的开始位置，
+    // 导致解析器在 Eof 处报错时打印误导性位置信息。
+    token_start_ = current_;
+    token_line_ = line_;
+    token_column_ = column_;
     result.tokens.push_back(make_token(TokenType::Eof));
     return result;
 }

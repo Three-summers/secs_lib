@@ -20,9 +20,10 @@ constexpr std::uint32_t kMinSystemBytes = 1U;
 /*
  * SystemBytes 分配策略：
  * - 0 作为保留值永不分配（HSMS/SECS-I 的 SystemBytes 语义中通常不使用 0）
- * - 优先复用已释放的值（free_ 队列）
- * - 否则从 next_ 递增寻找未占用值，达到 max_ 后回绕到 1
- * - 用 in_use_ 集合防止“同一时刻重复分配”
+ * - 单调递增计数器分配，达到 max_ 后回绕到 1；用 in_use_ 集合跳过在用值
+ * - 释放的值不立即复用（只有计数器回绕一圈后才可能再次分配）：避免 T3
+ *   超时释放后，下一个请求（常见为同 S/F 重试）拿到相同 SystemBytes，
+ *   导致迟到的旧应答被错配到新请求
  */
 SystemBytes::SystemBytes(std::uint32_t initial,
                          std::uint32_t max_value) noexcept
@@ -52,14 +53,6 @@ std::uint32_t SystemBytes::next_candidate_() noexcept {
 std::error_code SystemBytes::allocate(std::uint32_t &out) noexcept {
     try {
         std::lock_guard lk(mu_);
-
-        if (!free_.empty()) {
-            const auto sb = free_.front();
-            free_.pop_front();
-            in_use_.insert(sb);
-            out = sb;
-            return std::error_code{};
-        }
 
         const auto max_usable = static_cast<std::size_t>(max_);
         if (in_use_.size() >= max_usable) {
@@ -91,15 +84,7 @@ void SystemBytes::release(std::uint32_t system_bytes) noexcept {
     }
     try {
         std::lock_guard lk(mu_);
-        if (in_use_.erase(system_bytes) == 0U) {
-            return;
-        }
-        try {
-            free_.push_back(system_bytes);
-        } catch (...) {
-            // 释放队列追加失败（例如 OOM）：允许丢弃该 system_bytes，避免 noexcept
-            // 路径触发 std::terminate。
-        }
+        in_use_.erase(system_bytes);
     } catch (...) {
         // 兜底：mutex/容器操作异常时吞掉，避免 noexcept 路径触发 std::terminate。
     }

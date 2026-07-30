@@ -394,7 +394,12 @@ void MessagePlayer::apply_realtime_delay_(std::uint64_t last_ts_us,
     if (scaled_us == 0) {
         return;
     }
-    std::this_thread::sleep_for(std::chrono::microseconds{scaled_us});
+    // 设上限防止恶意/损坏的录制文件导致无限时长 sleep（例如 ts_us 差值
+    // 接近 UINT64_MAX）。默认上限 60 秒，远大于任何合理录制间隔。
+    constexpr std::uint64_t kMaxGapUs =
+        static_cast<std::uint64_t>(60) * 1'000'000ULL;
+    const auto clamped_us = std::min(scaled_us, kMaxGapUs);
+    std::this_thread::sleep_for(std::chrono::microseconds{clamped_us});
 }
 
 std::optional<RecordedMessage> MessagePlayer::next_message() noexcept {
